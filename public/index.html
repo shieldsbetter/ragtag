@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ships</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070d; overflow: hidden; }
+  /* touch-action: none — otherwise the browser eats pinch and drag before we see them */
+  canvas { display: block; cursor: crosshair; touch-action: none; }
+  #hud {
+    position: fixed; top: 12px; left: 14px; color: #7fe8c8;
+    font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; text-shadow: 0 0 6px #0f6;
+    pointer-events: none; white-space: pre;
+  }
+</style>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<script src="/game.js" type="module"></script>
