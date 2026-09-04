@@ -67,8 +67,9 @@ const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 // restarted world repopulates the ground you have already walked over.
 // One roll per newly loaded chunk, and what it rolls for is a nest: a cache with three
 // fighters standing over it. Opposition and reward are the same thing to find, so there
-// is a reason to take the fight rather than to avoid it.
-const NEST_CHANCE = 0.5;
+// is a reason to take the fight rather than to avoid it. At even odds they were on top
+// of each other -- a chunk is only 900 units across.
+const NEST_CHANCE = 0.15;
 const NEST_GUARDS = 3, NEST_RING = 95;
 const ENEMY_CLEAR = 900;              // never spawn this close to any existing ship
 

@@ -57,7 +57,7 @@ only ever be a bonus on top of something that works everywhere.
   stands between it and its destination, which clears isolated obstacles. It will not
   solve a maze and is not meant to: it sits in the mouth of a concave pocket until the
   give-up rule stops it. Whether that is ever worth a real search is undecided.
-- Opposition. Each newly loaded chunk rolls once, at even odds, for a nest: an ore
+- Opposition. Each newly loaded chunk rolls once, at long odds, for a nest: an ore
   cache with three fighters standing over it. Exploring is what finds a fight, and the
   fight and the reward are the same thing to find. Fighters come at you and die rather
   than leaving hulks; whether they should ever patrol, or leave their cache, is
