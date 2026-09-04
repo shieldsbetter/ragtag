@@ -532,7 +532,7 @@ let openShip = null;
 const PANELS = [
   { title: 'Targeting', axis: ['near', 'far'],
     rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
-  { title: 'Repair', axis: ['wrecked', 'full'],
+  { title: 'Repair', axis: ['wrecked', 'full'], guns: true,
     // Everything left of this is a gun that is not there any more. It is worth seeing
     // where that ends, because the two halves of the axis mean different things: left of
     // it you are paying to bring a gun back, right of it you are topping one up.
@@ -548,6 +548,37 @@ const statusOf = s =>
 
 let builtKey = '';
 const statusEls = new Map();
+let gunEls = null, gunShip = null;    // the repair tab's live bars, one per mount
+
+// Port down the left, starboard down the right, fore to aft: the grid reads like the
+// ship does, so a bar and the gun it stands for are in the same place.
+function gunOrder() {
+  const cols = [[], []];
+  mounts.forEach((m, i) => cols[m.facing < 0 ? 0 : 1].push(i));
+  for (const c of cols) c.sort((a, b) => mounts[b].at[0] - mounts[a].at[0]);
+  const out = [];
+  for (let r = 0; r < Math.max(cols[0].length, cols[1].length); r++)
+    for (let c = 0; c < 2; c++) if (cols[c][r] !== undefined)
+      out.push({ i: cols[c][r], label: (c ? 'S' : 'P') + (r + 1) });
+  return out;
+}
+
+// A wreck is drawn in the ring's colours rather than the health ramp, and says so: a bar
+// creeping up from nothing means something different from a gun at 30%, and the ramp
+// would show them the same.
+function paintGuns(s) {
+  for (const g of gunEls) {
+    const hp = s.hp[g.i], wreck = hp <= 0;
+    const frac = wreck ? (hp + wreckDepth) / wreckDepth : hp / TURRET_HP;
+    g.cell.classList.toggle('wrecked', wreck);
+    g.fill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
+    g.fill.style.background = wreck ? (s.rp === g.i ? '#ffd76a' : '#ff9a6a')
+                                    : healthColor(Math.max(0, Math.min(1, frac)));
+    // A class, not the hidden attribute: the UA stylesheet's [hidden] rule does not
+    // reach into SVG, so the wrench stayed on every row while claiming to be hidden.
+    g.cell.classList.toggle('fixing', s.rp === g.i);
+  }
+}
 
 function syncDetails() {
   document.body.classList.toggle('has-selection', selection.size > 0);
@@ -567,10 +598,15 @@ function syncDetails() {
     const el = statusEls.get(s.id);
     if (el) el.textContent = statusOf(s);
   }
+  if (gunEls) {
+    const s = ships.find(q => q.id === gunShip);
+    if (s && s.hp) paintGuns(s);
+  }
 }
 
 function buildDetails(ships) {
   statusEls.clear();
+  gunEls = null; gunShip = null;
   detailsBody.textContent = '';
   for (const s of ships) {
     const row = document.createElement('div');
@@ -603,12 +639,35 @@ function buildDetails(ships) {
         tabs.append(b);
       });
       body.append(tabs);
+      if (PANELS[openTab].guns && mounts.length) body.append(gunGrid(s));
       for (const [kind, label] of PANELS[openTab].rows)
         body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
       row.append(body);
     }
     detailsBody.append(row);
   }
+}
+
+// The state the repair curve is acting on, in the same panel as the curve: which guns
+// are hurt, which are gone, and where the one repair point is going right now.
+const WRENCH = '<svg class="wrench" viewBox="0 0 12 12" aria-hidden="true"><path d="'
+  + 'M7.7 1.1a3.1 3.1 0 0 0-3.3 4.7L1.3 8.9a1.25 1.25 0 0 0 1.8 1.8l3.1-3.1a3.1 3.1 0 0 0 '
+  + '4.7-3.3L9 6.2 6.7 5.7 6.2 3.4z"/></svg>';
+
+function gunGrid(s) {
+  const wrap = document.createElement('div');
+  wrap.className = 'guns';
+  gunEls = [];
+  gunShip = s.id;
+  for (const { i, label } of gunOrder()) {
+    const cell = document.createElement('div');
+    cell.className = 'gun';
+    cell.innerHTML = `<div class="gl">${label}${WRENCH}</div>`
+      + `<div class="bar"><i></i><em>WRECK</em></div>`;
+    gunEls.push({ i, cell, fill: cell.querySelector('i') });
+    wrap.append(cell);
+  }
+  return wrap;
 }
 
 // One envelope: the axis across, priority up. A sequence of points with straight lines

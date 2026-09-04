@@ -65,6 +65,24 @@
   }
   #details .tabs button.on { color: #cfeee2; background: #0c1420; border-color: #2a4658; }
 
+  /* The guns, laid out the way they sit on the hull: port left, starboard right. */
+  #details .guns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 0 0 16px; }
+  #details .gun .gl { color: #4e8f7d; display: flex; align-items: center; gap: 4px; }
+  #details .gun .bar {
+    position: relative; height: 12px; margin-top: 3px; overflow: hidden;
+    background: #101c26; border: 1px solid #14232f;
+  }
+  #details .gun .bar i { display: block; height: 100%; }
+  #details .gun .bar em {
+    position: absolute; inset: 0; font: 8px/12px ui-monospace, Menlo, Consolas, monospace;
+    font-style: normal; letter-spacing: .2em; text-align: center; color: #ffe0d2; display: none;
+  }
+  #details .gun.wrecked .bar { background: rgba(120, 24, 38, .35); border-color: #8a3040; }
+  #details .gun.wrecked .bar em { display: block; }
+  #details .wrench { width: 11px; height: 11px; fill: #5ff0b0; flex: none; display: none; }
+  #details .gun.fixing .wrench { display: block; }
+  #details .gun.fixing .gl { color: #cfeee2; }
+
   #details .env { margin-bottom: 14px; }
   #details .envhead { color: #cfeee2; display: flex; justify-content: space-between; }
   #details .envhead b { color: #3d6b5e; font-weight: normal; }
