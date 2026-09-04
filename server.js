@@ -145,6 +145,11 @@ const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silen
 // second pool and no rebuild state to keep in step -- and the depth is one number.
 // At one point a second that is 2.5 minutes to stand a wreck up, 100s to top a gun off.
 const WRECK_DEPTH = 150, REPAIR_RATE = 1;
+// A rock that reaches a gun takes half of it. Splitting on impact means one big rock can
+// walk a whole battery down in a cascade, so the children are given a moment before they
+// count: without it every fragment of a split is born inside the turret that caused it
+// and the whole chain resolves in a single tick, on one gun, for no skill either way.
+const ROCK_DAMAGE = 50, SPLIT_GRACE = 1;
 // Once the crew starts on a gun it stays there for this long -- three seconds, so three
 // whole points -- before looking again. A tick is a thirtieth of a point, so re-deciding
 // every tick makes the crew strobe between guns the moment two of them rate the same,
@@ -454,13 +459,22 @@ function blockedAt(x, y, r, ensure = true) {
   return false;
 }
 
-function spawnRock(size, x, y) {
+function spawnRock(size, x, y, grace = 0) {
   rocks.push({
     id: nextId++, size, x, y,
     vx: rand(-70, 70), vy: rand(-70, 70),
     a: rand(0, Math.PI * 2), spin: rand(-1.2, 1.2),
     r: size * 16, seed: Math.floor(Math.random() * 1e6),
+    grace,                    // seconds before this rock can hurt anything
   });
+}
+
+// What is left of a rock that came apart, wherever it was standing. The pieces cannot
+// hurt anything for a moment, which is what stops a cascade landing all at once.
+function shatter(r) {
+  if (r.size <= 1) return;
+  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
+  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
@@ -892,7 +906,32 @@ function step(dt) {
     if (polys.length && segmentBlocked(px, py, o.x, o.y, polys)) bullets.splice(b, 1);
   }
 
-  for (const r of rocks) { r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt; }
+  for (const r of rocks) {
+    r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt;
+    if (r.grace > 0) r.grace -= dt;
+  }
+
+  // Rocks against guns. The hull is not a target -- same as for shells -- so a rock that
+  // misses a turret sails over the ship it is mounted on.
+  for (let k = rocks.length - 1; k >= 0; k--) {
+    const r = rocks[k];
+    if (r.grace > 0) continue;
+    let struck = false;
+    for (const s of ships) {
+      for (const t of s.turrets) {
+        if (t.hp <= 0) continue;                      // nothing left there to hit
+        const dx = r.x - t.wx, dy = r.y - t.wy, rr = r.r + TURRET_R;
+        if (dx * dx + dy * dy >= rr * rr) continue;
+        t.hp = t.hp - ROCK_DAMAGE <= 0 ? -WRECK_DEPTH : t.hp - ROCK_DAMAGE;
+        struck = true;
+        break;
+      }
+      if (struck) break;
+    }
+    if (!struck) continue;
+    rocks.splice(k, 1);
+    shatter(r);
+  }
 
   // Shells strike enemy guns. The hull itself is not a target, so a shot that misses
   // a turret sails past the ship it is mounted on.
@@ -923,7 +962,7 @@ function step(dt) {
       rocks.splice(k, 1); bullets.splice(b, 1);
       const shooter = players.get(o.owner);
       if (shooter) shooter.score += (4 - r.size) * 10;
-      if (r.size > 1) { spawnRock(r.size - 1, r.x, r.y); spawnRock(r.size - 1, r.x, r.y); }
+      shatter(r);
       break;
     }
   }
