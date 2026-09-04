@@ -537,7 +537,7 @@ const PANELS = [
     // where that ends, because the two halves of the axis mean different things: left of
     // it you are paying to bring a gun back, right of it you are topping one up.
     mark: () => wreckDepth / (wreckDepth + TURRET_HP),
-    rows: [['repair', 'Damaged guns']] },
+    rows: [['repair', 'Turrets']] },
 ];
 let openTab = 0;
 let prioMax = 8, wreckDepth = 150;
@@ -624,6 +624,11 @@ function buildDetails(ships) {
 // real values -- 0 is "never touch this" -- and reaching for one must not delete a point.
 const ENV_W = 240, ENV_H = 88, ENV_PAD = 9;
 const ENV_GRAB = 11, ENV_KILL = 20;                 // svg units, ~14 and ~25 screen px
+// The debt is 150 of the 250 points on the repair axis, so drawn to scale a gun that is
+// gone eats more than half the editor while the guns you can actually shoot with are
+// crushed into the rest. The wrecked side is given a fixed quarter of the width instead:
+// a purely visual warp, so the curve on the wire is still in real health.
+const ENV_DEAD_W = 0.25;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 function envelope(shipId, kind, label, panel, initial) {
@@ -631,18 +636,25 @@ function envelope(shipId, kind, label, panel, initial) {
     ? initial.map(p => [p[0], p[1]])
     : [[0, 100], [1, 20]]);
   const IW = ENV_W - 2 * ENV_PAD, IH = ENV_H - 2 * ENV_PAD;
-  const X = x => ENV_PAD + x * IW, Y = y => ENV_PAD + (1 - y / 100) * IH;
-  const xOf = px => Math.max(0, Math.min(1, (px - ENV_PAD) / IW));
+  const X = x => ENV_PAD + warp(x) * IW, Y = y => ENV_PAD + (1 - y / 100) * IH;
+  const xOf = px => unwarp(Math.max(0, Math.min(1, (px - ENV_PAD) / IW)));
   const yOf = py => Math.max(0, Math.min(100, (1 - (py - ENV_PAD) / IH) * 100));
 
   const mark = panel.mark ? panel.mark() : null;
+  // Data x -> drawn x and back. Identity when there is no wrecked section to compress.
+  const warp = f => mark === null ? f
+    : f <= mark ? f / mark * ENV_DEAD_W
+                : ENV_DEAD_W + (f - mark) / (1 - mark) * (1 - ENV_DEAD_W);
+  const unwarp = u => mark === null ? u
+    : u <= ENV_DEAD_W ? u / ENV_DEAD_W * mark
+                      : mark + (u - ENV_DEAD_W) / (1 - ENV_DEAD_W) * (1 - mark);
   const el = document.createElement('div');
   el.className = 'env';
   el.innerHTML = `<div class="envhead">${label}<b></b></div>`
     + `<svg viewBox="0 0 ${ENV_W} ${ENV_H}">`
     +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" width="${IW}" height="${IH}"/>`
     +   (mark === null ? '' :
-          `<rect class="dead" x="${ENV_PAD}" y="${ENV_PAD}" width="${mark * IW}" height="${IH}"/>`
+          `<rect class="dead" x="${ENV_PAD}" y="${ENV_PAD}" width="${ENV_DEAD_W * IW}" height="${IH}"/>`
         + `<line class="deadline" x1="${X(mark)}" y1="${ENV_PAD}" x2="${X(mark)}" y2="${ENV_H - ENV_PAD}"/>`)
     +   `<polyline class="curve" points=""/><g class="stops"></g>`
     + `</svg>`
