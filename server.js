@@ -748,9 +748,18 @@ function placeTurrets() {
 // Over the cliff in one step: there is no such thing as a gun sitting at zero. A frail
 // hull is its gun, so silencing it is killing it and the wreck does not linger -- a sky
 // full of drifting hulks is worse than a sky the fight has left.
+// Deaths worth watching are announced once and then forgotten. The server keeps no
+// wreck, runs no animation and has nothing to tick down: it says where a hull came apart
+// and in which direction it was pointing, and every client near enough gets that with
+// the next snapshot and takes it from there.
+const kills = [];
+
 function wound(s, t, amount) {
   t.hp = t.hp - amount <= 0 ? -WRECK_DEPTH : t.hp - amount;
-  if (t.hp <= 0 && s.hull.frail) ships.delete(s);
+  if (t.hp <= 0 && s.hull.frail) {
+    ships.delete(s);
+    kills.push({ x: Math.round(s.x), y: Math.round(s.y), a: +s.a.toFixed(2), h: hullKey(s.hull) });
+  }
 }
 
 // What a given side is willing to shoot: every rock, plus the live guns of anyone
@@ -1222,6 +1231,7 @@ function snapshotFor(p) {
     bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
     rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y), a: +r.a.toFixed(2), size: r.size, seed: r.seed })),
     ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y), a: +o.a.toFixed(2) })),
+    ...(kills.length ? { kills: kills.filter(near) } : {}),
   });
 }
 
@@ -1365,6 +1375,7 @@ setInterval(() => {
     if (streamChunks) syncChunks(p);
     p.ws.send(snapshotFor(p));
   }
+  kills.length = 0;                 // said once, to whoever was near enough to see it
 }, TICK);
 
 // Dev mode. `node --watch` restarts this process when server.js changes, which drops

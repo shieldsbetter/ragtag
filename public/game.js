@@ -162,7 +162,13 @@ ws.onmessage = e => {
   if (m.t === 'chunk') { wallChunks.set(m.key, m.walls.map(withBox)); return; }
   if (m.t === 'drop') { for (const k of m.keys) wallChunks.delete(k); return; }
   if (m.t !== 's') return;
-  buffer.push({ rt: m.st === undefined ? performance.now() : renderStamp(m.st, performance.now()), snap: m });
+  const rt = m.st === undefined ? performance.now() : renderStamp(m.st, performance.now());
+  // A death is a one-shot: the server says it once and forgets, so it is caught here on
+  // arrival rather than read out of the interpolated view. It is stamped on the same
+  // timeline as the snapshots so it plays when the ship is seen to vanish, not a render
+  // delay early.
+  for (const k of m.kills || []) blowUp(k, rt);
+  buffer.push({ rt, snap: m });
   while (buffer.length > 2 && buffer[1].rt < performance.now() - RENDER_DELAY - 500) buffer.shift();
 };
 
@@ -970,6 +976,78 @@ canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
+// ---- wreckage ----
+// Purely local. The server has already forgotten the ship; this is the client spending
+// three seconds on what that looked like. Every piece flies a straight line from where it
+// started -- position is a function of age, so there is nothing to step and nothing to
+// drift out of sync.
+const DEBRIS_MS = 3000, SPARK_MS = 1100;
+let debris = [];
+
+function blowUp(k, born) {
+  const art = HULL_ART[k.h] || HULL_ART.carrier;
+  const cos = Math.cos(k.a), sin = Math.sin(k.a);
+  const world = ([px, py]) => [k.x + px * cos - py * sin, k.y + px * sin + py * cos];
+  const body = art.body;
+  const pieces = [];
+  // The outline comes apart at its corners: each edge becomes its own line, pushed out
+  // from the middle of the hull and turning as it goes.
+  for (let i = 0; i < body.length; i++) {
+    const a = world(body[i]), b = world(body[(i + 1) % body.length]);
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const away = Math.atan2(my - k.y, mx - k.x) + rnd(-0.5, 0.5);
+    const speed = rnd(14, 42);
+    pieces.push({
+      ax: a[0] - mx, ay: a[1] - my, bx: b[0] - mx, by: b[1] - my,   // about its own middle
+      x: mx, y: my, vx: Math.cos(away) * speed, vy: Math.sin(away) * speed,
+      spin: rnd(-1.6, 1.6),
+    });
+  }
+  const sparks = [];
+  for (let i = 0; i < 16; i++) {
+    const a = rnd(0, Math.PI * 2), speed = rnd(40, 190);
+    sparks.push({ x: k.x, y: k.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
+                  life: rnd(0.45, 1) * SPARK_MS, hot: Math.random() < 0.5 });
+  }
+  debris.push({ born, pieces, sparks });
+}
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+function drawDebris(now) {
+  const clock = now - RENDER_DELAY;          // the same instant the ships are drawn at
+  debris = debris.filter(d => clock - d.born < DEBRIS_MS);
+  if (dev) window.__debris = debris;
+  for (const d of debris) {
+    const age = clock - d.born;
+    if (age < 0) continue;                   // arrived early: it has not happened yet
+    const t = age / 1000;
+    const fade = 1 - age / DEBRIS_MS;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const p of d.pieces) {
+      const px = p.x + p.vx * t - cam.x, py = p.y + p.vy * t - cam.y;
+      const c = Math.cos(p.spin * t), s = Math.sin(p.spin * t);
+      const line = new Path2D();
+      line.moveTo(px + p.ax * c - p.ay * s, py + p.ax * s + p.ay * c);
+      line.lineTo(px + p.bx * c - p.by * s, py + p.bx * s + p.by * c);
+      ctx.strokeStyle = `rgba(255,107,138,${(fade * fade).toFixed(3)})`;
+      ctx.lineWidth = 1.4 / cam.zoom;
+      ctx.stroke(line);
+    }
+    for (const k of d.sparks) {
+      if (age > k.life) continue;
+      const f = 1 - age / k.life;
+      const kx = k.x + k.vx * (age / 1000) - cam.x, ky = k.y + k.vy * (age / 1000) - cam.y;
+      const dot = new Path2D();
+      dot.arc(kx, ky, (1.6 + 1.4 * f) / cam.zoom, 0, Math.PI * 2);
+      ctx.fillStyle = k.hot ? `rgba(255,214,92,${f.toFixed(3)})` : `rgba(255,86,64,${f.toFixed(3)})`;
+      ctx.fill(dot);
+    }
+    ctx.restore();
+  }
+}
+
 // ---- shapes ----
 const HULL = [[52, 0], [40, -12], [-42, -12], [-50, -6], [-50, 6], [-42, 12], [40, 12]];
 const DECK = [[36, 0], [-40, 0]];                       // spine
@@ -1451,6 +1529,7 @@ function draw() {
     ctx.restore();
   }
 
+  drawDebris(now);
   drawGroup();
   for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
   for (const t of focusTargets()) reticle(t.x - cam.x, t.y - cam.y);
