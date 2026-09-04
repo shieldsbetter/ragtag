@@ -972,12 +972,13 @@ function healthColor(f) {
   return `rgb(${r},${g_},${b})`;
 }
 
-// A ring rather than a bar, because a wreck is not a damaged gun -- it is a hole where
-// one was, and climbing out of the debt is a different thing from losing health. It
-// becomes the health bar at the moment the gun is standing again. Filled arc is progress
-// out of the debt; it goes bright while the ship's one repair point is going into it.
-const WRECK_R = 13;   // screen px: an empty mount has nothing else marking it
-function wreckRing(x, y, frac, active) {
+// Drawn only where a crew is actually working. A ring rather than a bar, because a
+// wreck is not a damaged gun -- it is a hole where one was, and climbing out of the debt
+// is a different thing from losing health. It becomes the health bar at the moment the
+// gun is standing again. An untended wreck draws nothing at all: the gun is gone, and a
+// gauge that never moves is just clutter over the hull.
+const WRECK_R = 13;   // screen px
+function wreckRing(x, y, frac) {
   const s = 1 / cam.zoom, r = WRECK_R * s;
   ctx.save();
   ctx.lineWidth = 2.5 * s;
@@ -988,7 +989,7 @@ function wreckRing(x, y, frac, active) {
   if (frac > 0.001) {
     const arc = new Path2D();
     arc.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, frac));
-    ctx.strokeStyle = active ? '#ffd76a' : '#ff9a6a';
+    ctx.strokeStyle = '#ffd76a';
     ctx.stroke(arc);
   }
   ctx.restore();
@@ -1310,6 +1311,7 @@ function draw() {
   if (dev) window.__all = allShips;
   if (dev) window.__cam = cam;
   if (dev) window.__sel = [...selection];
+  if (dev) window.__ws = ws;      // so a test can send an order the way the page would
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
@@ -1415,7 +1417,9 @@ function draw() {
       const hp = s.hp ? s.hp[i] : TURRET_HP;
       const gx = x + mt.at[0] * cos - mt.at[1] * sin, gy = y + mt.at[0] * sin + mt.at[1] * cos;
       if (hp <= 0) {                                      // silenced: a mount, not a gun
-        if (!OFF.has('bars')) wreckRing(gx, gy, (hp + wreckDepth) / wreckDepth, s.rp === i);
+        // s.rp only comes with your own ships, so someone else's wrecks show nothing --
+        // you cannot see another crew at work, which is the right answer anyway.
+        if (s.rp === i && !OFF.has('bars')) wreckRing(gx, gy, (hp + wreckDepth) / wreckDepth);
         return;
       }
       if (own && !OFF.has('arcs')) {                      // show each mount's traverse limits
