@@ -105,6 +105,12 @@ compare. Do not remove this without testing on a phone.
 regenerate on mismatch. Once walls are destructible that would silently heal damage —
 an "edited" flag is needed before destruction ships.
 
+**Haptics are Chrome-on-Android only.** Firefox disabled vibration in 79 and removed
+the API in 129; iOS Safari never had it; the W3C is retiring the spec. `navigator.vibrate`
+must stay a bonus — every gesture needs visual confirmation that stands alone. It also
+needs user activation, so a pulse is scheduled inside the pointer handler as a pattern
+with a leading pause, not fired later from a timer.
+
 **Bandwidth is compression-bound, not field-bound.** Snapshots are deflated with a
 shared context. Removing redundant fields buys almost nothing; digits do, because
 entropy is what survives. Measure before restructuring the protocol.

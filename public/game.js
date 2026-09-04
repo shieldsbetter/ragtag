@@ -24,6 +24,9 @@ let myId = null, mounts = [], arcHalf = 0, maxView = 2200, clientVersion = '????
 // Each removes one class of drawing so a rendering fault can be bisected on the device
 // that actually shows it, without a round trip through the editor.
 const OFF = new Set((new URLSearchParams(location.search).get('off') || '').split(',').filter(Boolean));
+// ?buzz makes every tap fire an unmistakable pulse, to separate "this device does not
+// vibrate" from "my gesture code never asked it to".
+const BUZZ_TEST = new URLSearchParams(location.search).has('buzz');
 
 // The camera is free: it starts on your first ship and thereafter goes where you put it.
 const cam = { x: 0, y: 0, zoom: 1, placed: false };
@@ -271,6 +274,9 @@ canvas.addEventListener('pointerdown', e => {
       const s = shipAt(w);
       if (s) {
         holding = { ship: s.id, start: performance.now() };
+        // Scheduled here, inside the gesture, so the engine honours it. Cancelled below
+        // if the press becomes a drag or lifts early.
+        haptic(holdPulse(!(selection.has(s.id) && selection.size > 1)));
         longTimer = setTimeout(() => {
           longFired = true; longTimer = null;
           toggleInSelection(holding.ship);
@@ -332,28 +338,47 @@ let fleet = [];                 // every ship you own, this frame
 const LONG_PRESS_MS = 450, LONG_PRESS_SLOP = 10;
 let holding = null;             // { ship, start } while a press is maturing
 let longTimer = null, longFired = false;
+// Haptics exist on Chrome/Android and nowhere else -- Firefox disabled vibration in 79
+// and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
+// gesture on its own. A ring flies out on add and collapses in on drop.
+let confirm = null;             // { x, y, start, adding }
+const CONFIRM_MS = 320;
 
 function cancelHold() {
-  if (longTimer) { clearTimeout(longTimer); longTimer = null; }
+  if (longTimer) { clearTimeout(longTimer); longTimer = null; haptic(0); }   // 0 cancels
   holding = null;
 }
 
 // A short pulse confirms a gesture the screen cannot: during a long press your thumb is
-// covering the ship. Android only -- iOS Safari has no Vibration API, and desktop
-// browsers accept the call and do nothing, so no feature test beyond the optional call.
-const haptic = pattern => { try { navigator.vibrate?.(pattern); } catch {} };
-const PULSE_ADD = 18, PULSE_DROP = [9, 45, 9];   // one tick to add, two to remove
+// covering the ship. Android only -- iOS Safari has no Vibration API at all.
+//
+// vibrate() needs user activation, and firing it from the long-press timer happens
+// outside the gesture that started it, which engines drop. So the pulse is SCHEDULED
+// synchronously in pointerdown -- a pattern whose first entry is a zero-length buzz
+// followed by the hold delay -- and cancelled if the press turns out to be a drag or a
+// tap. The vibration then lands exactly when the selection changes, from inside the
+// gesture that earned the right to it.
+const vib = { ok: typeof navigator.vibrate === 'function', calls: 0, last: null };
+function haptic(pattern) {
+  if (!vib.ok) return;
+  try { vib.last = navigator.vibrate(pattern); vib.calls++; } catch { vib.last = 'threw'; }
+}
+const PULSE_ADD = 25, PULSE_DROP = 12;           // one long tick to add, two short to remove
+const holdPulse = adding => adding
+  ? [0, LONG_PRESS_MS, PULSE_ADD]                             // pause, then one buzz
+  : [0, LONG_PRESS_MS, PULSE_DROP, 60, PULSE_DROP];           // pause, then two
 
 function toggleInSelection(id) {
-  if (selection.has(id) && selection.size > 1) {
-    selection.delete(id);
-    if (designated === id) designated = [...selection][0];
-    haptic(PULSE_DROP);
-  } else {
+  const ship = fleet.find(s => s.id === id);
+  const adding = !(selection.has(id) && selection.size > 1);
+  if (adding) {
     selection.add(id);
     designated = id;            // whatever you just added is what you are aiming
-    haptic(PULSE_ADD);
+  } else {
+    selection.delete(id);
+    if (designated === id) designated = [...selection][0];
   }
+  if (ship) confirm = { x: ship.x, y: ship.y, start: performance.now(), adding };
 }
 
 // A ship is tappable at its hull size, but never smaller than a thumb: zoomed out, the
@@ -411,6 +436,7 @@ function release(e) {
   if (pointers.size < 2) pinch = null;
   if (!wasSingle) return;
   cancelHold();
+  if (BUZZ_TEST) haptic(200);
   if (rotating) { sendFace(dragHeading, true); rotating = false; dragHeading = null; return; }
   if (longFired) { longFired = false; return; }     // the hold already acted; the release is not a tap
   if (dragged < 5 && performance.now() - pressedAt < 400 && ws.readyState === 1) {
@@ -548,6 +574,21 @@ function drawHold(s, held) {
   ctx.strokeStyle = 'rgba(95,240,176,.7)';
   ctx.lineWidth = 2.5 / cam.zoom;
   ctx.lineCap = 'round';
+  ctx.stroke(p);
+  ctx.restore();
+}
+
+// The answer to "did that register?" on every platform: a ring thrown outward when a
+// ship joins the selection, drawn inward when it leaves.
+function drawConfirm(now) {
+  const t = (now - confirm.start) / CONFIRM_MS;
+  if (t >= 1) { confirm = null; return; }
+  const e = confirm.adding ? t : 1 - t;             // outward to add, inward to drop
+  const p = new Path2D();
+  p.arc(confirm.x - cam.x, confirm.y - cam.y, 40 + e * 46, 0, Math.PI * 2);
+  ctx.save();
+  ctx.strokeStyle = `rgba(150,255,205,${(1 - t) * 0.8})`;
+  ctx.lineWidth = (2.5 * (1 - t) + 0.6) / cam.zoom;
   ctx.stroke(p);
   ctx.restore();
 }
@@ -745,6 +786,7 @@ function draw() {
 
   for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
   if (holding) drawHold(fleet.find(s => s.id === holding.ship), now - holding.start);
+  if (confirm) drawConfirm(now);
   if (cmdShip) drawControl(cmdShip);
 
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
@@ -796,7 +838,8 @@ function draw() {
     + `  c${clientVersion}`
     + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')
     + (OFF.size ? `  off:${[...OFF].join(',')}` : '')
-    + `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps` + `\n`
+    + `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps`
+    + (dev ? `  vib:${vib.ok ? 'api' : 'none'}/${vib.calls}/${vib.last}` : '') + `\n`
     + (state.stale ? `** STALE: server.js changed on disk -- restart the server **\n` : '')
     + `\n${board}`;
 }
