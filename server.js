@@ -54,7 +54,9 @@ const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 // somewhere rather than by waiting. A ship reaches for the nearest grain inside
 // TRACTOR_R and hauls it in; nothing is aimed and nothing is ordered, so collecting is
 // a consequence of where you park, which is the same bargain the guns make.
-const ORE_TARGET = 14, ORE_VALUE = 5;
+// Half what it was: broken rock now supplies most of it, and free-floating grains are
+// the seed rather than the crop.
+const ORE_TARGET = 7, ORE_VALUE = 5;
 const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 
 // Opposition is scattered through the world rather than spawned at anyone: each chunk
@@ -481,15 +483,19 @@ function spawnRock(size, x, y, grace = 0) {
 // and a handful of ore shaken loose. The pieces cannot hurt anything for a moment, which
 // is what stops a cascade landing all at once.
 //
-// Only a rock that actually splits sheds ore. The smallest ones break up into nothing
-// and leave nothing, so mining is worth doing on the big ones.
-const ORE_PER_SPLIT = [2, 5];
+// Every rock sheds ore, whether it splits or simply goes: the smallest ones leave less,
+// so working a big rock all the way down pays better than picking off gravel.
+const ORE_FROM_SPLIT = [2, 5], ORE_FROM_DUST = [1, 3];
+const shed = ([lo, hi], x, y) => {
+  const n = lo + Math.floor(Math.random() * (hi - lo + 1));
+  for (let i = 0; i < n; i++) spawnOre(x, y);
+};
+
 function shatter(r) {
-  if (r.size <= 1) return;
+  if (r.size <= 1) return shed(ORE_FROM_DUST, r.x, r.y);
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
-  const n = ORE_PER_SPLIT[0] + Math.floor(Math.random() * (ORE_PER_SPLIT[1] - ORE_PER_SPLIT[0] + 1));
-  for (let i = 0; i < n; i++) spawnOre(r.x, r.y);
+  shed(ORE_FROM_SPLIT, r.x, r.y);
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
