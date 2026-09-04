@@ -1415,14 +1415,14 @@ function draw() {
   // the emitter out to the grain, in a blue that belongs to nothing else on the board, so
   // it never reads as gunnery. The flare is screen-sized: the beam is a thing you look
   // at, not a thing with a width in metres.
-  const BEAM_RGB = '106,184,255', BEAM_FLARE = 11, BEAM_HZ = 1;
+  const BEAM_RGB = '106,184,255', BEAM_NEAR = 1.125, BEAM_FLARE = 8.25, BEAM_HZ = 1;
   for (const s of state.ships) {
     if (s.bm === undefined) continue;
     const grain = (state.ore || []).find(o => o.id === s.bm);
     if (!grain) continue;
     const dx = grain.x - s.x, dy = grain.y - s.y, d = Math.hypot(dx, dy) || 1;
     const px = -dy / d, py = dx / d;                   // across the beam
-    const near = 1.5 / cam.zoom, far = BEAM_FLARE / cam.zoom;
+    const near = BEAM_NEAR / cam.zoom, far = BEAM_FLARE / cam.zoom;
     const sx = s.x - cam.x, sy = s.y - cam.y, gx = grain.x - cam.x, gy = grain.y - cam.y;
     const beam = new Path2D();
     beam.moveTo(sx + px * near, sy + py * near);
