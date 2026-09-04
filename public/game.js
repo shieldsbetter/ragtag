@@ -263,18 +263,15 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1) {
-    dragged = 0; pressedAt = performance.now(); longFired = false; pressedClear = false; cancelHold();
+    dragged = 0; pressedAt = performance.now(); longFired = false; pressedControl = null; cancelHold();
     const r = canvas.getBoundingClientRect();
     const w = toWorld(e.clientX - r.left, e.clientY - r.top);
-    if (cmdShip) {                                  // grabbing the handle is not a pan or a click
-      const i = iconPos(cmdShip);
-      if (Math.hypot(w.x - i.x, w.y - i.y) < GRAB_R / cam.zoom) { rotating = true; dragHeading = cmdShip.hd; }
-    }
-    // The dismiss icon is a tap target, checked before anything else could claim the
-    // press -- including the hold, which would otherwise arm underneath it.
-    const clr = clearIconAt();
-    if (!rotating && clr && Math.hypot(w.x - clr.x, w.y - clr.y) < GRAB_R / cam.zoom) {
-      pressedClear = true;
+    // Controls are checked before anything else could claim the press -- including the
+    // hold, which would otherwise arm underneath one.
+    const ctl = paneHit(w);
+    if (ctl) {
+      if (ctl.kind === 'rotate') { rotating = true; dragHeading = cmdShip.hd; }
+      else pressedControl = ctl.kind;
       return;
     }
     if (!rotating) {
@@ -323,7 +320,7 @@ canvas.addEventListener('pointermove', e => {
 
   if (rotating && cmdShip) {
     const r = canvas.getBoundingClientRect();
-    const w = toWorld(e.clientX - r.left, e.clientY - r.top), c = controlAt(cmdShip);
+    const w = toWorld(e.clientX - r.left, e.clientY - r.top), c = anchorOf(cmdShip);
     dragHeading = Math.atan2(w.y - c.y, w.x - c.x);
     sendFace(dragHeading, false);
     return;                                         // rotating the ship must not also pan the camera
@@ -349,7 +346,7 @@ let fleet = [];                 // every ship you own, this frame
 const LONG_PRESS_MS = 450, LONG_PRESS_SLOP = 10;
 let holding = null;             // { ship, x, y, start } while a press is maturing
 let hasSelected = false;        // one ship is picked on arrival; after that, empty is a choice
-let longTimer = null, longFired = false, pressedClear = false;
+let longTimer = null, longFired = false, pressedControl = null;
 // Haptics exist on Chrome/Android and nowhere else -- Firefox disabled vibration in 79
 // and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
 // gesture on its own. A ring flies out on add and collapses in on drop.
@@ -453,20 +450,63 @@ function groupCircle() {
   return { x: cx, y: cy, r: Math.max(far + GROUP_PAD, GROUP_MIN_R) };
 }
 
-function clearIconAt() {
-  const g = groupCircle();
-  return g && { x: g.x + Math.cos(CLEAR_ANGLE) * g.r, y: g.y + Math.sin(CLEAR_ANGLE) * g.r };
-}
+
 let rotating = false, dragHeading = null, lastFaceSend = 0;
 
 // The control surrounds the destination while one is outstanding: the heading applies
 // on arrival, so it belongs where the ship will be, not where it is.
-const controlAt = s => s && s.dx !== undefined ? { x: s.dx, y: s.dy } : s;
+const anchorOf = s => s && s.dx !== undefined ? { x: s.dx, y: s.dy } : s;
 
-function iconPos(s) {
-  const c = controlAt(s), h = dragHeading ?? s.hd;
-  const R = CONTROL_R / cam.zoom;
-  return { x: c.x + Math.cos(h) * R, y: c.y + Math.sin(h) * R };
+// ---- the glass pane ----
+// Every tappable affordance is registered here each frame, resolved against the others,
+// then drawn and hit-tested from the same resolved position -- so what you can see and
+// what you can press can never disagree.
+//
+// A control that means something by where it sits is pinned: the rotate handle's angle
+// IS the heading, and moving it would report a heading the ship does not have. The rest
+// slide along their own ring until they are clear. Sizes are screen pixels, since this
+// is about what a thumb can tell apart.
+const CONTROL_PAD = 12;
+let pane = [];
+
+function buildPane() {
+  const list = [];
+  if (cmdShip) {
+    const a = anchorOf(cmdShip);
+    list.push({ kind: 'rotate', cx: a.x, cy: a.y, track: CONTROL_R / cam.zoom,
+                angle: dragHeading ?? cmdShip.hd, r: GRAB_R, pinned: true });
+  }
+  const g = groupCircle();
+  if (g) list.push({ kind: 'clear', cx: g.x, cy: g.y, track: g.r,
+                     angle: CLEAR_ANGLE, r: GRAB_R, pinned: false });
+  return list;
+}
+
+const paneSpot = c => ({ x: c.cx + Math.cos(c.angle) * c.track, y: c.cy + Math.sin(c.angle) * c.track });
+
+function resolvePane(list) {
+  for (const c of list) c.pos = paneSpot(c);
+  for (const c of list) {
+    if (c.pinned) continue;
+    const clashes = p => list.some(o =>
+      o !== c && o.pos && Math.hypot(o.pos.x - p.x, o.pos.y - p.y) < (o.r + c.r + CONTROL_PAD) / cam.zoom);
+    if (!clashes(c.pos)) continue;
+    // Walk around its own ring, alternating either way, and take the first clear spot.
+    for (let step = 1; step <= 20 && clashes(c.pos); step++)
+      for (const dir of [1, -1]) {
+        const angle = c.angle + dir * step * 0.16;
+        const p = paneSpot({ ...c, angle });
+        if (!clashes(p)) { c.angle = angle; c.pos = p; break; }
+      }
+  }
+  return list;
+}
+
+// What the press landed on, if anything. Hit radii are screen pixels.
+function paneHit(world) {
+  for (const c of pane)
+    if (Math.hypot(world.x - c.pos.x, world.y - c.pos.y) < c.r / cam.zoom) return c;
+  return null;
 }
 
 function sendFace(a, force) {
@@ -484,9 +524,13 @@ function release(e) {
   if (!wasSingle) return;
   cancelHold();
   if (BUZZ_TEST) haptic(200);
-  if (pressedClear) {
-    pressedClear = false;
-    if (dragged < 8) { const c = clearIconAt(); haptic(PULSE_DROP); if (c) clearSelection(c.x, c.y); }
+  if (pressedControl) {
+    const kind = pressedControl; pressedControl = null;
+    if (dragged < 8 && kind === 'clear') {
+      const g = groupCircle();
+      haptic(PULSE_DROP);
+      if (g) clearSelection(g.x, g.y);
+    }
     return;
   }
   if (rotating) { sendFace(dragHeading, true); rotating = false; dragHeading = null; return; }
@@ -630,18 +674,31 @@ function drawGroup() {
   ctx.stroke(ring);
   ctx.setLineDash([]);
 
-  // A cross in a circle: dismiss, in the same weight as the rotate handle.
-  const ix = x + Math.cos(CLEAR_ANGLE) * g.r, iy = y + Math.sin(CLEAR_ANGLE) * g.r;
-  const r = 9 * s, arm = 4.5 * s;
+  ctx.restore();
+}
+
+// A cross in a circle: dismiss, in the same weight as the rotate handle.
+function clearIcon(x, y) {
+  const s = 1 / cam.zoom, r = 9 * s, arm = 4.5 * s;
   const icon = new Path2D();
-  icon.arc(ix, iy, r, 0, Math.PI * 2);
-  icon.moveTo(ix - arm, iy - arm); icon.lineTo(ix + arm, iy + arm);
-  icon.moveTo(ix + arm, iy - arm); icon.lineTo(ix - arm, iy + arm);
+  icon.arc(x, y, r, 0, Math.PI * 2);
+  icon.moveTo(x - arm, y - arm); icon.lineTo(x + arm, y + arm);
+  icon.moveTo(x + arm, y - arm); icon.lineTo(x - arm, y + arm);
+  ctx.save();
   ctx.strokeStyle = '#5ff0b0';
   ctx.lineWidth = 1.7 * s;
   ctx.lineCap = 'round';
   ctx.stroke(icon);
   ctx.restore();
+}
+
+// Draw every control from the position it was resolved to, so the picture and the hit
+// test are the same thing.
+function drawPane() {
+  for (const c of pane) {
+    if (c.kind === 'rotate') rotateIcon(c.pos.x - cam.x, c.pos.y - cam.y, c.angle, rotating);
+    else if (c.kind === 'clear') clearIcon(c.pos.x - cam.x, c.pos.y - cam.y);
+  }
 }
 
 // Feedback while a long press matures: an arc closing around the ship, so a hold that
@@ -694,7 +751,7 @@ function drawSelection(s, isDesignated) {
 }
 
 function drawControl(s) {
-  const c = controlAt(s), h = dragHeading ?? s.hd;
+  const c = anchorOf(s), h = dragHeading ?? s.hd;
   const R = CONTROL_R / cam.zoom, cx = c.x - cam.x, cy = c.y - cam.y;
   // A single wrong number here paints a huge bright shape rather than a small ring:
   // the arc radius and every stroke width are divided by zoom, so a zoom near zero, or
@@ -711,7 +768,6 @@ function drawControl(s) {
   ring.lineTo(cx + Math.cos(h) * R * 0.82, cy + Math.sin(h) * R * 0.82);
   ctx.stroke(ring);
   ctx.restore();
-  rotateIcon(cx + Math.cos(h) * R, cy + Math.sin(h) * R, h, rotating);
 }
 
 // Terrain: solid inside, outlined to keep the vector look.
@@ -877,6 +933,9 @@ function draw() {
   }
   if (confirm) drawConfirm(now);
   if (cmdShip) drawControl(cmdShip);
+  pane = resolvePane(buildPane());
+  if (dev) window.__pane = pane;                    // inspectable: module scope is not
+  drawPane();
 
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
 
