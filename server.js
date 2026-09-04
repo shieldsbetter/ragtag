@@ -98,15 +98,19 @@ const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-edita
 const PRIO_KINDS = ['rock', 'turret', 'repair'];
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
-// Two bands that do not overlap: every wreck outranks every dented gun, and inside each
-// band priority *rises* with health. Rising inside a band is what makes repair stay on
-// one gun until it is done -- working on it moves it right, which only strengthens its
-// claim. A falling band would abandon whatever it just touched.
+// Two bands that do not overlap, split at a quarter health. Below the split priority
+// *rises*, which is self-reinforcing -- working on a gun moves it right and only
+// strengthens its claim -- so the crew carries one gun up to a quarter and no further
+// before the next one below the line preempts it. Above the split priority *falls*,
+// which is self-defeating in the same way, so the rest come up together rather than one
+// at a time. Nothing above the split can outrank anything below it, and nothing reaches
+// zero: zero means "never touch this", which would strand a gun just short of full.
 const defaultPrio = () => {
-  const w = WRECK_DEPTH / (TURRET_HP + WRECK_DEPTH);    // where the debt ends and damage begins
+  const span = WRECK_DEPTH + TURRET_HP;
+  const quarter = (WRECK_DEPTH + TURRET_HP * 0.25) / span;   // a quarter of positive health
   return {
     rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
-    repair: [[0, 50], [w, 100], [w, 0], [1, 49]],
+    repair: [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
   };
 };
 
