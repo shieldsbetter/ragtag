@@ -273,7 +273,7 @@ canvas.addEventListener('pointerdown', e => {
     const ctl = paneHit(w);
     if (ctl) {
       if (ctl.kind === 'rotate') { rotating = true; dragHeading = cmdShip.hd; }
-      else pressedControl = ctl.kind;
+      else pressedControl = ctl;
       return;
     }
     if (!rotating) {
@@ -342,6 +342,7 @@ const selection = new Set();
 let designated = null;          // id of the ship wearing the ring
 let cmdShip = null;             // ...and its latest interpolated state
 let fleet = [];                 // every ship you own, this frame
+let allShips = [];              // ...and everyone else's that is close enough to see
 
 // Mobile has three gestures and drag is already the map, so adding to a selection is a
 // long press. Slop is generous: a thumb moves a little during a deliberate hold.
@@ -419,6 +420,37 @@ function shipAt(world) {
     if (d < bestD) { bestD = d; best = s; }
   }
   return best;
+}
+
+// Same reach as your own ships, over everyone else's. Tapping one with a selection in
+// hand is how focus fire is ordered, so it has to be as easy to hit as a friendly.
+function otherShipAt(world) {
+  const r = Math.max(SHIP_PICK, PICK_MIN_PX / cam.zoom);
+  let best = null, bestD = r;
+  for (const s of allShips) {
+    if (s.owner === myId) continue;
+    const d = Math.hypot(s.x - world.x, s.y - world.y);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+
+// One target per ship, and the order goes to the whole selection at once: singling ships
+// out is what the accordion is for.
+function orderFocus(target, ships) {
+  if (!ships.length || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ t: 'focus', ships, target }));
+}
+
+// The distinct ships the selection is currently firing at. Two halves of a fleet may be
+// working on different targets, and both reticles are drawn.
+function focusTargets() {
+  const ids = new Set();
+  for (const id of selection) {
+    const s = fleet.find(q => q.id === id);
+    if (s && s.fo !== undefined) ids.add(s.fo);
+  }
+  return [...ids].map(id => allShips.find(s => s.id === id)).filter(Boolean);
 }
 
 // The selection moves as a body: its centre goes where you tapped and every ship keeps
@@ -637,6 +669,9 @@ function buildPane() {
   const g = groupCircle();
   if (g) list.push({ kind: 'clear', cx: g.x, cy: g.y, track: g.r,
                      angle: CLEAR_ANGLE, r: GRAB_R, pinned: false });
+  for (const t of focusTargets())
+    list.push({ kind: 'focus', target: t.id, cx: t.x, cy: t.y, track: RETICLE_R / cam.zoom,
+                angle: FOCUS_ANGLE, r: GRAB_R, pinned: false });
   return list;
 }
 
@@ -699,11 +734,17 @@ function release(e) {
   cancelHold();
   if (BUZZ_TEST) haptic(200);
   if (pressedControl) {
-    const kind = pressedControl; pressedControl = null;
-    if (dragged < 8 && kind === 'clear') {
+    const ctl = pressedControl; pressedControl = null;
+    if (dragged < 8 && ctl.kind === 'clear') {
       const g = groupCircle();
       haptic(PULSE_DROP);
       if (g) clearSelection(g.x, g.y);
+    }
+    if (dragged < 8 && ctl.kind === 'focus') {
+      // One reticle stands for every selected ship shooting at that hull, so dismissing
+      // it calls all of them off -- not just whichever one happens to be designated.
+      haptic(PULSE_DROP);
+      orderFocus(null, [...selection].filter(id => fleet.find(s => s.id === id)?.fo === ctl.target));
     }
     return;
   }
@@ -717,7 +758,16 @@ function release(e) {
     else if (e.shiftKey) clearSelection(p.x, p.y);
     else if (hit && selection.has(hit.id)) designated = hit.id;   // re-aim within the group
     else if (hit) { selection.clear(); selection.add(hit.id); designated = hit.id; }
-    else orderMove(p);
+    else {
+      // Someone else's hull under the finger is an order about that ship, not a
+      // destination on the far side of it.
+      const foe = selection.size ? otherShipAt(p) : null;
+      if (foe) {
+        orderFocus(foe.id, [...selection]);
+        haptic(PULSE_DROP);
+        confirm = { x: foe.x, y: foe.y, start: performance.now(), adding: true };
+      } else orderMove(p);
+    }
   }
 }
 canvas.addEventListener('pointerup', release);
@@ -852,14 +902,36 @@ function drawGroup() {
 }
 
 // A cross in a circle: dismiss, in the same weight as the rotate handle.
-function clearIcon(x, y) {
+// Red, screen-sized, four corner brackets: it reads as a gunsight at any zoom and does
+// not compete with the green everything else is drawn in.
+const FOCUS_COLOR = '#ff5a63';
+const RETICLE_R = 40, FOCUS_ANGLE = -Math.PI * 0.25;
+function reticle(x, y) {
+  const s = 1 / cam.zoom, r = RETICLE_R * s, half = 0.36;
+  const p = new Path2D();
+  for (let k = 0; k < 4; k++) {
+    const a = -Math.PI / 4 + k * Math.PI / 2;
+    p.moveTo(x + Math.cos(a - half) * r, y + Math.sin(a - half) * r);
+    p.arc(x, y, r, a - half, a + half);
+  }
+  const tick = 5 * s;
+  p.moveTo(x - tick, y); p.lineTo(x + tick, y);
+  p.moveTo(x, y - tick); p.lineTo(x, y + tick);
+  ctx.save();
+  ctx.strokeStyle = FOCUS_COLOR;
+  ctx.lineWidth = 1.8 * s;
+  ctx.stroke(p);
+  ctx.restore();
+}
+
+function clearIcon(x, y, color) {
   const s = 1 / cam.zoom, r = 9 * s, arm = 4.5 * s;
   const icon = new Path2D();
   icon.arc(x, y, r, 0, Math.PI * 2);
   icon.moveTo(x - arm, y - arm); icon.lineTo(x + arm, y + arm);
   icon.moveTo(x + arm, y - arm); icon.lineTo(x - arm, y + arm);
   ctx.save();
-  ctx.strokeStyle = '#5ff0b0';
+  ctx.strokeStyle = color || '#5ff0b0';
   ctx.lineWidth = 1.7 * s;
   ctx.lineCap = 'round';
   ctx.stroke(icon);
@@ -872,6 +944,7 @@ function drawPane() {
   for (const c of pane) {
     if (c.kind === 'rotate') rotateIcon(c.pos.x - cam.x, c.pos.y - cam.y, c.angle, rotating);
     else if (c.kind === 'clear') clearIcon(c.pos.x - cam.x, c.pos.y - cam.y);
+    else if (c.kind === 'focus') clearIcon(c.pos.x - cam.x, c.pos.y - cam.y, FOCUS_COLOR);
   }
 }
 
@@ -1029,8 +1102,10 @@ function draw() {
   lastFrame = now;
   if (!state) return;
 
+  allShips = state.ships;
   fleet = state.ships.filter(s => s.owner === myId);
   if (dev) window.__fleet = fleet;
+  if (dev) window.__all = allShips;
   if (dev) window.__cam = cam;
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
@@ -1103,6 +1178,7 @@ function draw() {
 
   drawGroup();
   for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
+  for (const t of focusTargets()) reticle(t.x - cam.x, t.y - cam.y);
   if (holding) {
     const on = holding.ship !== null ? fleet.find(s => s.id === holding.ship) : holding;
     drawHold(on, now - holding.start);

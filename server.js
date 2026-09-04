@@ -432,6 +432,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
     prio: defaultPrio(),
+    focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
   stock(s, seedSpot);   // a new ship arrives in a populated neighbourhood, not a void
@@ -583,12 +584,14 @@ function placeTurrets() {
 
 // What a given side is willing to shoot: every rock, plus the live guns of anyone
 // on another team. A silenced turret is no longer worth a shell.
+// Every candidate names the ship it belongs to, so an order given against a ship
+// reaches the guns bolted to it. A rock belongs to nobody, which is what null means.
 function targetsFor(team) {
-  const list = rocks.map(r => ({ kind: 'rock', x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
+  const list = rocks.map(r => ({ kind: 'rock', ship: null, x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
   for (const s of ships) {
     if (s.team === team) continue;
     for (const t of s.turrets)
-      if (t.hp > 0) list.push({ kind: 'turret', x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: TURRET_R });
+      if (t.hp > 0) list.push({ kind: 'turret', ship: s.id, x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: TURRET_R });
   }
   return list;
 }
@@ -639,22 +642,33 @@ function aimTurrets(s, targets, dt) {
       if (range >= T.range) continue;
       const score = prioAt(s.prio[g.kind], range / T.range);
       if (score <= 0) continue;                        // zero priority is "do not engage"
+      // Focus fire outranks the envelope but does not overrule it: it decides which of
+      // the targets this ship is willing to engage comes first, and a refusal stands.
+      const focus = g.ship !== null && g.ship === s.focus ? 1 : 0;
 
       const ux = g.vx - s.vx, uy = g.vy - s.vy;       // bullets inherit the hull's velocity
       const ti = intercept(dx, dy, ux, uy, BULLET_SPEED);
       if (ti === null || ti > BULLET_LIFE) continue;  // shell would expire before arrival
       const bearing = Math.atan2(dy + uy * ti, dx + ux * ti);
       if (Math.abs(angleDiff(bearing, rest)) > T.arcHalf) continue;   // outside this mount's arc
-      shots.push({ score, range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
+      shots.push({ focus, score, range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
     }
     // Nearest breaks a tie, which is what makes a flat envelope behave exactly like the
     // nearest-first rule this replaced.
-    shots.sort((p, q) => q.score - p.score || p.range - q.range);
+    shots.sort((p, q) => q.focus - p.focus || q.score - p.score || p.range - q.range);
 
+    // The sight budget is spent per group, not across the whole list. A focused ship
+    // contributes exactly as many candidates as it has guns, so a single flat budget let
+    // one hull behind a wall consume the lot and leave the turret idle with a rock in
+    // plain view. Refusing to shoot is the envelope's job -- zero priority -- so focus
+    // decides what comes first and nothing more.
     let want = null;
-    for (let k = 0; k < shots.length && k < LOS_TRIES; k++) {
-      if (polys.length && segmentBlocked(t.wx, t.wy, shots[k].ax, shots[k].ay, polys)) continue;
-      want = shots[k].bearing; break;
+    for (const group of [shots.filter(x => x.focus), shots.filter(x => !x.focus)]) {
+      for (let k = 0; k < group.length && k < LOS_TRIES; k++) {
+        if (polys.length && segmentBlocked(t.wx, t.wy, group[k].ax, group[k].ay, polys)) continue;
+        want = group[k].bearing; break;
+      }
+      if (want !== null) break;
     }
 
     t.cool -= dt;
@@ -800,7 +814,7 @@ function snapshotFor(p) {
       // Only to the ship's owner, and only because it is what the editor reads back on
       // reconnect. It is identical frame to frame, so the shared deflate context sends
       // almost nothing for it.
-      ...(s.owner === p.id ? { pr: s.prio } : {}),
+      ...(s.owner === p.id ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}) } : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
@@ -901,6 +915,14 @@ wss.on('connection', ws => {
     }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
       for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
+    }
+    else if (m.t === 'focus' && Array.isArray(m.ships)) {
+      // null clears. Only another player's ship can be focused -- pointing your own
+      // guns at your own hull is not an order anyone means to give.
+      const target = m.target === null ? null
+        : [...ships].find(s => s.id === m.target && s.owner !== p.id)?.id ?? null;
+      for (const s of ships)
+        if (s.owner === p.id && m.ships.includes(s.id)) s.focus = target;
     }
     else if (m.t === 'prio' && PRIO_KINDS.includes(m.kind) && Array.isArray(m.points)
              && m.points.length === PRIO_STOPS && m.points.every(Number.isFinite)) {
