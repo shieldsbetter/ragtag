@@ -145,10 +145,11 @@ const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silen
 // second pool and no rebuild state to keep in step -- and the depth is one number.
 // At one point a second that is 2.5 minutes to stand a wreck up, 100s to top a gun off.
 const WRECK_DEPTH = 150, REPAIR_RATE = 1;
-// Once the crew starts on a gun it gives it a whole second -- one whole point -- before
-// looking again. A tick is a thirtieth of a point, so re-deciding every tick makes the
-// crew strobe between guns the moment two of them rate the same.
-const REPAIR_DWELL = 1;
+// Once the crew starts on a gun it stays there for this long -- three seconds, so three
+// whole points -- before looking again. A tick is a thirtieth of a point, so re-deciding
+// every tick makes the crew strobe between guns the moment two of them rate the same,
+// and one second still reads as flitting.
+const REPAIR_DWELL = 3;
 
 // Terrain. The plane is cut into fixed chunks; each chunk's walls are a pure function
 // of its coordinates, so the same patch of space is always the same walls. Chunks are
