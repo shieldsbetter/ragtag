@@ -50,6 +50,13 @@ if (DEV) setInterval(() => { stale = sourceHash() !== VERSION; }, 2000);
 // space is populated where anyone is and empty everywhere else.
 const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 
+// Opposition is scattered through the world rather than spawned at anyone: each chunk
+// gets one roll the first time it is loaded, so exploring is what finds a fight. The
+// roll is per process, not per chunk file -- ships do not survive a restart, so a
+// restarted world repopulates the ground you have already walked over.
+const ENEMY_CHANCE = 0.2;             // per newly loaded chunk -- the knob for how busy space is
+const ENEMY_CLEAR = 900;              // never spawn this close to any existing ship
+
 // How far a camera may see from its own centre. The client will not zoom out past
 // this, so it bounds what any one client can ask to be sent -- which is what keeps a
 // snapshot small no matter how crowded the world gets.
@@ -251,16 +258,40 @@ function loadChunk(cx, cy) {
   }
   const c = { cx, cy, key, walls };
   chunks.set(key, c);
+  // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which
+  // would land back in here. The queue is drained once loading has settled.
+  if (Math.random() < ENEMY_CHANCE) pendingEnemies.push([cx, cy]);
   return c;
+}
+
+const pendingEnemies = [];
+
+// Somewhere inside the chunk, clear of rock and well away from anyone already there --
+// a raider that materialises inside your firing solution is not a discovery.
+function trySpawnEnemy(cx, cy) {
+  for (let i = 0; i < 10; i++) {
+    const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
+    if (blockedAt(x, y, HULL_CLEAR, false)) continue;   // must not generate terrain: see blockedAt
+    let clear = true;
+    for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
+    if (!clear) continue;
+    newShip(null, 'raiders', { x, y });   // owner null: nobody's ship, and nobody may order it
+    return;
+  }
 }
 
 // Chunks come in at ACTIVE_R and only go out past KEEP_R, so a ship loitering on a
 // boundary does not thrash them.
 // Terrain stays resident for two different reasons: ships need it to collide against,
 // cameras need it to draw. Both are anchors, with their own radii.
+// Raiders are deliberately not anchors. A ship left in every chunk you have ever
+// visited would each hold terrain resident and keep an asteroid field stocked, and the
+// world would grow without bound as you explore. Space exists where players are.
+const crewed = s => s.owner !== null;
+
 function chunkAnchors() {
   const out = [];
-  for (const s of ships) out.push({ x: s.x, y: s.y, load: ACTIVE_R, keep: KEEP_R });
+  for (const s of ships) if (crewed(s)) out.push({ x: s.x, y: s.y, load: ACTIVE_R, keep: KEEP_R });
   for (const p of players.values())
     if (p.view && p.ws.readyState === 1)
       out.push({ x: p.view.x, y: p.view.y, load: STREAM_R, keep: STREAM_R + 400 });
@@ -367,8 +398,13 @@ function pushOutOfWalls(x, y, r) {
 }
 
 // Is a disc of radius r at (x,y) touching a wall? Used to keep spawns out of rock.
-function blockedAt(x, y, r) {
-  for (const wall of nearbyWalls(x, y, true)) {
+// `ensure` generates the terrain it looks at. That is right when placing a player, and
+// catastrophic when placing something *because* a chunk loaded: each check would pull in
+// nine more chunks, each of those rolling for its own spawn, and the frontier walks
+// outward forever. Callers inside chunk loading pass false and settle for the walls that
+// already exist.
+function blockedAt(x, y, r, ensure = true) {
+  for (const wall of nearbyWalls(x, y, ensure)) {
     if (pointInWall(wall, x, y)) return true;
     if (closestOnWall(wall, x, y).d < r) return true;
   }
@@ -435,7 +471,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
-  stock(s, seedSpot);   // a new ship arrives in a populated neighbourhood, not a void
+  if (crewed(s)) stock(s, seedSpot);   // a new ship arrives in a populated neighbourhood, not a void
   return s;
 }
 
@@ -727,14 +763,17 @@ function manageRocks() {
   for (let i = rocks.length - 1; i >= 0; i--) {
     const r = rocks[i];
     let keep = false;
-    for (const s of ships) if (Math.hypot(r.x - s.x, r.y - s.y) < KEEP_R) { keep = true; break; }
+    for (const s of ships) if (crewed(s) && Math.hypot(r.x - s.x, r.y - s.y) < KEEP_R) { keep = true; break; }
     if (!keep) rocks.splice(i, 1);
   }
-  for (const s of ships) stock(s, bandSpot);
+  for (const s of ships) if (crewed(s)) stock(s, bandSpot);
 }
 
 function step(dt) {
   manageChunks();
+  // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
+  // the next tick rather than extending this one.
+  for (const [cx, cy] of pendingEnemies.splice(0)) trySpawnEnemy(cx, cy);
   for (const s of ships) {
     const cmd = s.dest ? autopilot(s, dt) : faceCmd(s, dt);
     s.th = cmd.thrust ? 1 : 0;

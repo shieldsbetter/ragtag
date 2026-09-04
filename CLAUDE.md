@@ -57,7 +57,10 @@ only ever be a bonus on top of something that works everywhere.
   stands between it and its destination, which clears isolated obstacles. It will not
   solve a maze and is not meant to: it sits in the mouth of a concave pocket until the
   give-up rule stops it. Whether that is ever worth a real search is undecided.
-- Opposition. The enemy carrier was removed; what provides conflict is unsettled.
+- Opposition. Each newly loaded chunk rolls once for a raider, so exploring is what
+  finds a fight. Raiders sit still and shoot: whether they should manoeuvre, patrol,
+  or come after you is undecided, as is whether a hulk with every gun silenced should
+  stay on the board.
 - Whether players can fight each other. All humans share one team today; per-player
   teams would make it PvP, and the machinery already supports it.
 - Whether ships ever retire. The world outlives its players and nothing removes ships.
@@ -110,6 +113,18 @@ drawing context. A phone's GPU tile rasteriser corrupted individual shapes for s
 frames — one hull torn open while the ship beside it drew perfectly. Nothing about what
 was drawn could avoid it; this is the only lever a page has. `?gpu=1` opts back in to
 compare. Do not remove this without testing on a phone.
+
+**Terrain generation is re-entrant.** `blockedAt` loads the chunks it inspects, so
+anything that queries walls *because* a chunk loaded will pull in nine more, each of
+which rolls for its own raider, and the frontier walks outward forever. It starved the
+tick loop completely -- the server clock froze while wall time ran on, which looks
+exactly like ships being stuck rather than like a busy process. Work triggered by chunk
+loading goes on a queue drained after loading settles, and asks with `ensure = false`.
+
+**Raiders are not anchors.** Terrain stays resident and asteroid fields stay stocked
+around *crewed* ships only. A ship left in every chunk you have ever visited would
+otherwise hold both open for the life of the process, and the world would grow without
+bound as you explore.
 
 **A carved chunk must never be regenerated.** Chunk files carry a format version and
 regenerate on mismatch. Once walls are destructible that would silently heal damage —
