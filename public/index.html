@@ -42,11 +42,30 @@
   }
   body.details-open #details { transform: none; }
 
-  #details h2 { font: inherit; letter-spacing: .18em; color: #4e8f7d; margin: 0 0 10px; }
-  #details .ship { border-top: 1px solid #14232f; padding: 8px 0; }
-  #details .ship b { color: #cfeee2; font-weight: normal; }
-  #details .k { color: #4e8f7d; }
-  #details .todo { color: #3d6b5e; margin-top: 14px; border-top: 1px solid #14232f; padding-top: 10px; }
+  #details h2 { font: inherit; letter-spacing: .18em; color: #4e8f7d; margin: 0 0 6px; }
+  #details .ship { border-top: 1px solid #14232f; }
+  /* The whole overview line is the accordion's hinge, so it is a button: a thumb aims at
+     a row, not at a chevron. */
+  #details .shiphead {
+    display: block; width: 100%; text-align: left; font: inherit; color: inherit;
+    background: none; border: 0; padding: 9px 2px; cursor: pointer;
+  }
+  #details .shiphead b { color: #cfeee2; font-weight: normal; }
+  #details .shiphead .st { color: #4e8f7d; }
+  #details .shiphead .tw { display: inline-block; color: #4e8f7d; transition: transform .15s; }
+  #details .shiphead.open .tw { transform: rotate(90deg); }
+  #details .shipbody { padding: 0 0 12px; }
+  #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
+
+  #details .env { margin-bottom: 14px; }
+  #details .envhead { color: #cfeee2; display: flex; justify-content: space-between; }
+  #details .envhead b { color: #3d6b5e; font-weight: normal; }
+  #details .env svg { width: 100%; height: auto; display: block; touch-action: none; }
+  #details .env .frame { fill: #060a11; stroke: #14232f; }
+  #details .env .curve { fill: none; stroke: #7fe8c8; stroke-width: 1.6; }
+  #details .env .stop { fill: #05070d; stroke: #7fe8c8; stroke-width: 1.6; }
+  #details .env .stop.off { stroke: #a45; fill: #2a1218; }
+  #details .envaxis { display: flex; justify-content: space-between; color: #3d6b5e; }
 
   /* One button, three homes: it sits at the screen edge when shut and rides just clear
      of the panel when open, so it never ends up underneath what it opened. */

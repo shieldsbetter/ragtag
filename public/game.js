@@ -153,6 +153,8 @@ ws.onmessage = e => {
   if (m.t === 'welcome') {
     myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf;
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
+    if (m.prioKinds) prioKinds = m.prioKinds;
+    if (m.prioStops) prioStops = m.prioStops;
     return;
   }
   if (m.t === 'reload') { location.reload(); return; }
@@ -474,25 +476,131 @@ let detailsOpen = WIDE.matches;
 WIDE.addEventListener('change', e => { detailsOpen = e.matches; syncDetails(true); });
 detailsToggle.addEventListener('click', () => { detailsOpen = !detailsOpen; syncDetails(true); });
 
-let detailsShown = '';
-function syncDetails(force) {
+// The fleet is an accordion: every selected ship shows a one-line overview, and one of
+// them at a time is open. Two ships' worth of envelope editors side by side would not
+// fit a phone, and comparing them is not what the panel is for -- setting one is.
+let openShip = null;
+const PRIO_LABEL = { rock: 'Asteroids', turret: 'Turrets' };
+let prioKinds = ['rock', 'turret'], prioStops = 5;
+
+const statusOf = s =>
+  `${s.hp.filter(h => h > 0).length}/${s.hp.length} guns  ${s.th ? 'burn' : 'coast'}`
+  + `  ${s.dx !== undefined ? 'move' : 'hold'}`;
+
+let builtKey = '';
+const statusEls = new Map();
+
+function syncDetails() {
   document.body.classList.toggle('has-selection', selection.size > 0);
   document.body.classList.toggle('details-open', detailsOpen);
   detailsToggle.textContent = detailsOpen ? '\u2715' : '\u2630';
   if (!selection.size || !detailsOpen) return;
-  const rows = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean).map(s => {
-    const alive = s.hp.filter(h => h > 0).length;
-    return `<div class="ship"><b>${s.id === designated ? '\u25c9 ' : ''}ship ${s.id}</b><br>`
-      + `<span class="k">guns</span> ${alive}/${s.hp.length}`
-      + `  <span class="k">throttle</span> ${s.th ? 'burn' : 'coast'}`
-      + `  <span class="k">order</span> ${s.dx !== undefined ? 'move' : 'hold'}</div>`;
-  }).join('');
-  const html = rows + '<div class="todo">Target priorities go here: per ship, then per '
-    + 'turret type, then per turret.</div>';
-  // The DOM is only touched when the text actually changes -- this runs every frame.
-  if (html === detailsShown) return;
-  detailsShown = html;
-  detailsBody.innerHTML = html;
+  const ships = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean);
+  if (!ships.some(s => s.id === openShip))
+    openShip = ships.some(s => s.id === designated) ? designated : (ships[0]?.id ?? null);
+
+  // Rebuilding blows away a half-dragged envelope, so it happens only when the shape of
+  // the panel changes -- which ships, which one is open, which one wears the ring. The
+  // live numbers are written into kept nodes every frame instead.
+  const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}`;
+  if (key !== builtKey) { builtKey = key; buildDetails(ships); }
+  for (const s of ships) {
+    const el = statusEls.get(s.id);
+    if (el) el.textContent = statusOf(s);
+  }
+}
+
+function buildDetails(ships) {
+  statusEls.clear();
+  detailsBody.textContent = '';
+  for (const s of ships) {
+    const row = document.createElement('div');
+    row.className = 'ship';
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'shiphead' + (s.id === openShip ? ' open' : '');
+    head.innerHTML = `<span class="tw">\u25b8</span> <b>${s.id === designated ? '\u25c9 ' : ''}`
+      + `ship ${s.id}</b> <span class="st"></span>`;
+    head.addEventListener('click', () => {
+      openShip = openShip === s.id ? null : s.id;
+      syncDetails();
+    });
+    statusEls.set(s.id, head.querySelector('.st'));
+    row.append(head);
+
+    if (s.id === openShip) {
+      const body = document.createElement('div');
+      body.className = 'shipbody';
+      const h = document.createElement('div');
+      h.className = 'sub';
+      h.textContent = 'TARGET PRIORITY';
+      body.append(h);
+      for (const k of prioKinds) body.append(envelope(s.id, k, s.pr && s.pr[k]));
+      row.append(body);
+    }
+    detailsBody.append(row);
+  }
+}
+
+// One envelope: distance across, priority up. The stops are fixed in X and dragged in Y,
+// which is a one-finger gesture and needs no way to add or delete a point.
+const ENV_W = 240, ENV_H = 88, ENV_PAD = 9;
+function envelope(shipId, kind, initial) {
+  const n = prioStops;
+  const v = (initial && initial.length === n ? initial : [100, 80, 60, 40, 20]).slice();
+  const X = i => ENV_PAD + i * (ENV_W - 2 * ENV_PAD) / (n - 1);
+  const Y = p => ENV_PAD + (1 - p / 100) * (ENV_H - 2 * ENV_PAD);
+
+  const el = document.createElement('div');
+  el.className = 'env';
+  el.innerHTML = `<div class="envhead">${PRIO_LABEL[kind] || kind}<b></b></div>`
+    + `<svg viewBox="0 0 ${ENV_W} ${ENV_H}">`
+    +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" `
+    +     `width="${ENV_W - 2 * ENV_PAD}" height="${ENV_H - 2 * ENV_PAD}"/>`
+    +   `<polyline class="curve" points=""/>`
+    +   v.map((_, i) => `<circle class="stop" r="4.5" cx="${X(i)}" cy="0"/>`).join('')
+    + `</svg>`
+    + `<div class="envaxis"><span>touching</span><span>max range</span></div>`;
+
+  const svg = el.querySelector('svg');
+  const curve = el.querySelector('.curve');
+  const stops = [...el.querySelectorAll('.stop')];
+  const readout = el.querySelector('.envhead b');
+  const paint = () => {
+    curve.setAttribute('points', v.map((p, i) => `${X(i)},${Y(p)}`).join(' '));
+    stops.forEach((c, i) => {
+      c.setAttribute('cy', Y(v[i]));
+      // Zero is not a low priority, it is a refusal, so it is worth being able to see.
+      c.classList.toggle('off', v[i] === 0);
+    });
+    readout.textContent = v.join('  ');
+  };
+  paint();
+
+  let held = -1, lastSend = 0;
+  const send = () => {
+    lastSend = performance.now();
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'prio', ship: shipId, kind, points: v }));
+  };
+  const apply = e => {
+    const r = svg.getBoundingClientRect(), sc = ENV_W / r.width;
+    const x = (e.clientX - r.left) * sc, y = (e.clientY - r.top) * sc;
+    // The stop is chosen once, on the press. After that the drag is vertical only, so a
+    // thumb sliding sideways cannot rewrite the neighbours on its way past.
+    if (held < 0) held = Math.max(0, Math.min(n - 1,
+      Math.round((x - ENV_PAD) / ((ENV_W - 2 * ENV_PAD) / (n - 1)))));
+    v[held] = Math.round(Math.max(0, Math.min(100,
+      (1 - (y - ENV_PAD) / (ENV_H - 2 * ENV_PAD)) * 100)));
+    paint();
+    if (performance.now() - lastSend > 120) send();   // the ship answers while you drag
+  };
+  svg.addEventListener('pointerdown', e => {
+    e.preventDefault(); svg.setPointerCapture(e.pointerId); held = -1; apply(e);
+  });
+  svg.addEventListener('pointermove', e => { if (svg.hasPointerCapture(e.pointerId)) apply(e); });
+  svg.addEventListener('pointerup', () => { if (held >= 0) send(); held = -1; });
+  return el;
 }
 
 // The screen region the pane may place controls in: everything the drawer is not
@@ -922,6 +1030,8 @@ function draw() {
   if (!state) return;
 
   fleet = state.ships.filter(s => s.owner === myId);
+  if (dev) window.__fleet = fleet;
+  if (dev) window.__cam = cam;
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone

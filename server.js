@@ -75,6 +75,27 @@ const CARRIER = {
   collide: [[-40, 0, 14], [-13, 0, 14], [13, 0, 14], [40, 0, 14]],
 };
 
+// ---- target priority ----
+// A turret used to shoot whatever was nearest. Instead each ship carries, per kind of
+// target, a curve from "how far out is it, as a fraction of gun range" to "how much do
+// I want it, 0-100"; the gun fires at the best-scoring thing it can see.
+//
+// Five stops with straight lines between them. That is enough to say "close in", "stand
+// off" or "only in the middle band", it is editable with a thumb, and it is small enough
+// to ride in every snapshot. Zero means do not engage at all -- not "engage last" --
+// which is the hook the eventual fair-game flag hangs on.
+const PRIO_STOPS = 5;
+const PRIO_KINDS = ['rock', 'turret'];
+// The default falls away with distance and never reaches zero, so an untouched ship
+// behaves exactly as it did before this existed: nearest first, nothing excluded.
+const defaultPrio = () => ({ rock: [100, 80, 60, 40, 20], turret: [100, 80, 60, 40, 20] });
+
+function prioAt(pts, f) {
+  const x = Math.max(0, Math.min(1, f)) * (PRIO_STOPS - 1);
+  const i = Math.min(PRIO_STOPS - 2, Math.floor(x));
+  return pts[i] + (pts[i + 1] - pts[i]) * (x - i);
+}
+
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
                                                // it does not need the sim's fidelity
 const BULLET_SPEED = 560, BULLET_LIFE = 1.2;
@@ -410,6 +431,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     heading: facing,                      // where it wants to point once it is done travelling
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
+    prio: defaultPrio(),
   };
   ships.add(s);
   stock(s, seedSpot);   // a new ship arrives in a populated neighbourhood, not a void
@@ -562,11 +584,11 @@ function placeTurrets() {
 // What a given side is willing to shoot: every rock, plus the live guns of anyone
 // on another team. A silenced turret is no longer worth a shell.
 function targetsFor(team) {
-  const list = rocks.map(r => ({ x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
+  const list = rocks.map(r => ({ kind: 'rock', x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
   for (const s of ships) {
     if (s.team === team) continue;
     for (const t of s.turrets)
-      if (t.hp > 0) list.push({ x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: TURRET_R });
+      if (t.hp > 0) list.push({ kind: 'turret', x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: TURRET_R });
   }
   return list;
 }
@@ -607,22 +629,27 @@ function aimTurrets(s, targets, dt) {
     const m = hull.mounts[i];
     const rest = s.a + m.facing;
 
-    // Everything this gun could shoot, nearest first, then take the closest one it can
-    // actually see. Picking the nearest and then rejecting it would leave the gun idle
+    // Everything this gun could shoot, best first, then take the best one it can
+    // actually see. Picking the best and then rejecting it would leave the gun idle
     // while a clear target stood behind it.
     const shots = [];
     for (const g of targets) {
       const dx = g.x - t.wx, dy = g.y - t.wy;
       const range = Math.hypot(dx, dy) - g.r;
       if (range >= T.range) continue;
+      const score = prioAt(s.prio[g.kind], range / T.range);
+      if (score <= 0) continue;                        // zero priority is "do not engage"
+
       const ux = g.vx - s.vx, uy = g.vy - s.vy;       // bullets inherit the hull's velocity
       const ti = intercept(dx, dy, ux, uy, BULLET_SPEED);
       if (ti === null || ti > BULLET_LIFE) continue;  // shell would expire before arrival
       const bearing = Math.atan2(dy + uy * ti, dx + ux * ti);
       if (Math.abs(angleDiff(bearing, rest)) > T.arcHalf) continue;   // outside this mount's arc
-      shots.push({ range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
+      shots.push({ score, range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
     }
-    shots.sort((p, q) => p.range - q.range);
+    // Nearest breaks a tie, which is what makes a flat envelope behave exactly like the
+    // nearest-first rule this replaced.
+    shots.sort((p, q) => q.score - p.score || p.range - q.range);
 
     let want = null;
     for (let k = 0; k < shots.length && k < LOS_TRIES; k++) {
@@ -770,6 +797,10 @@ function snapshotFor(p) {
       tu: s.turrets.map(t => +t.a.toFixed(2)),
       hp: s.turrets.map(t => t.hp),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
+      // Only to the ship's owner, and only because it is what the editor reads back on
+      // reconnect. It is identical frame to frame, so the shared deflate context sends
+      // almost nothing for it.
+      ...(s.owner === p.id ? { pr: s.prio } : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
@@ -845,7 +876,8 @@ wss.on('connection', ws => {
     p.view = { x: fleet[0].x, y: fleet[0].y };  // until the client says where it is looking
 
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
-      maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf }));
+      maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf,
+      prioKinds: PRIO_KINDS, prioStops: PRIO_STOPS }));
   }
 
   ws.on('message', raw => {
@@ -869,6 +901,11 @@ wss.on('connection', ws => {
     }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
       for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
+    }
+    else if (m.t === 'prio' && PRIO_KINDS.includes(m.kind) && Array.isArray(m.points)
+             && m.points.length === PRIO_STOPS && m.points.every(Number.isFinite)) {
+      const pts = m.points.map(v => Math.max(0, Math.min(100, Math.round(v))));
+      for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.prio[m.kind] = pts;
     }
     else if (m.t === 'view' && Number.isFinite(m.x) && Number.isFinite(m.y)) p.view = { x: m.x, y: m.y };
     else if (m.t === 'name' && typeof m.name === 'string') p.name = m.name.slice(0, 16);
