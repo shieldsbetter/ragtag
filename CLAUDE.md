@@ -4,11 +4,13 @@ A naval-tactics RTS in space. Server-authoritative simulation over a WebSocket, 
 on a canvas as outlined polygons — Asteroids' look, an RTS's pace.
 
 ```
-PORT=8123 npm run dev     # 8080 is usually taken on this machine
-NGROK=0 PORT=8123 npm run dev   # skip the public tunnel
+PORT=8123 npm run dev              # 8080 is usually taken on this machine
+PORT=8123 npm run dev -- --ngrok  # ...and a public ngrok URL
 ```
 
-Startup prints the local URL, the tunnel URL, and a QR of it.
+Startup prints the localhost URL, this machine's address on the local network, and a QR
+of the latter to scan from a phone. The tunnel is opt-in because it is metered and this
+game pushes ~22KB/s per client continuously.
 
 ---
 

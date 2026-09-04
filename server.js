@@ -15,7 +15,11 @@ const PORT = process.env.PORT || 8080;
 
 const TICK = 1000 / 30;
 const DEV = !!process.env.DEV;
-const NGROK = process.env.NGROK !== '0';   // a public tunnel every start; NGROK=0 opts out
+// A public tunnel is opt-in. It is metered, and this game pushes ~22KB/s per client
+// continuously, which eats a free ngrok allowance quickly. By default the
+// server advertises its address on the local network, which costs nothing.
+const argv = new Set(process.argv.slice(2));
+const NGROK = argv.has('--ngrok') || process.env.NGROK === '1';
 
 // A running process can outlive the file it was started from -- a watcher dies, a
 // restart is missed -- and a stale server is indistinguishable from a working one
@@ -967,6 +971,7 @@ server.listen(PORT, async () => {
     const lan = lanAddress();
     if (lan) {
       console.log(`  lan     http://${lan}:${PORT}`);
+      if (!NGROK) console.log('          (--ngrok for a public URL, at the cost of metered bandwidth)');
       qrcode.generate(`http://${lan}:${PORT}`, { small: true });
     } else {
       console.log('  (no network interface found -- localhost only)');
