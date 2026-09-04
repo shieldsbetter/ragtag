@@ -342,7 +342,9 @@ let longTimer = null, longFired = false;
 // and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
 // gesture on its own. A ring flies out on add and collapses in on drop.
 let confirm = null;             // { x, y, start, adding }
-const CONFIRM_MS = 320;
+// Screen pixels, not world units: these are feedback about a gesture, so they must clear
+// the thumb making it whatever the zoom happens to be.
+const CONFIRM_MS = 320, HOLD_R = 62, CONFIRM_R0 = 70, CONFIRM_GROW = 95;
 
 function cancelHold() {
   if (longTimer) { clearTimeout(longTimer); longTimer = null; haptic(0); }   // 0 cancels
@@ -568,7 +570,7 @@ let badFrames = 0;
 function drawHold(s, held) {
   if (!s) return;
   const p = new Path2D();
-  p.arc(s.x - cam.x, s.y - cam.y, 46, -Math.PI / 2,
+  p.arc(s.x - cam.x, s.y - cam.y, HOLD_R / cam.zoom, -Math.PI / 2,
         -Math.PI / 2 + Math.PI * 2 * Math.min(1, held / LONG_PRESS_MS));
   ctx.save();
   ctx.strokeStyle = 'rgba(95,240,176,.7)';
@@ -585,7 +587,7 @@ function drawConfirm(now) {
   if (t >= 1) { confirm = null; return; }
   const e = confirm.adding ? t : 1 - t;             // outward to add, inward to drop
   const p = new Path2D();
-  p.arc(confirm.x - cam.x, confirm.y - cam.y, 40 + e * 46, 0, Math.PI * 2);
+  p.arc(confirm.x - cam.x, confirm.y - cam.y, (CONFIRM_R0 + e * CONFIRM_GROW) / cam.zoom, 0, Math.PI * 2);
   ctx.save();
   ctx.strokeStyle = `rgba(150,255,205,${(1 - t) * 0.8})`;
   ctx.lineWidth = (2.5 * (1 - t) + 0.6) / cam.zoom;

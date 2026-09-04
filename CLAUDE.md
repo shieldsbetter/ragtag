@@ -39,10 +39,15 @@ and fissures through dense rock at the other. Neither extreme is the design targ
 both must work. Walls will eventually be destructible, which is why overlapping walls
 are merged into single polygons rather than left stacked.
 
+**Mobile first.** The phone is the target; desktop is the phone with a mouse. The whole
+gesture budget is tap, drag, long-press and pinch — and drag is already the map, so it
+is really three. A feature needing a fifth gesture needs a different design, not a
+modifier key. Feedback is sized in screen pixels, never world units, because a thumb is
+the same size at every zoom and covers roughly 45px of whatever is under it.
+
 **One game on every screen.** Phone and desktop show the same thing. Platform-specific
-rendering tricks are a bug, not an optimisation. Input is mobile-first: the gesture
-budget is tap, drag, long-press and pinch, and drag is already the map. Anything
-needing a fifth gesture needs a rethink instead.
+rendering tricks are a bug, not an optimisation, and platform-specific *feedback* may
+only ever be a bonus on top of something that works everywhere.
 
 **Open questions** — undecided, do not assume an answer:
 - Pathfinding. Ships currently collide with walls and stop; they do not route around
