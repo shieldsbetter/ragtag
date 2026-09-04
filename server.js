@@ -78,6 +78,10 @@ const STREAM_R = MAX_VIEW + VIEW_BUFFER;
 // A hull is plain data. Nothing about navigation is derived by hand from these
 // numbers -- the autopilot finds out how this ship stops by simulating it -- so a
 // new hull is a new entry here and nothing else.
+// The default a mount is built with, and what a shell takes off it. A hull may say
+// otherwise -- these are declared above the hulls because the hulls quote them.
+const TURRET_HP = 100, BULLET_DAMAGE = 20;   // five hits to silence a carrier's gun
+
 const CARRIER = {
   accel: 70, turn: 0.6, maxSpeed: 150,
   arriveR: 30, arriveV: 10,             // close enough, slow enough
@@ -87,7 +91,7 @@ const CARRIER = {
     { at: [32, -11], facing: -Math.PI / 2 }, { at: [0, -11], facing: -Math.PI / 2 }, { at: [-32, -11], facing: -Math.PI / 2 },
     { at: [32, 11], facing: Math.PI / 2 }, { at: [0, 11], facing: Math.PI / 2 }, { at: [-32, 11], facing: Math.PI / 2 },
   ],
-  turret: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4 },
+  turret: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4, hitR: 9, hp: TURRET_HP },
   // Four discs down the spine rather than one circle around the whole hull: a bloated
   // collider is what would jam in a narrow fissure.
   collide: [[-40, 0, 14], [-13, 0, 14], [13, 0, 14], [40, 0, 14]],
@@ -127,8 +131,10 @@ const defaultPrio = () => {
 
 // Where a gun sits on the repair axis: 0 is a fresh wreck at the bottom of the debt,
 // 1 is a gun at full health. The debt is part of the axis, so a half-rebuilt wreck
-// really is further along than an untouched one.
-const repairFrac = hp => (hp + WRECK_DEPTH) / (TURRET_HP + WRECK_DEPTH);
+// really is further along than an untouched one. Full health is the hull's, not a
+// constant: a fighter's one gun is tougher than a carrier's six.
+const maxHp = s => s.hull.turret.hp ?? TURRET_HP;
+const repairFrac = (hp, max) => (hp + WRECK_DEPTH) / (max + WRECK_DEPTH);
 
 // An ordered sequence of points, straight lines between them, x never going backwards.
 // Two points sharing an x are a vertical segment -- an instantaneous jump, up or down --
@@ -145,10 +151,30 @@ function prioAt(pts, f) {
   return pts[pts.length - 1][1];
 }
 
+// A fighter is one gun bolted to an engine. The gun does not traverse -- arcHalf is a
+// sliver, so it fires only when the nose is on the solution -- which is what makes the
+// thing fly at you rather than sit off your beam. It has no separate turret to shoot at:
+// its one "mount" sits at the centre of the hull with a hit radius the size of the hull,
+// so the fighter itself is the target, and `frail` says the hull dies with its gun.
+const FIGHTER = {
+  accel: 260, turn: 3.4, maxSpeed: 340,
+  arriveR: 30, arriveV: 10,
+  mounts: [{ at: [0, 0], facing: 0 }],
+  turret: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200 },
+  collide: [[0, 0, 9]],
+  frail: true,
+  // Rock goes through it. A fighter that can be swatted by gravel dies to the battlefield
+  // rather than to anyone, and the thing worth watching is whether your guns can lead it.
+  rockProof: true,
+  ai: 'fighter',
+};
+
+const HULLS = { carrier: CARRIER, fighter: FIGHTER };
+const hullKey = h => (h === FIGHTER ? 'fighter' : 'carrier');
+
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
                                                // it does not need the sim's fidelity
 const BULLET_SPEED = 560, BULLET_LIFE = 1.2;
-const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silence a gun
 
 // A silenced gun does not sit at zero, it falls into debt: the hit that kills it drops
 // it to -WRECK_DEPTH, and repair climbs back up the same axis. Keeping the cliff on the
@@ -335,7 +361,7 @@ function trySpawnEnemy(cx, cy) {
     let clear = true;
     for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
     if (!clear) continue;
-    newShip(null, 'raiders', { x, y });   // owner null: nobody's ship, and nobody may order it
+    newShip(null, 'raiders', { x, y }, FIGHTER);   // owner null: nobody's, and nobody may order it
     return;
   }
 }
@@ -558,7 +584,11 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     x: spot.x, y: spot.y, vx: 0, vy: 0, a: facing,
     heading: facing,                      // where it wants to point once it is done travelling
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
-    turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
+    turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown),
+                                      hp: hull.turret.hp ?? TURRET_HP, wx: 0, wy: 0 })),
+    side: Math.random() < 0.5 ? 1 : -1,   // which way this one likes to break
+    sideFor: rand(1.2, 3.5),
+    wander: 0,
     ore: 0,               // what its hold has picked up
     beam: null,           // the grain its tractor has hold of, for anyone watching
     prio: defaultPrio(),
@@ -715,6 +745,14 @@ function placeTurrets() {
   }
 }
 
+// Over the cliff in one step: there is no such thing as a gun sitting at zero. A frail
+// hull is its gun, so silencing it is killing it and the wreck does not linger -- a sky
+// full of drifting hulks is worse than a sky the fight has left.
+function wound(s, t, amount) {
+  t.hp = t.hp - amount <= 0 ? -WRECK_DEPTH : t.hp - amount;
+  if (t.hp <= 0 && s.hull.frail) ships.delete(s);
+}
+
 // What a given side is willing to shoot: every rock, plus the live guns of anyone
 // on another team. A silenced turret is no longer worth a shell.
 // Every candidate names the ship it belongs to, so an order given against a ship
@@ -724,9 +762,43 @@ function targetsFor(team) {
   for (const s of ships) {
     if (s.team === team) continue;
     for (const t of s.turrets)
-      if (t.hp > 0) list.push({ kind: 'turret', ship: s.id, x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: TURRET_R });
+      if (t.hp > 0) list.push({ kind: 'turret', ship: s.id, x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: s.hull.turret.hitR });
   }
   return list;
+}
+
+// A fighter picks the nearest crewed ship it can see and works it: it aims off to one
+// side of its quarry by an angle that opens up as it closes, which is a straight run at
+// long range and a turn across the bows at short, so it makes passes rather than sitting
+// still to be shot. The side it favours flips at odd intervals and its aim wanders, so a
+// gun leading it has to lead something that is not on rails.
+const FIGHT_R = 900;                  // how far off it will notice you
+const ORBIT_R = 200;                  // how close it tries to cut past
+const WANDER = 0.9, SIDE_MIN = 1.2, SIDE_MAX = 3.5;
+
+function fighterCmd(s, dt) {
+  let prey = null, best = FIGHT_R;
+  for (const o of ships) {
+    if (o.team === s.team || !crewed(o)) continue;
+    const d = Math.hypot(o.x - s.x, o.y - s.y);
+    if (d < best) { best = d; prey = o; }
+  }
+  if (!prey) return { turn: 0, thrust: 0 };            // nothing about: drift
+
+  s.sideFor -= dt;
+  if (s.sideFor <= 0) { s.side = -s.side; s.sideFor = rand(SIDE_MIN, SIDE_MAX); }
+  // A slow random walk on the aim, bounded, so it weaves instead of tracking cleanly.
+  s.wander = clamp(s.wander + rand(-WANDER, WANDER) * dt, 0.5);
+
+  // Tangent to a circle of ORBIT_R about the quarry: zero far out, a quarter turn at the
+  // circle itself. Newton does the rest -- it overshoots, and coming back round is the
+  // orbit.
+  const lead = Math.asin(Math.min(1, ORBIT_R / Math.max(best, ORBIT_R)));
+  const want = Math.atan2(prey.y - s.y, prey.x - s.x) + s.side * lead + s.wander;
+  const err = angleDiff(want, s.a);
+  // Burn whenever it is roughly pointed where it wants to go; a fighter is never coasting
+  // for long, which is what keeps it hard to lead.
+  return { turn: clamp(err, s.hull.turn * dt), thrust: Math.abs(err) < 0.9 ? 1 : 0 };
 }
 
 // With no move order the ship holds station and simply comes round to its heading.
@@ -860,9 +932,9 @@ function resolveWalls(s) {
 // interleave, because that is what "always work on the worst one" means. Zero priority
 // is how you call the crew off a gun entirely.
 function repairShip(s, dt) {
-  const T = s.turrets;
-  const wants = i => i !== null && T[i].hp < TURRET_HP
-    && prioAt(s.prio.repair, repairFrac(T[i].hp)) > 0;
+  const T = s.turrets, full = maxHp(s);
+  const wants = i => i !== null && T[i].hp < full
+    && prioAt(s.prio.repair, repairFrac(T[i].hp, full)) > 0;
   s.repairHold -= dt;
 
   // Guns named by hand are not a stronger opinion about priority, they replace it: the
@@ -870,13 +942,13 @@ function repairShip(s, dt) {
   // say. Naming a gun the curve refuses is a legitimate order, which is the point of
   // being able to name one. When they are all whole the curve takes over again rather
   // than leaving the crew idle beside a damaged gun.
-  const named = s.repairFocus.filter(i => T[i] && T[i].hp < TURRET_HP);
+  const named = s.repairFocus.filter(i => T[i] && T[i].hp < full);
   if (named.length) {
     if (s.repairHold <= 0 || !named.includes(s.repairing)) {
       s.repairing = named[(named.indexOf(s.repairing) + 1) % named.length];
       s.repairHold = REPAIR_DWELL;
     }
-    T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
+    T[s.repairing].hp = Math.min(full, T[s.repairing].hp + REPAIR_RATE * dt);
     return;
   }
 
@@ -886,7 +958,7 @@ function repairShip(s, dt) {
     let best = null, bestScore = 0;
     for (let i = 0; i < T.length; i++) {
       if (!wants(i)) continue;
-      const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
+      const score = prioAt(s.prio.repair, repairFrac(T[i].hp, full));
       // Ties go to the gun nearest to being finished, so even a flat band completes one
       // before starting the next.
       if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
@@ -897,7 +969,7 @@ function repairShip(s, dt) {
     s.repairHold = best === null ? 0 : REPAIR_DWELL;
   }
   if (s.repairing === null) return;
-  T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
+  T[s.repairing].hp = Math.min(full, T[s.repairing].hp + REPAIR_RATE * dt);
 }
 
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
@@ -979,7 +1051,8 @@ function step(dt) {
   // the next tick rather than extending this one.
   for (const [cx, cy] of pendingEnemies.splice(0)) trySpawnEnemy(cx, cy);
   for (const s of ships) {
-    const cmd = s.dest ? autopilot(s, dt) : faceCmd(s, dt);
+    const cmd = s.hull.ai === 'fighter' ? fighterCmd(s, dt)
+      : s.dest ? autopilot(s, dt) : faceCmd(s, dt);
     s.th = cmd.thrust ? 1 : 0;
     advance(s, cmd, dt, s.hull);
     resolveWalls(s);
@@ -1023,11 +1096,12 @@ function step(dt) {
     if (r.grace > 0) continue;
     let struck = false;
     for (const s of ships) {
+      if (s.hull.rockProof) continue;
       for (const t of s.turrets) {
         if (t.hp <= 0) continue;                      // nothing left there to hit
-        const dx = r.x - t.wx, dy = r.y - t.wy, rr = r.r + TURRET_R;
+        const dx = r.x - t.wx, dy = r.y - t.wy, rr = r.r + s.hull.turret.hitR;
         if (dx * dx + dy * dy >= rr * rr) continue;
-        t.hp = t.hp - ROCK_DAMAGE <= 0 ? -WRECK_DEPTH : t.hp - ROCK_DAMAGE;
+        wound(s, t, ROCK_DAMAGE);
         struck = true;
         break;
       }
@@ -1047,10 +1121,9 @@ function step(dt) {
       if (s.team === o.team) continue;
       for (const t of s.turrets) {
         if (t.hp <= 0) continue;
-        const dx = o.x - t.wx, dy = o.y - t.wy, rr = TURRET_R + o.r;
+        const dx = o.x - t.wx, dy = o.y - t.wy, rr = s.hull.turret.hitR + o.r;
         if (dx * dx + dy * dy >= rr * rr) continue;
-        // Over the cliff in one step: there is no such thing as a gun sitting at zero.
-        t.hp = t.hp - BULLET_DAMAGE <= 0 ? -WRECK_DEPTH : t.hp - BULLET_DAMAGE;
+        wound(s, t, BULLET_DAMAGE);
         bullets.splice(b, 1); struck = true;
         break;
       }
@@ -1088,7 +1161,7 @@ function snapshotFor(p) {
     t: 's', st: +performance.now().toFixed(1), v: VERSION, ...(stale ? { stale: 1 } : {}),
     players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
     ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
-      id: s.id, owner: s.owner,
+      id: s.id, owner: s.owner, h: hullKey(s.hull),
       // Ships keep sub-pixel position -- they are what the eye follows -- but angles do
       // not need three decimals: 0.01rad is a pixel at the tip of a hull.
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
@@ -1190,6 +1263,8 @@ wss.on('connection', ws => {
 
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
       maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf,
+      hulls: Object.fromEntries(Object.entries(HULLS).map(([k, h]) =>
+        [k, { mounts: h.mounts, arcHalf: h.turret.arcHalf, hp: h.turret.hp ?? TURRET_HP }])),
       prioMax: PRIO_MAX, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 

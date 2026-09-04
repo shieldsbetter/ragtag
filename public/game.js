@@ -19,6 +19,7 @@ const ctx = back.getContext('2d', { alpha: false, willReadFrequently: CPU });
 const hud = document.getElementById('hud');
 
 let myId = null, mounts = [], arcHalf = 0, maxView = 2200, clientVersion = '???????';
+let hulls = {};   // per hull: where its guns sit and how far they traverse
 
 // Diagnostic switches, set in the URL: ?off=labels,wallfill,walls,bars,arcs
 // Each removes one class of drawing so a rendering fault can be bisected on the device
@@ -151,7 +152,7 @@ ws.onclose = reloadWhenUp;
 ws.onmessage = e => {
   const m = JSON.parse(e.data);
   if (m.t === 'welcome') {
-    myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf;
+    myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf; hulls = m.hulls || {};
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
     if (m.prioMax) prioMax = m.prioMax;
     if (m.wreck) wreckDepth = m.wreck;
@@ -975,6 +976,16 @@ const DECK = [[36, 0], [-40, 0]];                       // spine
 const RIBS = [[[18, -12], [18, 12]], [[-14, -12], [-14, 12]]];
 const TURRET = [[-5, -4], [3, -4], [3, -1.5], [14, -1.5], [14, 1.5], [3, 1.5], [3, 4], [-5, 4]];
 const FLAME = [[-50, 0], [-62, 6], [-70, 0], [-62, -6]];
+// A dart with its gun in the nose, small enough that the carrier reads as the big thing.
+const DART = [[15, 0], [-7, -8], [-3, 0], [-7, 8]];
+const DART_FLAME = [[-4, 0], [-12, 3], [-17, 0], [-12, -3]];
+// Shapes are art and stay on the client; the server sends only where the guns are.
+// `guns: false` means the hull *is* the gun -- nothing to draw at the mount, and nothing
+// to draw an arc for, because it cannot traverse.
+const HULL_ART = {
+  carrier: { body: HULL, deck: DECK, ribs: RIBS, flame: FLAME, guns: true, reach: 90 },
+  fighter: { body: DART, flame: DART_FLAME, guns: false, reach: 30 },
+};
 const MARKER = [[0, -9], [9, 0], [0, 9], [-9, 0]];
 // Ore is drawn small and warm so it does not read as a rock you should be shooting.
 const ORE = [[0, -5], [4, -2], [3, 4], [-3, 4], [-4, -2]];
@@ -1456,18 +1467,21 @@ function draw() {
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
 
   for (const s of state.ships) {
-    if (!onScreen(s.x, s.y, 90)) continue;            // hull half-length plus turret reach
+    const art = HULL_ART[s.h] || HULL_ART.carrier;
+    if (!onScreen(s.x, s.y, art.reach)) continue;     // hull half-length plus turret reach
     const [x, y] = at(s);
     const own = s.owner === myId;
     const color = own ? '#5ff0b0' : '#ff6b8a';
-    poly(HULL, x, y, s.a, color);
-    poly(DECK, x, y, s.a, color, false, 1);
-    for (const rib of RIBS) poly(rib, x, y, s.a, color, false, 1);
-    if (s.th) poly(FLAME, x, y, s.a, '#ffb347', false);
+    poly(art.body, x, y, s.a, color);
+    if (art.deck) poly(art.deck, x, y, s.a, color, false, 1);
+    for (const rib of art.ribs || []) poly(rib, x, y, s.a, color, false, 1);
+    if (s.th) poly(art.flame, x, y, s.a, '#ffb347', false);
     // mounts ride the hull; each gun keeps its own world bearing
     const cos = Math.cos(s.a), sin = Math.sin(s.a);
-    mounts.forEach((mt, i) => {
-      const hp = s.hp ? s.hp[i] : TURRET_HP;
+    const mts = (hulls[s.h] || {}).mounts || mounts;
+    const full = (hulls[s.h] || {}).hp || TURRET_HP;   // a fighter's one gun is tougher
+    mts.forEach((mt, i) => {
+      const hp = s.hp ? s.hp[i] : full;
       const gx = x + mt.at[0] * cos - mt.at[1] * sin, gy = y + mt.at[0] * sin + mt.at[1] * cos;
       if (hp <= 0) {                                      // silenced: a mount, not a gun
         // s.rp only comes with your own ships, so someone else's wrecks show nothing --
@@ -1475,16 +1489,16 @@ function draw() {
         if (s.rp === i && !OFF.has('bars')) wreckRing(gx, gy, (hp + wreckDepth) / wreckDepth);
         return;
       }
-      if (own && !OFF.has('arcs')) {                      // show each mount's traverse limits
+      if (art.guns && own && !OFF.has('arcs')) {          // show each mount's traverse limits
         ctx.save();
         ctx.strokeStyle = 'rgba(95,240,176,.10)'; ctx.lineWidth = 1 / cam.zoom;
         const arc = new Path2D();
-        arc.arc(gx, gy, 40, s.a + mt.facing - arcHalf, s.a + mt.facing + arcHalf);
+        arc.arc(gx, gy, 40, s.a + mt.facing - (hulls[s.h] || {}).arcHalf, s.a + mt.facing + (hulls[s.h] || {}).arcHalf);
         ctx.stroke(arc);
         ctx.restore();
       }
-      poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
-      if (hp < TURRET_HP && !OFF.has('bars')) healthBar(gx, gy, hp / TURRET_HP);
+      if (art.guns) poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
+      if (hp < full && !OFF.has('bars')) healthBar(gx, gy, hp / full);
     });
     if (!own && !OFF.has('labels')) {
       ctx.save(); ctx.translate(x, y);
