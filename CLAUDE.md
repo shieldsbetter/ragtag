@@ -50,8 +50,10 @@ rendering tricks are a bug, not an optimisation, and platform-specific *feedback
 only ever be a bonus on top of something that works everywhere.
 
 **Open questions** — undecided, do not assume an answer:
-- Pathfinding. Ships currently collide with walls and stop; they do not route around
-  them. Deferred deliberately until terrain generation settles.
+- Pathfinding beyond local avoidance. A ship aims past the edge of whatever single wall
+  stands between it and its destination, which clears isolated obstacles. It will not
+  solve a maze and is not meant to: it sits in the mouth of a concave pocket until the
+  give-up rule stops it. Whether that is ever worth a real search is undecided.
 - Opposition. The enemy carrier was removed; what provides conflict is unsettled.
 - Whether players can fight each other. All humans share one team today; per-player
   teams would make it PvP, and the machinery already supports it.
@@ -115,6 +117,11 @@ the API in 129; iOS Safari never had it; the W3C is retiring the spec. `navigato
 must stay a bonus — every gesture needs visual confirmation that stands alone. It also
 needs user activation, so a pulse is scheduled inside the pointer handler as a pattern
 with a leading pause, not fired later from a timer.
+
+**A ship that cannot get there must stop.** Without the give-up rule an unreachable
+destination is a carrier shoving at rock forever. It only counts as stuck while actually
+burning — a carrier spends its first several seconds turning, motionless and healthy, and
+an earlier version of this rule cancelled every order before the ship had moved.
 
 **Bandwidth is compression-bound, not field-bound.** Snapshots are deflated with a
 shared context. Removing redundant fields buys almost nothing; digits do, because

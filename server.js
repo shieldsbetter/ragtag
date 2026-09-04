@@ -320,6 +320,27 @@ function segmentBlocked(ax, ay, bx, by, walls) {
   return false;
 }
 
+// Slide a point out of any wall it has landed in. A tap on solid rock should put the
+// ship against that rock, not send it grinding at a destination it can never reach.
+function pushOutOfWalls(x, y, r) {
+  for (let pass = 0; pass < 4; pass++) {
+    let moved = false;
+    for (const wall of nearbyWalls(x, y, true)) {
+      const inside = pointInWall(wall, x, y);
+      const near = closestOnWall(wall, x, y);
+      if (!inside && near.d >= r) continue;
+      const dx = inside ? near.x - x : x - near.x;
+      const dy = inside ? near.y - y : y - near.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const push = inside ? near.d + r : r - near.d;
+      x += (dx / len) * push; y += (dy / len) * push;
+      moved = true;
+    }
+    if (!moved) break;
+  }
+  return { x, y };
+}
+
 // Is a disc of radius r at (x,y) touching a wall? Used to keep spawns out of rock.
 function blockedAt(x, y, r) {
   for (const wall of nearbyWalls(x, y, true)) {
@@ -383,7 +404,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     id: nextId++, owner, team, hull,
     x: spot.x, y: spot.y, vx: 0, vy: 0, a: facing,
     heading: facing,                      // where it wants to point once it is done travelling
-    th: 0, dest: null, braking: false,
+    th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
   };
   ships.add(s);
@@ -433,6 +454,53 @@ function stopDistance(s, hull) {
   return Math.hypot(st.x, st.y);
 }
 
+// Not a path-finder. It looks at the one wall standing between here and the
+// destination, and aims just past whichever of its edges costs less to round. That
+// clears an isolated obstacle, which is most of them; it will sit in the mouth of a
+// concave pocket, which is the price of not searching.
+const DETOUR_CLEAR = 90;              // how far outside the silhouette to aim
+const HULL_CLEAR = 70;                // room a carrier needs to sit somewhere
+const STUCK_SECONDS = 2.5;            // pressed against rock this long: the order is over
+
+function detourAim(s) {
+  const walls = nearbyWalls(s.x, s.y);
+  if (!walls.length || !segmentBlocked(s.x, s.y, s.dest.x, s.dest.y, walls)) {
+    s.detourSide = 0;                 // the way is open; forget which way we were going
+    return null;
+  }
+  let blocking = null;
+  for (const wall of walls)
+    if (segmentBlocked(s.x, s.y, s.dest.x, s.dest.y, [wall])) { blocking = wall; break; }
+  if (!blocking) { s.detourSide = 0; return null; }
+
+  // The silhouette: the two vertices furthest to either side of the straight line.
+  const toDest = Math.atan2(s.dest.y - s.y, s.dest.x - s.x);
+  let left = -Infinity, right = Infinity, lv = null, rv = null;
+  for (const ring of blocking)
+    for (const [x, y] of ring) {
+      const off = angleDiff(Math.atan2(y - s.y, x - s.x), toDest);
+      if (off > left) { left = off; lv = [x, y]; }
+      if (off < right) { right = off; rv = [x, y]; }
+    }
+  if (!lv || !rv) return null;
+
+  // Aiming past a corner is worthless if the corner itself is behind more rock, so each
+  // candidate is only accepted when we can actually get to it in a straight line.
+  const candidate = side => {
+    const v = side > 0 ? lv : rv;
+    const d = Math.hypot(v[0] - s.x, v[1] - s.y) || 1;
+    const bearing = Math.atan2(v[1] - s.y, v[0] - s.x) + side * (DETOUR_CLEAR / d);
+    const aim = { x: s.x + Math.cos(bearing) * d, y: s.y + Math.sin(bearing) * d };
+    return segmentBlocked(s.x, s.y, aim.x, aim.y, walls) ? null : aim;
+  };
+
+  // Commit to a side for the duration -- re-deciding every tick makes a ship dither
+  // along the middle of an obstacle instead of rounding either end -- but take the other
+  // way round rather than steering into rock.
+  if (!s.detourSide) s.detourSide = Math.abs(left) <= Math.abs(right) ? 1 : -1;
+  return candidate(s.detourSide) ?? candidate(-s.detourSide) ?? null;
+}
+
 // Two states, and the boundary between them is measured rather than derived:
 // run at full throttle while there is still room to stop, then stop.
 function autopilot(s, dt) {
@@ -441,7 +509,29 @@ function autopilot(s, dt) {
   const dist = Math.hypot(dx, dy);
   if (dist < hull.arriveR && Math.hypot(s.vx, s.vy) < hull.arriveV) {
     s.dest = null; s.vx = 0; s.vy = 0;   // last few px/s of drift, killed rather than coasted forever
+    s.detourSide = 0;
     return { turn: 0, thrust: 0 };
+  }
+
+  // Held against rock while trying to move: the destination cannot be reached from
+  // here, and no amount of steering is going to change that. Give up rather than shove.
+  // Only while actually burning -- a carrier spends its first several seconds turning,
+  // motionless and perfectly healthy.
+  if (s.th && Math.hypot(s.vx, s.vy) < 8) {
+    s.stuckFor = (s.stuckFor || 0) + dt;
+    if (s.stuckFor > STUCK_SECONDS) {
+      s.dest = null; s.vx = 0; s.vy = 0; s.stuckFor = 0; s.detourSide = 0;
+      return { turn: 0, thrust: 0 };
+    }
+  } else s.stuckFor = 0;
+
+  // Rock in the way: steer for the edge of it instead, at speed. Braking is for the
+  // destination, and the destination is not where we are currently pointed.
+  const aim = detourAim(s);
+  if (aim) {
+    s.braking = false;
+    const ax = aim.x - s.x, ay = aim.y - s.y, ad = Math.hypot(ax, ay) || 1;
+    return chaseCmd(s, ax / ad, ay / ad, hull, dt);
   }
   // Committing matters: chase and brake are both full-throttle, so re-deciding every
   // tick makes the ship dither on the boundary instead of crossing it. Once the stop
@@ -765,8 +855,9 @@ wss.on('connection', ws => {
     if (m.t === 'move' && Number.isFinite(m.x) && Number.isFinite(m.y)) {
       for (const s of ships) {
         if (s.owner !== p.id || s.id !== m.ship) continue;    // you may only order your own
-        const dx = m.x - s.x, dy = m.y - s.y;
-        s.dest = { x: m.x, y: m.y }; s.braking = false;
+        const goal = pushOutOfWalls(m.x, m.y, HULL_CLEAR);
+        const dx = goal.x - s.x, dy = goal.y - s.y;
+        s.dest = goal; s.braking = false; s.detourSide = 0; s.stuckFor = 0;
         // Face the way you travelled, unless the order was a nudge too small to have a
         // direction worth adopting. Dragging the ring afterwards still overrides it.
         if (Math.hypot(dx, dy) > s.hull.arriveR) s.heading = Math.atan2(dy, dx);
