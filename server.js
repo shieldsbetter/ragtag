@@ -65,8 +65,11 @@ const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 // gets one roll the first time it is loaded, so exploring is what finds a fight. The
 // roll is per process, not per chunk file -- ships do not survive a restart, so a
 // restarted world repopulates the ground you have already walked over.
-const ENEMY_CHANCE = 0.2;             // per newly loaded chunk -- the knob for how busy space is
-const CACHE_CHANCE = 0.25;            // ...and how often there is something worth breaking open
+// One roll per newly loaded chunk, and what it rolls for is a nest: a cache with three
+// fighters standing over it. Opposition and reward are the same thing to find, so there
+// is a reason to take the fight rather than to avoid it.
+const NEST_CHANCE = 0.5;
+const NEST_GUARDS = 3, NEST_RING = 95;
 const ENEMY_CLEAR = 900;              // never spawn this close to any existing ship
 
 // How far a camera may see from its own centre. The client will not zoom out past
@@ -361,39 +364,32 @@ function loadChunk(cx, cy) {
   chunks.set(key, c);
   // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which
   // would land back in here. The queue is drained once loading has settled.
-  if (Math.random() < ENEMY_CHANCE) pendingEnemies.push([cx, cy]);
-  if (Math.random() < CACHE_CHANCE) pendingCaches.push([cx, cy]);
+  if (Math.random() < NEST_CHANCE) pendingNests.push([cx, cy]);
   return c;
 }
 
-const pendingEnemies = [];
-const pendingCaches = [];
+const pendingNests = [];
 
-// Somewhere clear inside the chunk, and never on top of anyone. Same shape as the
-// fighter roll, and deferred for the same reason: placing anything needs blockedAt,
-// which loads terrain.
-function trySpawnCache(cx, cy) {
+// Somewhere clear inside the chunk, and never on top of anyone: a cache with its guard
+// ringed round it. Deferred like everything else that runs off a chunk load, because
+// placing anything needs blockedAt, which loads terrain.
+function trySpawnNest(cx, cy) {
   for (let i = 0; i < 10; i++) {
     const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
     if (blockedAt(x, y, HULL_CLEAR, false)) continue;
     let clear = true;
     for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
     if (!clear) continue;
-    newShip(null, 'raiders', { x, y, a: 0 }, CACHE);
-    return;
-  }
-}
-
-// Somewhere inside the chunk, clear of rock and well away from anyone already there --
-// a raider that materialises inside your firing solution is not a discovery.
-function trySpawnEnemy(cx, cy) {
-  for (let i = 0; i < 10; i++) {
-    const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
-    if (blockedAt(x, y, HULL_CLEAR, false)) continue;   // must not generate terrain: see blockedAt
-    let clear = true;
-    for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
-    if (!clear) continue;
-    newShip(null, 'raiders', { x, y }, FIGHTER);   // owner null: nobody's, and nobody may order it
+    newShip(null, 'raiders', { x, y, a: 0 }, CACHE);   // owner null: nobody's, and nobody may order it
+    // The guard stands off it at even bearings from a random start. A berth in rock is
+    // skipped rather than shuffled: two fighters is a thinner guard, not a broken nest.
+    const phase = rand(0, Math.PI * 2);
+    for (let k = 0; k < NEST_GUARDS; k++) {
+      const a = phase + k * Math.PI * 2 / NEST_GUARDS;
+      const gx = x + Math.cos(a) * NEST_RING, gy = y + Math.sin(a) * NEST_RING;
+      if (blockedAt(gx, gy, 24, false)) continue;
+      newShip(null, 'raiders', { x: gx, y: gy, a }, FIGHTER);
+    }
     return;
   }
 }
@@ -1140,8 +1136,7 @@ function step(dt) {
   manageChunks();
   // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
   // the next tick rather than extending this one.
-  for (const [cx, cy] of pendingEnemies.splice(0)) trySpawnEnemy(cx, cy);
-  for (const [cx, cy] of pendingCaches.splice(0)) trySpawnCache(cx, cy);
+  for (const [cx, cy] of pendingNests.splice(0)) trySpawnNest(cx, cy);
   bleed(dt);
   for (const s of ships) {
     const cmd = s.hull.ai === 'static' ? { turn: 0, thrust: 0 }

@@ -57,10 +57,11 @@ only ever be a bonus on top of something that works everywhere.
   stands between it and its destination, which clears isolated obstacles. It will not
   solve a maze and is not meant to: it sits in the mouth of a concave pocket until the
   give-up rule stops it. Whether that is ever worth a real search is undecided.
-- Opposition. Each newly loaded chunk rolls once for a raider, so exploring is what
-  finds a fight. Raiders sit still and shoot: whether they should manoeuvre, patrol,
-  or come after you is undecided, as is whether a hulk with every gun silenced should
-  stay on the board.
+- Opposition. Each newly loaded chunk rolls once, at even odds, for a nest: an ore
+  cache with three fighters standing over it. Exploring is what finds a fight, and the
+  fight and the reward are the same thing to find. Fighters come at you and die rather
+  than leaving hulks; whether they should ever patrol, or leave their cache, is
+  undecided.
 - Whether players can fight each other. All humans share one team today; per-player
   teams would make it PvP, and the machinery already supports it.
 - Whether ships ever retire. The world outlives its players and nothing removes ships.
