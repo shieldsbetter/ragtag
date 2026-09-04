@@ -203,6 +203,7 @@ function blend(older, newer, t) {
       tu: e.tu.map((v, i) => p.tu?.[i] === undefined ? v : lerpAngle(p.tu[i], v, t)),
     })),
     rocks: pair(newer.rocks, byId(older.rocks), (p, e) => ({ a: lerpAngle(p.a, e.a, t) })),
+    ore: pair(newer.ore || [], byId(older.ore || []), (p, e) => ({ a: lerpAngle(p.a, e.a, t) })),
     bullets: pair(newer.bullets, byId(older.bullets), () => ({})),
   };
 }
@@ -532,6 +533,7 @@ let openShip = null;
 const PANELS = [
   { title: 'Targeting', axis: ['near', 'far'],
     rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
+  { title: 'Cargo', cargo: true, rows: [] },
   { title: 'Repair', axis: ['wrecked', 'full'], guns: true,
     // Everything left of this is a gun that is not there any more. It is worth seeing
     // where that ends, because the two halves of the axis mean different things: left of
@@ -549,6 +551,7 @@ const statusOf = s =>
 let builtKey = '';
 const statusEls = new Map();
 let gunEls = null, gunShip = null;    // the repair tab's live bars, one per mount
+let cargoEl = null;                   // the cargo tab's running total
 
 // A row per side, fore to aft along it: the grid reads like the ship does, so a bar and
 // the gun it stands for are in the same place. The column count follows the hull rather
@@ -603,11 +606,15 @@ function syncDetails() {
     const s = ships.find(q => q.id === gunShip);
     if (s && s.hp) paintGuns(s);
   }
+  if (cargoEl) {
+    const s = ships.find(q => q.id === gunShip);
+    if (s) cargoEl.textContent = s.or ?? 0;
+  }
 }
 
 function buildDetails(ships) {
   statusEls.clear();
-  gunEls = null; gunShip = null;
+  gunEls = null; gunShip = null; cargoEl = null;
   detailsBody.textContent = '';
   for (const s of ships) {
     const row = document.createElement('div');
@@ -640,6 +647,14 @@ function buildDetails(ships) {
         tabs.append(b);
       });
       body.append(tabs);
+      if (PANELS[openTab].cargo) {
+        const hold = document.createElement('div');
+        hold.className = 'hold';
+        hold.innerHTML = '<span class="k">Ore</span><b>0</b>';
+        cargoEl = hold.querySelector('b');
+        gunShip = s.id;
+        body.append(hold);
+      }
       if (PANELS[openTab].guns && mounts.length) body.append(gunGrid(s));
       for (const [kind, label] of PANELS[openTab].rows)
         body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
@@ -961,6 +976,9 @@ const RIBS = [[[18, -12], [18, 12]], [[-14, -12], [-14, 12]]];
 const TURRET = [[-5, -4], [3, -4], [3, -1.5], [14, -1.5], [14, 1.5], [3, 1.5], [3, 4], [-5, 4]];
 const FLAME = [[-50, 0], [-62, 6], [-70, 0], [-62, -6]];
 const MARKER = [[0, -9], [9, 0], [0, 9], [-9, 0]];
+// Ore is drawn small and warm so it does not read as a rock you should be shooting.
+const ORE = [[0, -5], [4, -2], [3, 4], [-3, 4], [-4, -2]];
+const ORE_COLOR = '#d8a851';
 const TURRET_HP = 100, BAR_W = 22, BAR_H = 3, BAR_DROP = 13;   // bar sizes are screen px
 
 // Green at full, yellow at half, red at nothing -- interpolated through yellow so the
@@ -1312,6 +1330,7 @@ function draw() {
   if (dev) window.__cam = cam;
   if (dev) window.__sel = [...selection];
   if (dev) window.__ws = ws;      // so a test can send an order the way the page would
+  if (dev) window.__ore = state.ore || [];
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
@@ -1385,6 +1404,26 @@ function draw() {
     ctx.restore();
     const pulse = 1 + 0.18 * Math.sin(now / 220);
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
+  }
+
+  for (const o of state.ore || []) {
+    if (!onScreen(o.x, o.y, 20)) continue;
+    poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2);
+  }
+  // A tractor with nothing to show for itself looks like a bug, so the beam is drawn --
+  // for anyone's ship, since it is a thing happening in the world.
+  for (const s of state.ships) {
+    if (s.bm === undefined) continue;
+    const grain = (state.ore || []).find(o => o.id === s.bm);
+    if (!grain) continue;
+    const beam = new Path2D();
+    beam.moveTo(s.x - cam.x, s.y - cam.y);
+    beam.lineTo(grain.x - cam.x, grain.y - cam.y);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(216,168,81,.45)';
+    ctx.lineWidth = 1.2 / cam.zoom;
+    ctx.stroke(beam);
+    ctx.restore();
   }
 
   drawGroup();

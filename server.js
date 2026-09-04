@@ -50,6 +50,13 @@ if (DEV) setInterval(() => { stale = sourceHash() !== VERSION; }, 2000);
 // space is populated where anyone is and empty everywhere else.
 const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 
+// Ore drifts like rock and is kept stocked the same way, so it is found by going
+// somewhere rather than by waiting. A ship reaches for the nearest grain inside
+// TRACTOR_R and hauls it in; nothing is aimed and nothing is ordered, so collecting is
+// a consequence of where you park, which is the same bargain the guns make.
+const ORE_TARGET = 14, ORE_VALUE = 5;
+const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
+
 // Opposition is scattered through the world rather than spawned at anyone: each chunk
 // gets one roll the first time it is loaded, so exploring is what finds a fight. The
 // roll is per process, not per chunk file -- ships do not survive a restart, so a
@@ -188,6 +195,7 @@ const players = new Map();   // playerId -> { id, ws, name, score }
 const ships = new Set();     // every ship in play; each knows its owner
 const bullets = [];
 const rocks = [];
+const ore = [];
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const angleDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
@@ -469,12 +477,19 @@ function spawnRock(size, x, y, grace = 0) {
   });
 }
 
-// What is left of a rock that came apart, wherever it was standing. The pieces cannot
-// hurt anything for a moment, which is what stops a cascade landing all at once.
+// What is left of a rock that came apart, wherever it was standing: two smaller rocks
+// and a handful of ore shaken loose. The pieces cannot hurt anything for a moment, which
+// is what stops a cascade landing all at once.
+//
+// Only a rock that actually splits sheds ore. The smallest ones break up into nothing
+// and leave nothing, so mining is worth doing on the big ones.
+const ORE_PER_SPLIT = [2, 5];
 function shatter(r) {
   if (r.size <= 1) return;
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
+  const n = ORE_PER_SPLIT[0] + Math.floor(Math.random() * (ORE_PER_SPLIT[1] - ORE_PER_SPLIT[0] + 1));
+  for (let i = 0; i < n; i++) spawnOre(r.x, r.y);
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
@@ -508,6 +523,15 @@ const bandSpot = s => {
   return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
 };
 
+function spawnOre(x, y) {
+  ore.push({
+    id: nextId++, x, y,
+    vx: rand(-40, 40), vy: rand(-40, 40),
+    a: rand(0, Math.PI * 2), spin: rand(-2, 2), r: 5,
+    held: null,             // the one ship whose beam has it
+  });
+}
+
 // Top a ship's neighbourhood back up to ROCK_TARGET, placing new rocks where `spot` says.
 function stock(s, spot) {
   let near = 0;
@@ -524,6 +548,8 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     heading: facing,                      // where it wants to point once it is done travelling
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
+    ore: 0,               // what its hold has picked up
+    beam: null,           // the grain its tractor has hold of, for anyone watching
     prio: defaultPrio(),
     repairing: null,      // index of the one gun the repair point is going into
     repairHold: 0,        // seconds left before the crew may look elsewhere
@@ -531,7 +557,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
-  if (crewed(s)) stock(s, seedSpot);   // a new ship arrives in a populated neighbourhood, not a void
+  if (crewed(s)) { stock(s, seedSpot); stockOre(s, seedSpot); }   // arrives in a populated neighbourhood, not a void
   return s;
 }
 
@@ -875,6 +901,63 @@ function manageRocks() {
   for (const s of ships) if (crewed(s)) stock(s, bandSpot);
 }
 
+// Top a ship's neighbourhood back up, same shape as stock() for rocks.
+function stockOre(s, spot) {
+  let near = 0;
+  for (const o of ore) if (Math.hypot(o.x - s.x, o.y - s.y) < ACTIVE_R) near++;
+  for (; near < ORE_TARGET; near++) spawnOre(...spot(s));
+}
+
+// The same bargain as rocks: it exists where players are, and goes when they leave.
+function manageOre() {
+  for (let i = ore.length - 1; i >= 0; i--) {
+    let keep = false;
+    for (const s of ships) if (crewed(s) && Math.hypot(ore[i].x - s.x, ore[i].y - s.y) < KEEP_R) { keep = true; break; }
+    if (!keep) ore.splice(i, 1);
+  }
+  for (const s of ships) if (crewed(s)) stockOre(s, bandSpot);
+}
+
+// One grain at a time, the nearest one in reach that the ship can actually see and that
+// nobody else has hold of. Raiders have no hold to put it in, so they do not reach for
+// it: the map is not quietly emptied behind you.
+function tractor(s, dt) {
+  const had = s.beam;
+  s.beam = null;
+  const release = () => {
+    if (had === null) return;
+    const prev = ore.find(o => o.id === had);
+    if (prev && prev.held === s.id) prev.held = null;
+  };
+  if (!crewed(s)) return release();
+  const polys = nearbyWalls(s.x, s.y);
+  let best = null, bestD = TRACTOR_R;
+  for (const o of ore) {
+    // Spoken for: two beams on one grain would fight over its velocity and neither
+    // would land it.
+    if (o.held !== null && o.held !== s.id) continue;
+    const d = Math.hypot(o.x - s.x, o.y - s.y);
+    if (d >= bestD) continue;
+    // Rock stops a beam the way it stops a shell. Checked only for grains that would
+    // actually win, so the sight test runs a handful of times rather than once per grain.
+    if (polys.length && segmentBlocked(s.x, s.y, o.x, o.y, polys)) continue;
+    bestD = d; best = o;
+  }
+  if (!best || best.id !== had) release();
+  if (!best) return;
+  if (bestD <= ORE_GRAB) {
+    ore.splice(ore.indexOf(best), 1);
+    s.ore += ORE_VALUE;
+    return;
+  }
+  best.held = s.id;
+  s.beam = best.id;
+  // Straight at the ship, overriding whatever drift it had: a beam that merely nudged
+  // would lose grains to their own momentum and look broken doing it.
+  best.vx = (s.x - best.x) / bestD * TRACTOR_PULL;
+  best.vy = (s.y - best.y) / bestD * TRACTOR_PULL;
+}
+
 function step(dt) {
   manageChunks();
   // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
@@ -910,6 +993,8 @@ function step(dt) {
     r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt;
     if (r.grace > 0) r.grace -= dt;
   }
+  for (const o of ore) { o.x += o.vx * dt; o.y += o.vy * dt; o.a += o.spin * dt; }
+  for (const s of ships) tractor(s, dt);
 
   // Rocks against guns. The hull is not a target -- same as for shells -- so a rock that
   // misses a turret sails over the ship it is mounted on.
@@ -968,6 +1053,7 @@ function step(dt) {
   }
 
   manageRocks();
+  manageOre();
 }
 
 // One snapshot per client, holding only what that client's camera can reach. Your own
@@ -997,19 +1083,22 @@ function snapshotFor(p) {
       // above zero stays public, which is what makes a battered enemy worth reading.
       hp: s.turrets.map(t => Math.round(s.owner === p.id ? t.hp : Math.max(0, t.hp))),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
+      // The beam is a thing in the world, so everyone near enough sees it.
+      ...(s.beam !== null ? { bm: s.beam } : {}),
       // Only to the ship's owner, and only because it is what the editor reads back on
       // reconnect. It is identical frame to frame, so the shared deflate context sends
       // almost nothing for it.
       ...(s.owner === p.id
         ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
             ...(s.repairing !== null ? { rp: s.repairing } : {}),
-            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}) }
+            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}), or: s.ore }
         : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
     bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
     rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y), a: +r.a.toFixed(2), size: r.size, seed: r.seed })),
+    ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y), a: +o.a.toFixed(2) })),
   });
 }
 
