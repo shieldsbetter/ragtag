@@ -1,3 +1,6 @@
 node_modules/
 npm-debug.log*
 world/
+
+# throwaway CDP/websocket probes used to verify behaviour; they belong in a scratch dir
+*.cjs
