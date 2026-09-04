@@ -1415,7 +1415,7 @@ function draw() {
   // the emitter out to the grain, in a blue that belongs to nothing else on the board, so
   // it never reads as gunnery. The flare is screen-sized: the beam is a thing you look
   // at, not a thing with a width in metres.
-  const BEAM_RGB = '106,184,255', BEAM_FLARE = 11;
+  const BEAM_RGB = '106,184,255', BEAM_FLARE = 11, BEAM_HZ = 1;
   for (const s of state.ships) {
     if (s.bm === undefined) continue;
     const grain = (state.ore || []).find(o => o.id === s.bm);
@@ -1430,14 +1430,13 @@ function draw() {
     beam.lineTo(gx - px * far, gy - py * far);
     beam.lineTo(sx - px * near, sy - py * near);
     beam.closePath();
-    // Slow enough to read as a hum rather than a flicker.
-    const pulse = 0.5 + 0.5 * Math.sin(now / 620);
+    // No outline: an edge makes it a shape sitting on the board rather than light
+    // coming off the ship, so the whole wedge is carried by the fill and the fill has to
+    // be strong enough on its own.
+    const pulse = 0.5 + 0.5 * Math.sin(now / 1000 * BEAM_HZ * Math.PI * 2);
     ctx.save();
-    ctx.fillStyle = `rgba(${BEAM_RGB},${0.07 + 0.11 * pulse})`;
-    ctx.strokeStyle = `rgba(${BEAM_RGB},${0.28 + 0.34 * pulse})`;
-    ctx.lineWidth = 1 / cam.zoom;
+    ctx.fillStyle = `rgba(${BEAM_RGB},${0.10 + 0.20 * pulse})`;
     ctx.fill(beam);
-    ctx.stroke(beam);
     ctx.restore();
   }
 
