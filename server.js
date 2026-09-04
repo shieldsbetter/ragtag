@@ -112,10 +112,10 @@ const CARRIER = {
 // to ride in every snapshot. Zero means do not engage at all -- not "engage last" --
 // which is the hook the eventual fair-game flag hangs on.
 const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-editable
-// 'rock' and 'turret' say what to shoot; 'repair' says what to mend. Same five-stop
+// 'rock', 'turret' and 'fighter' say what to shoot; 'repair' says what to mend. Same
 // curve, same order on the wire, same editor -- only the axis underneath differs, which
-// is distance for the first two and health for the third.
-const PRIO_KINDS = ['rock', 'turret', 'repair'];
+// is distance for the first three and health for the last.
+const PRIO_KINDS = ['rock', 'turret', 'fighter', 'repair'];
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
 // Two bands that do not overlap, split at a quarter health. Below the split priority
@@ -129,7 +129,7 @@ const defaultPrio = () => {
   const span = WRECK_DEPTH + TURRET_HP;
   const quarter = (WRECK_DEPTH + TURRET_HP * 0.25) / span;   // a quarter of positive health
   return {
-    rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
+    rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]], fighter: [[0, 100], [1, 20]],
     repair: [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
   };
 };
@@ -168,6 +168,7 @@ const FIGHTER = {
   turret: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200 },
   collide: [[0, 0, 9]],
   frail: true,
+  targetKind: 'fighter',
   // Rock goes through it. A fighter that can be swatted by gravel dies to the battlefield
   // rather than to anyone, and the thing worth watching is whether your guns can lead it.
   rockProof: true,
@@ -820,7 +821,11 @@ function targetsFor(team) {
   for (const s of ships) {
     if (s.team === team) continue;
     for (const t of s.turrets)
-      if (t.hp > 0) list.push({ kind: 'turret', ship: s.id, x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: s.hull.turret.hitR });
+      // What kind of thing a mount counts as is the hull's business: a fighter is one
+      // mount, and asking a gun to rank it against a carrier's battery is a different
+      // question from ranking one battery against another.
+      if (t.hp > 0) list.push({ kind: s.hull.targetKind || 'turret', ship: s.id,
+                                x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: s.hull.turret.hitR });
   }
   return list;
 }

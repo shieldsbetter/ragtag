@@ -539,7 +539,7 @@ let openShip = null;
 // debt on the low end -- and three curves stacked runs past the bottom of a phone.
 const PANELS = [
   { title: 'Targeting', axis: ['near', 'far'],
-    rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
+    rows: [['rock', 'Asteroids'], ['turret', 'Turrets'], ['fighter', 'Fighters']] },
   { title: 'Cargo', cargo: true, rows: [] },
   { title: 'Repair', axis: ['wrecked', 'full'], guns: true,
     // Everything left of this is a gun that is not there any more. It is worth seeing
