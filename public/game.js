@@ -986,6 +986,8 @@ let debris = [];
 
 function blowUp(k, born) {
   const art = HULL_ART[k.h] || HULL_ART.carrier;
+  const span = art.deathMs || DEBRIS_MS;
+  const slow = span / DEBRIS_MS;          // a longer death is a gentler one, not a faster one
   const cos = Math.cos(k.a), sin = Math.sin(k.a);
   const world = ([px, py]) => [k.x + px * cos - py * sin, k.y + px * sin + py * cos];
   const body = art.body;
@@ -996,7 +998,7 @@ function blowUp(k, born) {
     const a = world(body[i]), b = world(body[(i + 1) % body.length]);
     const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
     const away = Math.atan2(my - k.y, mx - k.x) + rnd(-0.5, 0.5);
-    const speed = rnd(14, 42);
+    const speed = rnd(14, 42) / slow;
     pieces.push({
       ax: a[0] - mx, ay: a[1] - my, bx: b[0] - mx, by: b[1] - my,   // about its own middle
       x: mx, y: my, vx: Math.cos(away) * speed, vy: Math.sin(away) * speed,
@@ -1006,32 +1008,35 @@ function blowUp(k, born) {
   const sparks = [];
   for (let i = 0; i < 16; i++) {
     const a = rnd(0, Math.PI * 2), speed = rnd(40, 190);
-    sparks.push({ x: k.x, y: k.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed,
-                  life: rnd(0.45, 1) * SPARK_MS, hot: Math.random() < 0.5 });
+    sparks.push({ x: k.x, y: k.y, vx: Math.cos(a) * speed / slow, vy: Math.sin(a) * speed / slow,
+                  life: rnd(0.45, 1) * SPARK_MS * slow, hot: Math.random() < 0.5,
+                  ore: !!art.oreSparks });
   }
-  debris.push({ born, pieces, sparks });
+  debris.push({ born, pieces, sparks, span, spin: art.deathSpin || 0,
+                rgb: art.debrisRgb || '255,107,138' });
 }
 
 const rnd = (a, b) => a + Math.random() * (b - a);
 
 function drawDebris(now) {
   const clock = now - RENDER_DELAY;          // the same instant the ships are drawn at
-  debris = debris.filter(d => clock - d.born < DEBRIS_MS);
+  debris = debris.filter(d => clock - d.born < d.span);
   if (dev) window.__debris = debris;
   for (const d of debris) {
     const age = clock - d.born;
     if (age < 0) continue;                   // arrived early: it has not happened yet
     const t = age / 1000;
-    const fade = 1 - age / DEBRIS_MS;
+    const fade = 1 - age / d.span;
     ctx.save();
     ctx.lineCap = 'round';
     for (const p of d.pieces) {
       const px = p.x + p.vx * t - cam.x, py = p.y + p.vy * t - cam.y;
-      const c = Math.cos(p.spin * t), s = Math.sin(p.spin * t);
+      const turn = (p.spin + d.spin) * t;
+      const c = Math.cos(turn), s = Math.sin(turn);
       const line = new Path2D();
       line.moveTo(px + p.ax * c - p.ay * s, py + p.ax * s + p.ay * c);
       line.lineTo(px + p.bx * c - p.by * s, py + p.bx * s + p.by * c);
-      ctx.strokeStyle = `rgba(255,107,138,${(fade * fade).toFixed(3)})`;
+      ctx.strokeStyle = `rgba(${d.rgb},${(fade * fade).toFixed(3)})`;
       ctx.lineWidth = 1.4 / cam.zoom;
       ctx.stroke(line);
     }
@@ -1041,7 +1046,8 @@ function drawDebris(now) {
       const kx = k.x + k.vx * (age / 1000) - cam.x, ky = k.y + k.vy * (age / 1000) - cam.y;
       const dot = new Path2D();
       dot.arc(kx, ky, (1.6 + 1.4 * f) / cam.zoom, 0, Math.PI * 2);
-      ctx.fillStyle = k.hot ? `rgba(255,214,92,${f.toFixed(3)})` : `rgba(255,86,64,${f.toFixed(3)})`;
+      ctx.fillStyle = k.ore ? `rgba(216,168,81,${f.toFixed(3)})`
+        : k.hot ? `rgba(255,214,92,${f.toFixed(3)})` : `rgba(255,86,64,${f.toFixed(3)})`;
       ctx.fill(dot);
     }
     ctx.restore();
@@ -1056,6 +1062,28 @@ const TURRET = [[-5, -4], [3, -4], [3, -1.5], [14, -1.5], [14, 1.5], [3, 1.5], [
 const FLAME = [[-50, 0], [-62, 6], [-70, 0], [-62, -6]];
 // A dart with its gun in the nose, small enough that the carrier reads as the big thing.
 const DART = [[15, 0], [-7, -8], [-3, 0], [-7, 8]];
+const PENT = Array.from({ length: 5 }, (_, i) => {
+  const a = -Math.PI / 2 + i * Math.PI * 2 / 5;
+  return [Math.cos(a) * 22, Math.sin(a) * 22];
+});
+
+// The cache is drawn rather than described by a shape, because its whole reading is
+// motion: a shell that turns, and inside it a mass that is never quite still. Both are
+// on the wall clock, not on anything the server says, so it costs nothing on the wire.
+function drawCache(x, y, now) {
+  poly(PENT, x, y, now / 2600, '#e6edf6', false, 1.4);
+  ctx.save();
+  ctx.fillStyle = 'rgba(216,168,81,.5)';
+  for (let i = 0; i < 7; i++) {
+    const ph = now / 950 + i * 1.7;
+    const d = 5 + 4.5 * Math.sin(ph * 0.7 + i * 2.1);
+    const a = ph * 0.45 + i;
+    const blob = new Path2D();
+    blob.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, 3 + 1.6 * Math.sin(ph * 1.3 + i), 0, Math.PI * 2);
+    ctx.fill(blob);
+  }
+  ctx.restore();
+}
 const DART_FLAME = [[-4, 0], [-12, 3], [-17, 0], [-12, -3]];
 // Shapes are art and stay on the client; the server sends only where the guns are.
 // `guns: false` means the hull *is* the gun -- nothing to draw at the mount, and nothing
@@ -1063,6 +1091,8 @@ const DART_FLAME = [[-4, 0], [-12, 3], [-17, 0], [-12, -3]];
 const HULL_ART = {
   carrier: { body: HULL, deck: DECK, ribs: RIBS, flame: FLAME, guns: true, reach: 90 },
   fighter: { body: DART, flame: DART_FLAME, guns: false, reach: 30 },
+  cache: { body: PENT, draw: drawCache, guns: false, reach: 40,
+           deathMs: 10000, deathSpin: 0.25, oreSparks: true, debrisRgb: '230,237,246' },
 };
 const MARKER = [[0, -9], [9, 0], [0, 9], [-9, 0]];
 // Ore is drawn small and warm so it does not read as a rock you should be shooting.
@@ -1551,10 +1581,13 @@ function draw() {
     const [x, y] = at(s);
     const own = s.owner === myId;
     const color = own ? '#5ff0b0' : '#ff6b8a';
-    poly(art.body, x, y, s.a, color);
-    if (art.deck) poly(art.deck, x, y, s.a, color, false, 1);
-    for (const rib of art.ribs || []) poly(rib, x, y, s.a, color, false, 1);
-    if (s.th) poly(art.flame, x, y, s.a, '#ffb347', false);
+    if (art.draw) art.draw(x, y, now);
+    else {
+      poly(art.body, x, y, s.a, color);
+      if (art.deck) poly(art.deck, x, y, s.a, color, false, 1);
+      for (const rib of art.ribs || []) poly(rib, x, y, s.a, color, false, 1);
+      if (s.th) poly(art.flame, x, y, s.a, '#ffb347', false);
+    }
     // mounts ride the hull; each gun keeps its own world bearing
     const cos = Math.cos(s.a), sin = Math.sin(s.a);
     const mts = (hulls[s.h] || {}).mounts || mounts;
@@ -1579,7 +1612,9 @@ function draw() {
       if (art.guns) poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
       if (hp < full && !OFF.has('bars')) healthBar(gx, gy, hp / full);
     });
-    if (!own && !OFF.has('labels')) {
+    // Only somebody's ship gets a name. Raiders and caches belong to nobody, and the
+    // label was drawing a red "?" under every one of them.
+    if (!own && s.owner !== null && !OFF.has('labels')) {
       ctx.save(); ctx.translate(x, y);
       ctx.fillStyle = 'rgba(255,107,138,.7)';
       ctx.font = `${11 / cam.zoom}px ui-monospace, monospace`; ctx.textAlign = 'center';

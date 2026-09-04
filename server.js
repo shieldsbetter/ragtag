@@ -66,6 +66,7 @@ const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 // roll is per process, not per chunk file -- ships do not survive a restart, so a
 // restarted world repopulates the ground you have already walked over.
 const ENEMY_CHANCE = 0.2;             // per newly loaded chunk -- the knob for how busy space is
+const CACHE_CHANCE = 0.25;            // ...and how often there is something worth breaking open
 const ENEMY_CLEAR = 900;              // never spawn this close to any existing ship
 
 // How far a camera may see from its own centre. The client will not zoom out past
@@ -169,8 +170,22 @@ const FIGHTER = {
   ai: 'fighter',
 };
 
-const HULLS = { carrier: CARRIER, fighter: FIGHTER };
-const hullKey = h => (h === FIGHTER ? 'fighter' : 'carrier');
+// A cache is a thing to shoot, not a thing that shoots: one mount at its centre with a
+// hull-sized hit radius and no reach at all, so it is a target and never a shooter. Rock
+// goes through it -- a static object in an asteroid field would otherwise be ground down
+// by drifting gravel without anyone deciding anything.
+const CACHE = {
+  accel: 0, turn: 0, maxSpeed: 0,
+  arriveR: 30, arriveV: 10,
+  mounts: [{ at: [0, 0], facing: 0 }],
+  turret: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 26, hp: 600 },
+  collide: [[0, 0, 20]],
+  frail: true, rockProof: true, ai: 'static',
+  spills: 50,           // grains it lets go of when it breaks
+};
+
+const HULLS = { carrier: CARRIER, fighter: FIGHTER, cache: CACHE };
+const hullKey = h => (h === FIGHTER ? 'fighter' : h === CACHE ? 'cache' : 'carrier');
 
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
                                                // it does not need the sim's fidelity
@@ -347,10 +362,27 @@ function loadChunk(cx, cy) {
   // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which
   // would land back in here. The queue is drained once loading has settled.
   if (Math.random() < ENEMY_CHANCE) pendingEnemies.push([cx, cy]);
+  if (Math.random() < CACHE_CHANCE) pendingCaches.push([cx, cy]);
   return c;
 }
 
 const pendingEnemies = [];
+const pendingCaches = [];
+
+// Somewhere clear inside the chunk, and never on top of anyone. Same shape as the
+// fighter roll, and deferred for the same reason: placing anything needs blockedAt,
+// which loads terrain.
+function trySpawnCache(cx, cy) {
+  for (let i = 0; i < 10; i++) {
+    const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
+    if (blockedAt(x, y, HULL_CLEAR, false)) continue;
+    let clear = true;
+    for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
+    if (!clear) continue;
+    newShip(null, 'raiders', { x, y, a: 0 }, CACHE);
+    return;
+  }
+}
 
 // Somewhere inside the chunk, clear of rock and well away from anyone already there --
 // a raider that materialises inside your firing solution is not a discovery.
@@ -754,10 +786,30 @@ function placeTurrets() {
 // the next snapshot and takes it from there.
 const kills = [];
 
+// A cache that has been broken, still letting go. Nothing but a countdown and a place.
+const spills = [];
+const SPILL_RATE = 5;                 // grains a second
+
+function bleed(dt) {
+  for (let i = spills.length - 1; i >= 0; i--) {
+    const s = spills[i];
+    s.due -= dt;
+    while (s.due <= 0 && s.left > 0) {
+      spawnOre(s.x + rand(-18, 18), s.y + rand(-18, 18));
+      s.left--; s.due += 1 / SPILL_RATE;
+    }
+    if (s.left <= 0) spills.splice(i, 1);
+  }
+}
+
 function wound(s, t, amount) {
   t.hp = t.hp - amount <= 0 ? -WRECK_DEPTH : t.hp - amount;
   if (t.hp <= 0 && s.hull.frail) {
     ships.delete(s);
+    // A broken cache does not vanish: it lets its ore go over the same ten seconds the
+    // client spends drawing it coming apart, so what you see and what you can collect
+    // are the same event.
+    if (s.hull.spills) spills.push({ x: s.x, y: s.y, left: s.hull.spills, due: 0 });
     kills.push({ x: Math.round(s.x), y: Math.round(s.y), a: +s.a.toFixed(2), h: hullKey(s.hull) });
   }
 }
@@ -1089,8 +1141,11 @@ function step(dt) {
   // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
   // the next tick rather than extending this one.
   for (const [cx, cy] of pendingEnemies.splice(0)) trySpawnEnemy(cx, cy);
+  for (const [cx, cy] of pendingCaches.splice(0)) trySpawnCache(cx, cy);
+  bleed(dt);
   for (const s of ships) {
-    const cmd = s.hull.ai === 'fighter' ? fighterCmd(s, dt)
+    const cmd = s.hull.ai === 'static' ? { turn: 0, thrust: 0 }
+      : s.hull.ai === 'fighter' ? fighterCmd(s, dt)
       : s.dest ? autopilot(s, dt) : faceCmd(s, dt);
     s.th = cmd.thrust ? 1 : 0;
     advance(s, cmd, dt, s.hull);
