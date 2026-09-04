@@ -533,6 +533,10 @@ const PANELS = [
   { title: 'Targeting', axis: ['near', 'far'],
     rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
   { title: 'Repair', axis: ['wrecked', 'full'],
+    // Everything left of this is a gun that is not there any more. It is worth seeing
+    // where that ends, because the two halves of the axis mean different things: left of
+    // it you are paying to bring a gun back, right of it you are topping one up.
+    mark: () => wreckDepth / (wreckDepth + TURRET_HP),
     rows: [['repair', 'Damaged guns']] },
 ];
 let openTab = 0;
@@ -600,7 +604,7 @@ function buildDetails(ships) {
       });
       body.append(tabs);
       for (const [kind, label] of PANELS[openTab].rows)
-        body.append(envelope(s.id, kind, label, PANELS[openTab].axis, s.pr && s.pr[kind]));
+        body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
       row.append(body);
     }
     detailsBody.append(row);
@@ -622,7 +626,7 @@ const ENV_W = 240, ENV_H = 88, ENV_PAD = 9;
 const ENV_GRAB = 11, ENV_KILL = 20;                 // svg units, ~14 and ~25 screen px
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-function envelope(shipId, kind, label, axis, initial) {
+function envelope(shipId, kind, label, panel, initial) {
   const pts = (Array.isArray(initial) && initial.length >= 2 && Array.isArray(initial[0])
     ? initial.map(p => [p[0], p[1]])
     : [[0, 100], [1, 20]]);
@@ -631,14 +635,18 @@ function envelope(shipId, kind, label, axis, initial) {
   const xOf = px => Math.max(0, Math.min(1, (px - ENV_PAD) / IW));
   const yOf = py => Math.max(0, Math.min(100, (1 - (py - ENV_PAD) / IH) * 100));
 
+  const mark = panel.mark ? panel.mark() : null;
   const el = document.createElement('div');
   el.className = 'env';
   el.innerHTML = `<div class="envhead">${label}<b></b></div>`
     + `<svg viewBox="0 0 ${ENV_W} ${ENV_H}">`
     +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" width="${IW}" height="${IH}"/>`
+    +   (mark === null ? '' :
+          `<rect class="dead" x="${ENV_PAD}" y="${ENV_PAD}" width="${mark * IW}" height="${IH}"/>`
+        + `<line class="deadline" x1="${X(mark)}" y1="${ENV_PAD}" x2="${X(mark)}" y2="${ENV_H - ENV_PAD}"/>`)
     +   `<polyline class="curve" points=""/><g class="stops"></g>`
     + `</svg>`
-    + `<div class="envaxis"><span>${axis[0]}</span><span>${axis[1]}</span></div>`;
+    + `<div class="envaxis"><span>${panel.axis[0]}</span><span>${panel.axis[1]}</span></div>`;
 
   const svg = el.querySelector('svg');
   const curve = el.querySelector('.curve');
