@@ -1,21 +1,76 @@
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
+// Everything is drawn into an off-screen surface and blitted to the visible canvas in a
+// single drawImage at the end of the frame. The browser is supposed to present a canvas
+// atomically per frame and make this redundant -- but the visible layer now receives one
+// operation instead of thousands, so there is no incremental rasterisation for the
+// compositor to catch halfway through.
+// alpha:false on both: each fills its own background, so there is nothing to blend.
+// Software rasterisation by default. willReadFrequently nominally says "this canvas is
+// read back often", but every engine implements it by backing the canvas on the CPU
+// instead of the GPU, and that is the only control a page has over where rasterisation
+// happens. It is here because the GPU tile rasteriser on at least one phone corrupts
+// individual shapes for a frame -- one hull fragmented while the ship beside it drew
+// perfectly -- which no amount of changing what we draw could avoid. ?gpu=1 opts back in
+// for comparison.
+const CPU = !new URLSearchParams(location.search).has('gpu');
+const screen = canvas.getContext('2d', { alpha: false });
+const back = document.createElement('canvas');
+const ctx = back.getContext('2d', { alpha: false, willReadFrequently: CPU });
 const hud = document.getElementById('hud');
 
-let myId = null, mounts = [], arcHalf = 0;
+let myId = null, mounts = [], arcHalf = 0, maxView = 2200, clientVersion = '???????';
+
+// Diagnostic switches, set in the URL: ?off=labels,wallfill,walls,bars,arcs
+// Each removes one class of drawing so a rendering fault can be bisected on the device
+// that actually shows it, without a round trip through the editor.
+const OFF = new Set((new URLSearchParams(location.search).get('off') || '').split(',').filter(Boolean));
 
 // The camera is free: it starts on your first ship and thereafter goes where you put it.
 const cam = { x: 0, y: 0, zoom: 1, placed: false };
-const PAN_KEY_SPEED = 700;      // world px/sec at zoom 1
-const MIN_ZOOM = 0.15, MAX_ZOOM = 4;
 
+// Cap the backing store. A 3x phone screen means ~3 megapixels to rasterise every frame,
+// and a large canvas layer is what the compositor re-rasterises in tiles -- which is what
+// shows up as flicker. Past 2x there is very little visible gain on a phone, and the CSS
+// size is untouched, so only the resolution the layer is drawn at changes.
+const MAX_DPR = 2;
+const dpr = () => Math.min(devicePixelRatio, MAX_DPR);
+const PAN_KEY_SPEED = 700;      // world px/sec at zoom 1
+
+// Flat vector linework, no glow: canvas shadowBlur is device-space rather than user
+// space, mobile engines render it inconsistently or not at all, and drawing a halo by
+// hand cost too many frames on a phone. Every platform now looks the same.
+const MAX_ZOOM = 4;
+
+// The server only streams what lies within maxView of the camera, so the camera must
+// never be able to see further than that -- otherwise you would be looking at a ring
+// of empty space that is populated but not sent. This is the floor on zoom, and it
+// depends on the viewport, so it is recomputed rather than fixed.
+const minZoom = () => Math.hypot(canvas.width / dpr(), canvas.height / dpr()) / 2 / maxView;
+const clampZoom = z => Math.min(MAX_ZOOM, Math.max(minZoom(), z));
+
+// Integer backing store: a fractional canvas.width is floored by the browser while the
+// CSS size keeps the fraction, leaving the two slightly out of step and the surface
+// resampled.
 function resize() {
-  canvas.width = innerWidth * devicePixelRatio;
-  canvas.height = innerHeight * devicePixelRatio;
+  const w = Math.round(innerWidth * dpr()), h = Math.round(innerHeight * dpr());
+  canvas.width = w; canvas.height = h;
+  back.width = w; back.height = h;
   canvas.style.width = innerWidth + 'px';
   canvas.style.height = innerHeight + 'px';
+  cam.zoom = clampZoom(cam.zoom);
 }
-addEventListener('resize', resize); resize();
+
+// Deliberately NOT wired to the resize event. Assigning canvas.width wipes the surface,
+// and a resize handler runs outside the frame loop, so the compositor can present that
+// blank canvas before anything redraws -- which on a phone, where browser chrome fires
+// resize constantly, is a visible flicker every few seconds. Checked here instead, at the
+// top of the frame that immediately repaints, leaving no window in which it can be seen.
+// This also covers a devicePixelRatio change, which fires no resize event at all.
+function ensureSize() {
+  if (canvas.width !== Math.round(innerWidth * dpr()) ||
+      canvas.height !== Math.round(innerHeight * dpr())) resize();
+}
+resize();
 
 // ---- net ----
 // Snapshots are stamped with local arrival time; we render RENDER_DELAY ms in the
@@ -24,7 +79,38 @@ addEventListener('resize', resize); resize();
 const RENDER_DELAY = 120;
 const buffer = [];              // [{ rt, snap }] oldest -> newest
 
+// Snapshots are placed on the render timeline by the SERVER's send time, not by when
+// this client processed them. A main-thread hitch makes several arrive back to back,
+// and stamping those by arrival would replay a third of a second of game time in a
+// millisecond -- interpolation never fails, it just plays the motion wrong.
+// The offset is the least-delayed packet seen (the cleanest sample of the one-way trip),
+// allowed to creep upward so a genuinely slower path is eventually tracked.
+let clockOffset = null;
+function renderStamp(serverTime, arrival) {
+  const delay = arrival - serverTime;
+  if (clockOffset === null || delay < clockOffset) clockOffset = delay;
+  else clockOffset += 0.0005 * (delay - clockOffset);
+  return serverTime + clockOffset;
+}
+
 let dev = false;
+const wallChunks = new Map();   // chunk key -> polygons, pushed by the server as the camera moves
+
+// Walls never move, so each polygon's bounds are worth computing once on arrival and
+// keeping: culling against them is what stops a phone drawing a whole streamed region
+// to fill a screen a fraction of its size.
+function withBox(pts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, sx = 0, sy = 0;
+  for (const [x, y] of pts) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+    sx += x; sy += y;
+  }
+  // Centroid too: these blobs are generated radially, so every vertex is visible from
+  // it and a triangle fan about it tiles the polygon exactly (verified over the real
+  // generated terrain, 966 of 966).
+  return { pts, x0, y0, x1, y1, cx: sx / pts.length, cy: sy / pts.length };
+}
 
 // Losing the socket already costs you your ship, so the simplest recovery is to
 // reload once the server answers again. That covers a dev restart and a hot-reload
@@ -39,21 +125,40 @@ function reloadWhenUp() {
   setTimeout(attempt, 250);
 }
 
-const ws = new WebSocket(`ws://${location.host}`);
+// Match the page's scheme: served over https (a tunnel, say) a plaintext ws:// is
+// blocked as mixed content, so the socket has to be wss:// there.
+const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`);
 ws.onclose = reloadWhenUp;
 ws.onmessage = e => {
   const m = JSON.parse(e.data);
-  if (m.t === 'welcome') { myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf; return; }
+  if (m.t === 'welcome') {
+    myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf;
+    maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
+    return;
+  }
   if (m.t === 'reload') { location.reload(); return; }
+  if (m.t === 'chunk') { wallChunks.set(m.key, m.walls.map(withBox)); return; }
+  if (m.t === 'drop') { for (const k of m.keys) wallChunks.delete(k); return; }
   if (m.t !== 's') return;
-  buffer.push({ rt: performance.now(), snap: m });
+  buffer.push({ rt: m.st === undefined ? performance.now() : renderStamp(m.st, performance.now()), snap: m });
   while (buffer.length > 2 && buffer[1].rt < performance.now() - RENDER_DELAY - 500) buffer.shift();
 };
+
+// The server streams around the camera, so it has to know where the camera is. Only
+// worth a message when it has actually moved.
+let sentView = null;
+setInterval(() => {
+  if (ws.readyState !== 1 || !cam.placed) return;
+  const x = Math.round(cam.x), y = Math.round(cam.y);
+  if (sentView && sentView.x === x && sentView.y === y) return;
+  sentView = { x, y };
+  ws.send(JSON.stringify({ t: 'view', x, y }));
+}, 200);
 
 // Zoom survives a reload; position does not, because a reload gets you a new ship
 // somewhere else and the camera should be looking at it.
 const ZOOM_KEY = 'ships.zoom';
-try { const z = parseFloat(sessionStorage.getItem(ZOOM_KEY)); if (z > 0) cam.zoom = z; } catch {}
+try { const z = parseFloat(sessionStorage.getItem(ZOOM_KEY)); if (z > 0) cam.zoom = clampZoom(z); } catch {}
 addEventListener('pagehide', () => { try { sessionStorage.setItem(ZOOM_KEY, String(cam.zoom)); } catch {} });
 
 // ---- interpolation ----
@@ -70,6 +175,7 @@ function blend(older, newer, t) {
   });
   const byId = l => new Map(l.map(e => [e.id, e]));
   return {
+    v: newer.v, stale: newer.stale,
     players: newer.players,
     ships: pair(newer.ships, byId(older.ships), (p, e) => ({
       a: lerpAngle(p.a, e.a, t),
@@ -80,21 +186,28 @@ function blend(older, newer, t) {
   };
 }
 
+let lastGood = null, stalls = 0;
+
 function viewState() {
   if (!buffer.length) return null;
   const target = performance.now() - RENDER_DELAY;
   for (let i = buffer.length - 1; i > 0; i--) {
     const a = buffer[i - 1], b = buffer[i];
     if (a.rt <= target && target <= b.rt) {
-      return blend(a.snap, b.snap, (target - a.rt) / (b.rt - a.rt));
+      lastGood = blend(a.snap, b.snap, (target - a.rt) / (b.rt - a.rt));
+      return lastGood;
     }
   }
-  // Ahead of the buffer (stalled feed) or behind it (just connected): hold an endpoint.
-  return target > buffer[buffer.length - 1].rt ? buffer[buffer.length - 1].snap : buffer[0].snap;
+  // No pair straddles the render clock: the feed stalled, or a main-thread hitch bunched
+  // several arrivals together. Hold the last interpolated frame -- a frozen frame is
+  // invisible, whereas snapping to the newest raw snapshot and back is a visible jump of
+  // a whole render delay, in position and heading both.
+  stalls++;
+  return lastGood ?? buffer[buffer.length - 1].snap;
 }
 
 // ---- camera controls ----
-const view = () => ({ cw: canvas.width / devicePixelRatio, ch: canvas.height / devicePixelRatio });
+const view = () => ({ cw: canvas.width / dpr(), ch: canvas.height / dpr() });
 
 // Screen pixel -> world point under it.
 function toWorld(sx, sy) {
@@ -106,7 +219,7 @@ function toWorld(sx, sy) {
 function zoomAt(sx, sy, factor) {
   const { cw, ch } = view();
   const before = toWorld(sx, sy);
-  cam.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, cam.zoom * factor));
+  cam.zoom = clampZoom(cam.zoom * factor);
   cam.x = before.x - (sx - cw / 2) / cam.zoom;
   cam.y = before.y - (sy - ch / 2) / cam.zoom;
 }
@@ -239,7 +352,6 @@ function healthBar(x, y, frac) {
   const s = 1 / cam.zoom, w = BAR_W * s, h = BAR_H * s;
   const bx = x - w / 2, by = y + BAR_DROP * s;
   ctx.save();
-  ctx.shadowBlur = 0;
   ctx.fillStyle = 'rgba(8,14,22,.85)';
   ctx.fillRect(bx, by, w, h);
   ctx.fillStyle = healthColor(frac);
@@ -292,7 +404,6 @@ function tileStars(layer, li, tx, ty) {
 }
 
 function drawStars(cw, ch) {
-  ctx.shadowBlur = 0;
   const halfW = cw / 2 / cam.zoom, halfH = ch / 2 / cam.zoom;
   STAR_LAYERS.forEach((layer, li) => {
     const ox = cam.x * layer.z, oy = cam.y * layer.z;   // parallax: nearer layers slide faster
@@ -310,54 +421,139 @@ function rotateIcon(x, y, a, hot) {
   const s = 1 / cam.zoom, r = 7 * s, end = Math.PI * 2 - 0.7;
   ctx.save();
   ctx.translate(x, y); ctx.rotate(a);
-  ctx.strokeStyle = hot ? '#c9ffe9' : '#5ff0b0';
-  ctx.lineWidth = 1.7 * s;
-  ctx.shadowColor = '#5ff0b0'; ctx.shadowBlur = 8;
-  ctx.beginPath(); ctx.arc(0, 0, r, 0.7, end); ctx.stroke();
+  const ink = hot ? '#c9ffe9' : '#5ff0b0';
+  ctx.strokeStyle = ink; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.lineWidth = 1.7 / cam.zoom;
+  const ring = new Path2D();
+  ring.arc(0, 0, r, 0.7, end);
+  ctx.stroke(ring);
   ctx.translate(Math.cos(end) * r, Math.sin(end) * r);
   ctx.rotate(end + Math.PI / 2);                    // arrowhead lies along the arc's tangent
-  ctx.beginPath();
-  ctx.moveTo(-4 * s, -3 * s); ctx.lineTo(0, 2 * s); ctx.lineTo(4 * s, -3 * s);
-  ctx.stroke();
+  const head = new Path2D();
+  head.moveTo(-4 * s, -3 * s); head.lineTo(0, 2 * s); head.lineTo(4 * s, -3 * s);
+  ctx.stroke(head);
   ctx.restore();
 }
+
+let badFrames = 0;
 
 function drawControl(s) {
   const c = controlAt(s), h = dragHeading ?? s.hd;
   const R = CONTROL_R / cam.zoom, cx = c.x - cam.x, cy = c.y - cam.y;
+  // A single wrong number here paints a huge bright shape rather than a small ring:
+  // the arc radius and every stroke width are divided by zoom, so a zoom near zero, or
+  // a NaN heading, turns this affordance into a screenful of green. Refuse to draw it
+  // rather than find out, and count it so we know whether this ever actually happens.
+  if (!Number.isFinite(h) || !Number.isFinite(R) || !Number.isFinite(cx) || !Number.isFinite(cy)
+      || R > 4000 || cam.zoom <= 0.001) { badFrames++; return; }
   ctx.save();
   ctx.strokeStyle = rotating ? 'rgba(95,240,176,.45)' : 'rgba(95,240,176,.20)';
-  ctx.lineWidth = 1 / cam.zoom; ctx.shadowBlur = 0;
-  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath();                                  // spoke to the handle: the set-point
-  ctx.moveTo(cx + Math.cos(h) * R * 0.25, cy + Math.sin(h) * R * 0.25);
-  ctx.lineTo(cx + Math.cos(h) * R * 0.82, cy + Math.sin(h) * R * 0.82);
-  ctx.stroke();
+  ctx.lineWidth = 1 / cam.zoom;
+  const ring = new Path2D();
+  ring.arc(cx, cy, R, 0, Math.PI * 2);
+  ring.moveTo(cx + Math.cos(h) * R * 0.25, cy + Math.sin(h) * R * 0.25);
+  ring.lineTo(cx + Math.cos(h) * R * 0.82, cy + Math.sin(h) * R * 0.82);
+  ctx.stroke(ring);
   ctx.restore();
   rotateIcon(cx + Math.cos(h) * R, cy + Math.sin(h) * R, h, rotating);
 }
 
-// Strokes are specified in screen pixels and divided by zoom, so the linework keeps
-// its weight at every magnification instead of turning into hairlines or slabs.
-function poly(pts, x, y, a, color, close = true, width = 1.6) {
+// Terrain: solid inside, outlined to keep the vector look.
+//
+// The interior is filled as a fan of triangles rather than as one polygon path. Half of
+// these blobs are concave, and an anti-aliased concave fill has no GPU implementation in
+// either engine's canvas backend -- it gets rasterised on the CPU and cached as a
+// texture, and when that cache is evicted the fill silently does not appear for a frame.
+// That is the wall flicker. Every fan triangle is convex, so all of this stays on the
+// ordinary GPU path. Each triangle is stroked as well as filled, in the same colour, to
+// close the hairline seams anti-aliasing leaves between adjacent triangles.
+const WALL_FILL = '#171f2b', WALL_EDGE = 'rgba(132,156,190,.85)';
+
+// Walls never move, so each polygon's two paths are built once, in world coordinates,
+// and the camera is applied as a transform instead of by shifting every point each frame.
+function wallPaths(w) {
+  if (!w.fill) {
+    const fill = new Path2D(), edge = new Path2D(), n = w.pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = w.pts[i], b = w.pts[(i + 1) % n];
+      fill.moveTo(w.cx, w.cy); fill.lineTo(a[0], a[1]); fill.lineTo(b[0], b[1]); fill.closePath();
+      i ? edge.lineTo(a[0], a[1]) : edge.moveTo(a[0], a[1]);
+    }
+    edge.closePath();
+    w.fill = fill; w.edge = edge;
+  }
+  return w;
+}
+
+function drawWalls(vis) {
   ctx.save();
-  ctx.translate(x, y); ctx.rotate(a);
-  ctx.beginPath();
-  pts.forEach(([px, py], i) => i ? ctx.lineTo(px, py) : ctx.moveTo(px, py));
-  if (close) ctx.closePath();
-  ctx.strokeStyle = color; ctx.lineWidth = width / cam.zoom;
-  ctx.shadowColor = color; ctx.shadowBlur = 8;
-  ctx.stroke();
+  ctx.translate(-cam.x, -cam.y);
+  ctx.lineJoin = 'round';
+  for (const polys of wallChunks.values()) {
+    for (const w of polys) {
+      if (w.x1 < vis.x0 || w.x0 > vis.x1 || w.y1 < vis.y0 || w.y0 > vis.y1) continue;
+      wallPaths(w);
+      if (!OFF.has('wallfill')) {
+        // Fan of convex triangles: an anti-aliased concave fill has no GPU path in
+        // either engine. Stroked in its own colour too, to close the seams between them.
+        ctx.fillStyle = WALL_FILL; ctx.strokeStyle = WALL_FILL;
+        ctx.lineWidth = 1 / cam.zoom;
+        ctx.fill(w.fill);
+        ctx.stroke(w.fill);
+      }
+      ctx.strokeStyle = WALL_EDGE;
+      ctx.lineWidth = 1.4 / cam.zoom;
+      ctx.stroke(w.edge);
+    }
+  }
   ctx.restore();
 }
 
-let lastFrame = performance.now();
+// One crisp pass. Widths are screen pixels divided by zoom, so linework keeps its
+// weight at every magnification instead of turning into hairlines or slabs.
+function stroke(color, width) {
+  ctx.strokeStyle = color;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.lineWidth = width / cam.zoom;
+  ctx.stroke();
+}
+
+// Shapes are built as Path2D objects and handed to stroke()/fill() explicitly, rather
+// than accumulated in the context's current path. A dropped beginPath() on the device
+// leaves the next shape appended to the previous one -- canvas then draws a connecting
+// line into each new subpath, and the lot is stroked under whatever transform is current.
+// A Path2D cannot be polluted that way, and constant geometry is built once and reused.
+const pathCache = new Map();
+function pathOf(pts, close) {
+  let p = pathCache.get(pts);
+  if (!p) {
+    p = new Path2D();
+    pts.forEach(([px, py], i) => i ? p.lineTo(px, py) : p.moveTo(px, py));
+    if (close) p.closePath();
+    if (pathCache.size > 2000) pathCache.clear();
+    pathCache.set(pts, p);
+  }
+  return p;
+}
+
+function poly(pts, x, y, a, color, close = true, width = 1.6) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(a);
+  ctx.strokeStyle = color;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.lineWidth = width / cam.zoom;
+  ctx.stroke(pathOf(pts, close));
+  ctx.restore();
+}
+
+let lastFrame = performance.now(), fps = 0;
 
 function draw() {
   requestAnimationFrame(draw);
   const state = viewState();
   const now = performance.now();
   const dt = Math.min((now - lastFrame) / 1000, 0.1);
+  if (dt > 0) fps += ((1 / dt) - fps) * 0.05;       // smoothed, so it is readable at a glance
   lastFrame = now;
   if (!state) return;
 
@@ -374,29 +570,43 @@ function draw() {
     cam.y += (py / n) * PAN_KEY_SPEED * dt / cam.zoom;
   }
 
+  ensureSize();
   const { cw, ch } = view();
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  // Clear in device pixels with no transform, so the whole surface is covered whatever
+  // the dpr is doing. Clearing through the scaled transform covers only what that
+  // transform believes the canvas to be.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#05070d';
-  ctx.fillRect(0, 0, cw, ch);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(dpr(), 0, 0, dpr(), 0, 0);
   ctx.translate(cw / 2, ch / 2);
   ctx.scale(cam.zoom, cam.zoom);
 
+  // What the screen actually covers, in world units, with a margin so shapes straddling
+  // the edge still draw. Everything below culls against this.
+  const halfW = cw / 2 / cam.zoom + 120, halfH = ch / 2 / cam.zoom + 120;
+  const vis = { x0: cam.x - halfW, x1: cam.x + halfW, y0: cam.y - halfH, y1: cam.y + halfH };
+  const onScreen = (x, y, r = 0) =>
+    x + r > vis.x0 && x - r < vis.x1 && y + r > vis.y0 && y - r < vis.y1;
+
   drawStars(cw, ch);
+  if (!OFF.has('walls')) drawWalls(vis);
 
   const at = o => [o.x - cam.x, o.y - cam.y];
 
   for (const r of state.rocks) {
+    if (!onScreen(r.x, r.y, r.size * 26)) continue;
     const [x, y] = at(r);
     poly(getRock(r.seed, r.size), x, y, r.a, '#8fa6c8');
   }
 
-  ctx.shadowBlur = 8; ctx.shadowColor = '#ffd76a'; ctx.fillStyle = '#ffd76a';
   const bs = 3 / cam.zoom;
+  ctx.fillStyle = '#ffd76a';
   for (const b of state.bullets) {
+    if (!onScreen(b.x, b.y, 4)) continue;
     const [x, y] = at(b);
     ctx.fillRect(x - bs / 2, y - bs / 2, bs, bs);
   }
-  ctx.shadowBlur = 0;
 
   for (const s of mine) {
     if (s.dx === undefined) continue;
@@ -405,7 +615,8 @@ function draw() {
     ctx.save();
     ctx.strokeStyle = 'rgba(95,240,176,.22)'; ctx.lineWidth = 1 / cam.zoom;
     ctx.setLineDash([6 / cam.zoom, 8 / cam.zoom]);
-    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(mx, my); ctx.stroke();
+    const tether = new Path2D(); tether.moveTo(sx, sy); tether.lineTo(mx, my);
+    ctx.stroke(tether);
     ctx.restore();
     const pulse = 1 + 0.18 * Math.sin(now / 220);
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
@@ -416,6 +627,7 @@ function draw() {
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
 
   for (const s of state.ships) {
+    if (!onScreen(s.x, s.y, 90)) continue;            // hull half-length plus turret reach
     const [x, y] = at(s);
     const own = s.owner === myId;
     const color = own ? '#5ff0b0' : '#ff6b8a';
@@ -429,18 +641,18 @@ function draw() {
       const hp = s.hp ? s.hp[i] : TURRET_HP;
       if (hp <= 0) return;                                // silenced guns are gone
       const gx = x + mt.at[0] * cos - mt.at[1] * sin, gy = y + mt.at[0] * sin + mt.at[1] * cos;
-      if (own) {                                          // show each mount's traverse limits
+      if (own && !OFF.has('arcs')) {                      // show each mount's traverse limits
         ctx.save();
         ctx.strokeStyle = 'rgba(95,240,176,.10)'; ctx.lineWidth = 1 / cam.zoom;
-        ctx.beginPath();
-        ctx.arc(gx, gy, 40, s.a + mt.facing - arcHalf, s.a + mt.facing + arcHalf);
-        ctx.stroke();
+        const arc = new Path2D();
+        arc.arc(gx, gy, 40, s.a + mt.facing - arcHalf, s.a + mt.facing + arcHalf);
+        ctx.stroke(arc);
         ctx.restore();
       }
       poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
-      if (hp < TURRET_HP) healthBar(gx, gy, hp / TURRET_HP);
+      if (hp < TURRET_HP && !OFF.has('bars')) healthBar(gx, gy, hp / TURRET_HP);
     });
-    if (!own) {
+    if (!own && !OFF.has('labels')) {
       ctx.save(); ctx.translate(x, y);
       ctx.fillStyle = 'rgba(255,107,138,.7)';
       ctx.font = `${11 / cam.zoom}px ui-monospace, monospace`; ctx.textAlign = 'center';
@@ -451,7 +663,18 @@ function draw() {
 
   const board = [...state.players].sort((a, b) => b.score - a.score).slice(0, 6)
     .map(p => `${p.id === myId ? '>' : ' '} ${p.name.padEnd(8)} ${String(p.score).padStart(5)}`).join('\n');
-  hud.textContent = `CLICK move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)${dev ? '   [dev]' : ''}\n`
-    + `${Math.round(cam.x)}, ${Math.round(cam.y)}\n\n${board}`;
+  // One operation onto the visible layer, once the frame is complete.
+  screen.setTransform(1, 0, 0, 1, 0, 0);
+  screen.drawImage(back, 0, 0);
+
+  hud.style.color = state.stale ? '#ffb347' : '';
+  hud.textContent = `CLICK move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
+    + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
+    + `  c${clientVersion}`
+    + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')
+    + (OFF.size ? `  off:${[...OFF].join(',')}` : '')
+    + `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps` + `\n`
+    + (state.stale ? `** STALE: server.js changed on disk -- restart the server **\n` : '')
+    + `\n${board}`;
 }
 draw();

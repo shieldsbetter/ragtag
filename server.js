@@ -2,18 +2,54 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
+import { spawn } from 'node:child_process';
+import qrcode from 'qrcode-terminal';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8080;
 
 const TICK = 1000 / 30;
 const DEV = !!process.env.DEV;
+const NGROK = process.env.NGROK !== '0';   // a public tunnel every start; NGROK=0 opts out
+
+// A running process can outlive the file it was started from -- a watcher dies, a
+// restart is missed -- and a stale server is indistinguishable from a working one
+// until you notice the new feature missing. So it publishes what it is running and
+// checks, while running, whether that still matches the disk. Only server.js counts:
+// client files are hot-reloaded, so their changing does not make this process stale.
+const sourceHash = () => {
+  try { return crypto.createHash('sha1').update(fs.readFileSync(new URL(import.meta.url))).digest('hex').slice(0, 7); }
+  catch { return '???????'; }
+};
+const VERSION = sourceHash();
+
+// The client's own version, so a phone can prove what it is running rather than being
+// reasoned about. Recomputed per connection, which is when a refresh would pick it up.
+const clientHash = () => {
+  try {
+    const h = crypto.createHash('sha1');
+    for (const f of ['public/game.js', 'public/index.html'])
+      h.update(fs.readFileSync(path.join(__dirname, f)));
+    return h.digest('hex').slice(0, 7);
+  } catch { return '???????'; }
+};
+let stale = false;
+if (DEV) setInterval(() => { stale = sourceHash() !== VERSION; }, 2000);
 
 // The world is an unbounded plane. What exists is decided by where the ships are:
 // rocks are kept stocked within ACTIVE_R of every ship and culled past KEEP_R, so
 // space is populated where anyone is and empty everywhere else.
 const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
+
+// How far a camera may see from its own centre. The client will not zoom out past
+// this, so it bounds what any one client can ask to be sent -- which is what keeps a
+// snapshot small no matter how crowded the world gets.
+const MAX_VIEW = 2200, VIEW_BUFFER = 500;
+const STREAM_R = MAX_VIEW + VIEW_BUFFER;
 
 // A hull is plain data. Nothing about navigation is derived by hand from these
 // numbers -- the autopilot finds out how this ship stops by simulating it -- so a
@@ -28,6 +64,9 @@ const CARRIER = {
     { at: [32, 11], facing: Math.PI / 2 }, { at: [0, 11], facing: Math.PI / 2 }, { at: [-32, 11], facing: Math.PI / 2 },
   ],
   turret: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4 },
+  // Four discs down the spine rather than one circle around the whole hull: a bloated
+  // collider is what would jam in a narrow fissure.
+  collide: [[-40, 0, 14], [-13, 0, 14], [13, 0, 14], [40, 0, 14]],
 };
 
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
@@ -36,10 +75,23 @@ const BULLET_SPEED = 560, BULLET_LIFE = 1.2;
 const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silence a gun
 const ENEMY_RANGE = 900;                                   // how far off an enemy carrier arrives
 
+// Terrain. The plane is cut into fixed chunks; each chunk's walls are a pure function
+// of its coordinates, so the same patch of space is always the same walls. Chunks are
+// written to disk on first visit and read back after: determinism alone would give
+// consistency, but the files are what will let later edits survive.
+const CHUNK = 900;
+const WORLD_SEED = 20260903;
+const MAX_BLOBS = 6;                  // per chunk, at density 1
+const WALL_DENSITY = 0.5;             // deliberately mid-scale: neither extreme is the design target
+const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
+
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
 
 const server = http.createServer((req, res) => {
-  const file = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  // Strip the query BEFORE deciding what the path means, or "/?x=1" is not "/" and
+  // ends up trying to read the directory.
+  const requested = req.url.split('?')[0];
+  const file = requested === '/' ? '/index.html' : requested;
   const full = path.join(__dirname, 'public', path.normalize(file).replace(/^(\.\.[/\\])+/, ''));
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
@@ -57,6 +109,151 @@ const rocks = [];
 const rand = (a, b) => a + Math.random() * (b - a);
 const angleDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const clamp = (v, m) => Math.max(-m, Math.min(m, v));
+
+// ---- terrain ----
+const chunks = new Map();             // "cx,cy" -> { cx, cy, key, walls: [[[x,y],...], ...] }
+const chunkKey = (cx, cy) => `${cx},${cy}`;
+const chunkOf = v => Math.floor(v / CHUNK);
+
+function chunkRng(cx, cy) {
+  let v = (WORLD_SEED ^ Math.imul(cx, 73856093) ^ Math.imul(cy, 19349663)) >>> 0;
+  return () => { v = (Math.imul(v, 1664525) + 1013904223) >>> 0; return v / 4294967296; };
+}
+
+// Irregular blobs. Their centres are inside the chunk but their edges may spill over
+// it, which is why anything asking about walls looks at a 3x3 block of chunks.
+function generateChunk(cx, cy) {
+  const rnd = chunkRng(cx, cy);
+  rnd(); rnd();                                       // shake off the seed
+  const expected = WALL_DENSITY * MAX_BLOBS;
+  let n = Math.floor(expected);
+  if (rnd() < expected - n) n++;
+  const walls = [];
+  for (let i = 0; i < n; i++) {
+    const ox = cx * CHUNK + rnd() * CHUNK, oy = cy * CHUNK + rnd() * CHUNK;
+    const base = 60 + rnd() * 160, sides = 6 + Math.floor(rnd() * 5);
+    const poly = [];
+    for (let k = 0; k < sides; k++) {
+      const a = (k / sides) * Math.PI * 2 + rnd() * 0.25;
+      const r = base * (0.6 + rnd() * 0.65);
+      poly.push([+(ox + Math.cos(a) * r).toFixed(1), +(oy + Math.sin(a) * r).toFixed(1)]);
+    }
+    walls.push(poly);
+  }
+  return walls;
+}
+
+function loadChunk(cx, cy) {
+  const key = chunkKey(cx, cy);
+  const had = chunks.get(key);
+  if (had) return had;
+  const file = path.join(WORLD_DIR, `${cx}_${cy}.json`);
+  let walls;
+  try {
+    walls = JSON.parse(fs.readFileSync(file, 'utf8')).walls;
+  } catch {
+    walls = generateChunk(cx, cy);
+    try {
+      fs.mkdirSync(WORLD_DIR, { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ cx, cy, walls }));
+    } catch { /* unwritable store: the world is still consistent, just not persisted */ }
+  }
+  const c = { cx, cy, key, walls };
+  chunks.set(key, c);
+  return c;
+}
+
+// Chunks come in at ACTIVE_R and only go out past KEEP_R, so a ship loitering on a
+// boundary does not thrash them.
+// Terrain stays resident for two different reasons: ships need it to collide against,
+// cameras need it to draw. Both are anchors, with their own radii.
+function chunkAnchors() {
+  const out = [];
+  for (const s of ships) out.push({ x: s.x, y: s.y, load: ACTIVE_R, keep: KEEP_R });
+  for (const p of players.values())
+    if (p.view && p.ws.readyState === 1)
+      out.push({ x: p.view.x, y: p.view.y, load: STREAM_R, keep: STREAM_R + 400 });
+  return out;
+}
+
+function manageChunks() {
+  const anchors = chunkAnchors();
+  for (const a of anchors)
+    for (let cx = chunkOf(a.x - a.load); cx <= chunkOf(a.x + a.load); cx++)
+      for (let cy = chunkOf(a.y - a.load); cy <= chunkOf(a.y + a.load); cy++)
+        loadChunk(cx, cy);
+
+  const keep = new Set();
+  for (const a of anchors)
+    for (let cx = chunkOf(a.x - a.keep); cx <= chunkOf(a.x + a.keep); cx++)
+      for (let cy = chunkOf(a.y - a.keep); cy <= chunkOf(a.y + a.keep); cy++)
+        keep.add(chunkKey(cx, cy));
+  for (const key of [...chunks.keys()]) if (!keep.has(key)) chunks.delete(key);
+}
+
+// Walls in the 3x3 block of chunks around a point. `ensure` pulls them off disk, which
+// only spawn checks want -- the tick loop works from what is already resident.
+function nearbyWalls(x, y, ensure = false) {
+  const out = [];
+  const cx0 = chunkOf(x), cy0 = chunkOf(y);
+  for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
+    for (let cy = cy0 - 1; cy <= cy0 + 1; cy++) {
+      const c = ensure ? loadChunk(cx, cy) : chunks.get(chunkKey(cx, cy));
+      if (c) for (const poly of c.walls) out.push(poly);
+    }
+  return out;
+}
+
+function pointInPoly(poly, x, y) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function closestOnPoly(poly, x, y) {
+  let px = 0, py = 0, best = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [ax, ay] = poly[j], [bx, by] = poly[i];
+    const ex = bx - ax, ey = by - ay;
+    const t = Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey || 1)));
+    const qx = ax + ex * t, qy = ay + ey * t;
+    const d = Math.hypot(x - qx, y - qy);
+    if (d < best) { best = d; px = qx; py = qy; }
+  }
+  return { x: px, y: py, d: best };
+}
+
+function segsCross(ax, ay, bx, by, cx, cy, dx, dy) {
+  const r1 = bx - ax, r2 = by - ay, s1 = dx - cx, s2 = dy - cy;
+  const den = r1 * s2 - r2 * s1;
+  if (Math.abs(den) < 1e-12) return false;            // parallel
+  const t = ((cx - ax) * s2 - (cy - ay) * s1) / den;
+  const u = ((cx - ax) * r2 - (cy - ay) * r1) / den;
+  return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+// Does a straight line from A to B meet rock? Shared by shells in flight and by guns
+// deciding whether a shot is worth taking, so the two can never disagree.
+function segmentBlocked(ax, ay, bx, by, polys) {
+  for (const poly of polys) {
+    if (pointInPoly(poly, ax, ay) || pointInPoly(poly, bx, by)) return true;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++)
+      if (segsCross(ax, ay, bx, by, poly[j][0], poly[j][1], poly[i][0], poly[i][1])) return true;
+  }
+  return false;
+}
+
+// Is a disc of radius r at (x,y) touching a wall? Used to keep spawns out of rock.
+function blockedAt(x, y, r) {
+  for (const poly of nearbyWalls(x, y, true)) {
+    if (pointInPoly(poly, x, y)) return true;
+    if (closestOnPoly(poly, x, y).d < r) return true;
+  }
+  return false;
+}
 
 function spawnRock(size, x, y) {
   rocks.push({
@@ -76,8 +273,8 @@ function spawnPoint() {
     const reach = 300 + i * 45;
     const a = rand(0, Math.PI * 2), d = Math.sqrt(Math.random()) * reach;
     const x = Math.cos(a) * d, y = Math.sin(a) * d;
-    let clear = true;
-    for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < SPAWN_SEP) { clear = false; break; }
+    let clear = !blockedAt(x, y, 70);
+    if (clear) for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < SPAWN_SEP) { clear = false; break; }
     if (clear) return { x, y };
   }
   return { x: rand(-3000, 3000), y: rand(-3000, 3000) };   // pathologically crowded: just go somewhere
@@ -90,7 +287,7 @@ function ringPoint(cx, cy, radius) {
   for (let i = 0; i < 24; i++) {
     const a = rand(0, Math.PI * 2);
     const x = cx + Math.cos(a) * radius, y = cy + Math.sin(a) * radius;
-    let gap = Infinity;
+    let gap = blockedAt(x, y, 70) ? -1 : Infinity;
     for (const s of ships) gap = Math.min(gap, Math.hypot(s.x - x, s.y - y));
     if (gap > bestGap) { bestGap = gap; best = { x, y, a }; }
     if (bestGap >= SPAWN_SEP) break;
@@ -244,25 +441,38 @@ function intercept(dx, dy, ux, uy, B) {
 // Turret bearings are world-space: the mount rides the hull, the gun holds its own
 // bearing. A gun fires only on the tick its slew lands exactly on the firing
 // solution, so the shot leaves along the solved bearing rather than near it.
+const LOS_TRIES = 6;      // give up on a turret rather than sight-check a whole battlefield
+
 function aimTurrets(s, targets, dt) {
   const hull = s.hull, T = hull.turret;
+  const polys = nearbyWalls(s.x, s.y);                // once per ship, not per gun
   for (let i = 0; i < s.turrets.length; i++) {
     const t = s.turrets[i];
     if (t.hp <= 0) continue;                          // a dead gun neither tracks nor fires
     const m = hull.mounts[i];
     const rest = s.a + m.facing;
 
-    let bestD = T.range, want = null;
+    // Everything this gun could shoot, nearest first, then take the closest one it can
+    // actually see. Picking the nearest and then rejecting it would leave the gun idle
+    // while a clear target stood behind it.
+    const shots = [];
     for (const g of targets) {
       const dx = g.x - t.wx, dy = g.y - t.wy;
       const range = Math.hypot(dx, dy) - g.r;
-      if (range >= bestD) continue;
+      if (range >= T.range) continue;
       const ux = g.vx - s.vx, uy = g.vy - s.vy;       // bullets inherit the hull's velocity
       const ti = intercept(dx, dy, ux, uy, BULLET_SPEED);
       if (ti === null || ti > BULLET_LIFE) continue;  // shell would expire before arrival
       const bearing = Math.atan2(dy + uy * ti, dx + ux * ti);
       if (Math.abs(angleDiff(bearing, rest)) > T.arcHalf) continue;   // outside this mount's arc
-      bestD = range; want = bearing;
+      shots.push({ range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
+    }
+    shots.sort((p, q) => p.range - q.range);
+
+    let want = null;
+    for (let k = 0; k < shots.length && k < LOS_TRIES; k++) {
+      if (polys.length && segmentBlocked(t.wx, t.wy, shots[k].ax, shots[k].ay, polys)) continue;
+      want = shots[k].bearing; break;
     }
 
     t.cool -= dt;
@@ -282,6 +492,33 @@ function aimTurrets(s, targets, dt) {
   }
 }
 
+// Push a hull out of any wall it has entered and drop the velocity that carried it in,
+// which is what makes a ship slide along a face instead of sticking to it. Positional
+// correction, run after the move: cheap, and stable because walls never move.
+function resolveWalls(s) {
+  const polys = nearbyWalls(s.x, s.y);
+  if (!polys.length) return;
+  const cos = Math.cos(s.a), sin = Math.sin(s.a);
+  for (const [ox, oy, r] of s.hull.collide) {
+    let px = s.x + ox * cos - oy * sin, py = s.y + ox * sin + oy * cos;
+    for (const poly of polys) {
+      const inside = pointInPoly(poly, px, py);
+      const near = closestOnPoly(poly, px, py);
+      if (!inside && near.d >= r) continue;
+      let dx, dy, push;
+      if (inside) { dx = near.x - px; dy = near.y - py; push = near.d + r; }
+      else { dx = px - near.x; dy = py - near.y; push = r - near.d; }
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) continue;                       // exactly on an edge: no usable normal
+      dx /= len; dy /= len;
+      s.x += dx * push; s.y += dy * push;
+      const into = s.vx * dx + s.vy * dy;             // velocity along the outward normal
+      if (into < 0) { s.vx -= into * dx; s.vy -= into * dy; }
+      px = s.x + ox * cos - oy * sin; py = s.y + ox * sin + oy * cos;
+    }
+  }
+}
+
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
 // ACTIVE_R -- out past anything anyone is looking at -- and drift inward from there.
 function manageRocks() {
@@ -295,10 +532,12 @@ function manageRocks() {
 }
 
 function step(dt) {
+  manageChunks();
   for (const s of ships) {
     const cmd = s.dest ? autopilot(s, dt) : faceCmd(s, dt);
     s.th = cmd.thrust ? 1 : 0;
     advance(s, cmd, dt, s.hull);
+    resolveWalls(s);
   }
   placeTurrets();
   const byTeam = new Map();
@@ -309,9 +548,14 @@ function step(dt) {
 
   for (let b = bullets.length - 1; b >= 0; b--) {
     const o = bullets[b];
+    const px = o.x, py = o.y;
     o.x += o.vx * dt; o.y += o.vy * dt;
     o.life -= dt;
-    if (o.life <= 0) bullets.splice(b, 1);
+    if (o.life <= 0) { bullets.splice(b, 1); continue; }
+    // Test the whole step, not just where it landed: a shell covers ~19px a tick and
+    // would otherwise skip through a thin corner of rock.
+    const polys = nearbyWalls(o.x, o.y);
+    if (polys.length && segmentBlocked(px, py, o.x, o.y, polys)) bullets.splice(b, 1);
   }
 
   for (const r of rocks) { r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt; }
@@ -352,33 +596,64 @@ function step(dt) {
   manageRocks();
 }
 
-function snapshot() {
+// One snapshot per client, holding only what that client's camera can reach. Your own
+// ships are always included however far you have panned, or you would lose the ability
+// to give them orders. The player list stays whole: it is small and drives the board.
+function snapshotFor(p) {
+  const v = p.view, R2 = STREAM_R * STREAM_R;
+  const near = o => { const dx = o.x - v.x, dy = o.y - v.y; return dx * dx + dy * dy < R2; };
   return JSON.stringify({
-    t: 's',
-    players: [...players.values()].map(p => ({ id: p.id, name: p.name, score: p.score })),
-    ships: [...ships].map(s => ({
+    // The send time, so a client can space snapshots by when they were produced rather
+    // than by when it got round to reading them.
+    t: 's', st: +performance.now().toFixed(1), v: VERSION, ...(stale ? { stale: 1 } : {}),
+    players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
+    ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
       id: s.id, owner: s.owner,
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(3), th: s.th, hd: +s.heading.toFixed(3),
       tu: s.turrets.map(t => +t.a.toFixed(3)),
       hp: s.turrets.map(t => t.hp),
       ...(s.dest ? { dx: +s.dest.x.toFixed(1), dy: +s.dest.y.toFixed(1) } : {}),
     })),
-    bullets: bullets.map(b => ({ id: b.id, x: +b.x.toFixed(1), y: +b.y.toFixed(1) })),
-    rocks: rocks.map(r => ({ id: r.id, x: +r.x.toFixed(1), y: +r.y.toFixed(1), a: +r.a.toFixed(3), size: r.size, seed: r.seed })),
+    bullets: bullets.filter(near).map(b => ({ id: b.id, x: +b.x.toFixed(1), y: +b.y.toFixed(1) })),
+    rocks: rocks.filter(near).map(r => ({ id: r.id, x: +r.x.toFixed(1), y: +r.y.toFixed(1), a: +r.a.toFixed(3), size: r.size, seed: r.seed })),
   });
+}
+
+// Walls are static, so they are pushed once per player when a ship comes near and
+// dropped when it leaves, rather than riding in every snapshot -- a dense biome would
+// otherwise dominate the wire.
+function syncChunks(p) {
+  const need = new Set();
+  const v = p.view;
+  for (let cx = chunkOf(v.x - STREAM_R); cx <= chunkOf(v.x + STREAM_R); cx++)
+    for (let cy = chunkOf(v.y - STREAM_R); cy <= chunkOf(v.y + STREAM_R); cy++)
+      need.add(chunkKey(cx, cy));
+  const drop = [];
+  for (const key of p.chunks) if (!need.has(key)) drop.push(key);
+  for (const key of drop) p.chunks.delete(key);
+  if (drop.length) p.ws.send(JSON.stringify({ t: 'drop', keys: drop }));
+
+  for (const key of need) {
+    if (p.chunks.has(key)) continue;
+    const c = chunks.get(key);
+    if (!c) continue;
+    p.chunks.add(key);
+    p.ws.send(JSON.stringify({ t: 'chunk', key, walls: c.walls }));
+  }
 }
 
 const wss = new WebSocketServer({ server });
 wss.on('connection', ws => {
   const id = nextId++;
-  const p = { id, ws, name: `ship-${id}`, score: 0 };
+  const p = { id, ws, name: `ship-${id}`, score: 0, chunks: new Set(), view: { x: 0, y: 0 } };
   players.set(id, p);
   // Every human is on the same side; the opposition is the 'enemy' team. Give players
   // per-player teams instead and this becomes PvP.
   const mine = newShip(id, 'players');
+  p.view = { x: mine.x, y: mine.y };                  // until the client says otherwise
   const spot = ringPoint(mine.x, mine.y, ENEMY_RANGE);   // an opponent arrives with every player
   newShip(null, 'enemy', { x: spot.x, y: spot.y, a: spot.a + Math.PI });   // facing the ship it came for
-  ws.send(JSON.stringify({ t: 'welcome', id, dev: DEV, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf }));
+  ws.send(JSON.stringify({ t: 'welcome', id, dev: DEV, cv: clientHash(), maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf }));
 
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
@@ -395,6 +670,7 @@ wss.on('connection', ws => {
     else if (m.t === 'face' && Number.isFinite(m.a)) {
       for (const s of ships) if (s.owner === id && s.id === m.ship) s.heading = m.a;
     }
+    else if (m.t === 'view' && Number.isFinite(m.x) && Number.isFinite(m.y)) p.view = { x: m.x, y: m.y };
     else if (m.t === 'name' && typeof m.name === 'string') p.name = m.name.slice(0, 16);
   });
   // Nothing happens on disconnect. The world outlives its players -- ships stay where
@@ -402,14 +678,18 @@ wss.on('connection', ws => {
   // refresh is therefore just another arrival.
 });
 
-let last = Date.now();
+let last = Date.now(), frame = 0;
 setInterval(() => {
   const now = Date.now();
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
   step(dt);
-  const msg = snapshot();
-  for (const p of players.values()) if (p.ws.readyState === 1) p.ws.send(msg);
+  const streamChunks = ++frame % 10 === 0;
+  for (const p of players.values()) {
+    if (p.ws.readyState !== 1) continue;
+    if (streamChunks) syncChunks(p);
+    p.ws.send(snapshotFor(p));
+  }
 }, TICK);
 
 // Dev mode. `node --watch` restarts this process when server.js changes, which drops
@@ -427,5 +707,74 @@ if (DEV) {
   });
 }
 
-server.listen(PORT, () =>
-  console.log(`ships on http://localhost:${PORT}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`));
+// Whatever address a phone on the same network can actually reach; only used when
+// there is no tunnel, since a QR of localhost would point the phone at itself.
+function lanAddress() {
+  for (const list of Object.values(os.networkInterfaces()))
+    for (const a of list) if (a.family === 'IPv4' && !a.internal) return a.address;
+  return null;
+}
+
+// An agent already tunnelling THIS port is worth adopting -- that is the --watch
+// restart case. One pointed at another port belongs to someone else's server, and
+// printing its URL would send people somewhere else entirely.
+async function existingTunnel(port) {
+  try {
+    const r = await fetch('http://127.0.0.1:4040/api/tunnels', { signal: AbortSignal.timeout(800) });
+    const j = await r.json();
+    const mine = j.tunnels?.filter(t => (t.config?.addr ?? '').endsWith(`:${port}`)) ?? [];
+    return mine.find(t => t.public_url?.startsWith('https'))?.public_url ?? null;
+  } catch { return null; }
+}
+
+// Read the URL from the agent's own log rather than the shared local API: a second
+// agent cannot bind that API's port, so asking it would answer for the wrong tunnel.
+let ngrokProc = null;
+async function openTunnel(port) {
+  const already = await existingTunnel(port);
+  if (already) return already;
+  ngrokProc = spawn('ngrok', ['http', String(port), '--log', 'stdout', '--log-format', 'json'],
+                    { stdio: ['ignore', 'pipe', 'pipe'] });
+  const url = await new Promise(resolve => {
+    let buf = '', settled = false;
+    const finish = v => { if (!settled) { settled = true; resolve(v); } };
+    ngrokProc.stdout.on('data', d => {
+      buf += d;
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        try {
+          const o = JSON.parse(line);
+          if (typeof o.url === 'string' && o.url.startsWith('https')) finish(o.url);
+        } catch { /* not a json log line */ }
+      }
+    });
+    ngrokProc.on('error', () => finish(null));
+    ngrokProc.on('exit', () => finish(null));
+    setTimeout(() => finish(null), 12000);
+  });
+  if (!url) console.log('  (ngrok did not start -- is it installed and authenticated?)');
+  return url;
+}
+
+const stopTunnel = () => { if (ngrokProc && ngrokProc.exitCode === null) ngrokProc.kill(); };
+process.on('exit', stopTunnel);
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopTunnel(); process.exit(0); });
+
+server.listen(PORT, async () => {
+  console.log(`\nships ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`);
+  console.log(`  local   http://localhost:${PORT}`);
+  const url = NGROK ? await openTunnel(PORT) : null;
+  if (url) {
+    console.log(`  public  ${url}`);
+    qrcode.generate(url, { small: true });
+  } else {
+    const lan = lanAddress();
+    if (lan) {
+      console.log(`  lan     http://${lan}:${PORT}`);
+      qrcode.generate(`http://${lan}:${PORT}`, { small: true });
+    } else {
+      console.log('  (no network interface found -- localhost only)');
+    }
+  }
+});
