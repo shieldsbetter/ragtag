@@ -989,7 +989,13 @@ function snapshotFor(p) {
       tu: s.turrets.map(t => +t.a.toFixed(2)),
       // Rounded: repair moves in thirtieths of a point and nobody can see that, while
       // the digits would ride in every snapshot.
-      hp: s.turrets.map(t => Math.round(t.hp)),
+      //
+      // A wreck on somebody else's ship is only ever a wreck. How deep the debt still is
+      // -- and so how close their crew is to standing that gun back up -- is theirs to
+      // know. Zero says it plainly and says nothing more: a gun never sits at zero alive,
+      // it goes straight over the cliff, so nothing is lost by clamping there. Damage
+      // above zero stays public, which is what makes a battered enemy worth reading.
+      hp: s.turrets.map(t => Math.round(s.owner === p.id ? t.hp : Math.max(0, t.hp))),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
       // Only to the ship's owner, and only because it is what the editor reads back on
       // reconnect. It is identical frame to frame, so the shared deflate context sends
