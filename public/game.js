@@ -550,17 +550,16 @@ let builtKey = '';
 const statusEls = new Map();
 let gunEls = null, gunShip = null;    // the repair tab's live bars, one per mount
 
-// Port down the left, starboard down the right, fore to aft: the grid reads like the
-// ship does, so a bar and the gun it stands for are in the same place.
-function gunOrder() {
-  const cols = [[], []];
-  mounts.forEach((m, i) => cols[m.facing < 0 ? 0 : 1].push(i));
-  for (const c of cols) c.sort((a, b) => mounts[b].at[0] - mounts[a].at[0]);
-  const out = [];
-  for (let r = 0; r < Math.max(cols[0].length, cols[1].length); r++)
-    for (let c = 0; c < 2; c++) if (cols[c][r] !== undefined)
-      out.push({ i: cols[c][r], label: (c ? 'S' : 'P') + (r + 1) });
-  return out;
+// A row per side, fore to aft along it: the grid reads like the ship does, so a bar and
+// the gun it stands for are in the same place. The column count follows the hull rather
+// than being fixed, so a broadside of four is two rows of four.
+function gunRows() {
+  const sides = [[], []];
+  mounts.forEach((m, i) => sides[m.facing < 0 ? 0 : 1].push(i));
+  for (const s of sides) s.sort((a, b) => mounts[b].at[0] - mounts[a].at[0]);
+  const list = [];
+  sides.forEach((side, c) => side.forEach((i, r) => list.push({ i, label: (c ? 'S' : 'P') + (r + 1) })));
+  return { cols: Math.max(sides[0].length, sides[1].length, 1), list };
 }
 
 // A wreck is drawn in the ring's colours rather than the health ramp, and says so: a bar
@@ -657,9 +656,11 @@ const WRENCH = '<svg class="wrench" viewBox="0 0 12 12" aria-hidden="true"><path
 function gunGrid(s) {
   const wrap = document.createElement('div');
   wrap.className = 'guns';
+  const { cols, list } = gunRows();
+  wrap.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   gunEls = [];
   gunShip = s.id;
-  for (const { i, label } of gunOrder()) {
+  for (const { i, label } of list) {
     const cell = document.createElement('div');
     cell.className = 'gun';
     cell.innerHTML = `<div class="gl">${label}${WRENCH}</div>`
