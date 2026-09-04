@@ -1411,17 +1411,32 @@ function draw() {
     poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2);
   }
   // A tractor with nothing to show for itself looks like a bug, so the beam is drawn --
-  // for anyone's ship, since it is a thing happening in the world.
+  // for anyone's ship, since it is a thing happening in the world. A wedge spreading from
+  // the emitter out to the grain, in a blue that belongs to nothing else on the board, so
+  // it never reads as gunnery. The flare is screen-sized: the beam is a thing you look
+  // at, not a thing with a width in metres.
+  const BEAM_RGB = '106,184,255', BEAM_FLARE = 11;
   for (const s of state.ships) {
     if (s.bm === undefined) continue;
     const grain = (state.ore || []).find(o => o.id === s.bm);
     if (!grain) continue;
+    const dx = grain.x - s.x, dy = grain.y - s.y, d = Math.hypot(dx, dy) || 1;
+    const px = -dy / d, py = dx / d;                   // across the beam
+    const near = 1.5 / cam.zoom, far = BEAM_FLARE / cam.zoom;
+    const sx = s.x - cam.x, sy = s.y - cam.y, gx = grain.x - cam.x, gy = grain.y - cam.y;
     const beam = new Path2D();
-    beam.moveTo(s.x - cam.x, s.y - cam.y);
-    beam.lineTo(grain.x - cam.x, grain.y - cam.y);
+    beam.moveTo(sx + px * near, sy + py * near);
+    beam.lineTo(gx + px * far, gy + py * far);
+    beam.lineTo(gx - px * far, gy - py * far);
+    beam.lineTo(sx - px * near, sy - py * near);
+    beam.closePath();
+    // Slow enough to read as a hum rather than a flicker.
+    const pulse = 0.5 + 0.5 * Math.sin(now / 620);
     ctx.save();
-    ctx.strokeStyle = 'rgba(216,168,81,.45)';
-    ctx.lineWidth = 1.2 / cam.zoom;
+    ctx.fillStyle = `rgba(${BEAM_RGB},${0.07 + 0.11 * pulse})`;
+    ctx.strokeStyle = `rgba(${BEAM_RGB},${0.28 + 0.34 * pulse})`;
+    ctx.lineWidth = 1 / cam.zoom;
+    ctx.fill(beam);
     ctx.stroke(beam);
     ctx.restore();
   }
