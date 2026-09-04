@@ -644,26 +644,32 @@ function aimTurrets(s, targets, dt) {
       if (score <= 0) continue;                        // zero priority is "do not engage"
       // Focus fire outranks the envelope but does not overrule it: it decides which of
       // the targets this ship is willing to engage comes first, and a refusal stands.
-      const focus = g.ship !== null && g.ship === s.focus ? 1 : 0;
+      //
+      // The first pass is the focused ship AND everything belonging to nobody. Being
+      // told to concentrate on a hull is not a reason to ignore the rock about to hit
+      // you; it is a reason to ignore the other hull. Within the pass the envelope
+      // decides, so a rock close enough to matter still outranks a distant target.
+      // With no focus set there is only one pass, which is the behaviour this replaced.
+      const tier = s.focus === null || g.ship === null || g.ship === s.focus ? 0 : 1;
 
       const ux = g.vx - s.vx, uy = g.vy - s.vy;       // bullets inherit the hull's velocity
       const ti = intercept(dx, dy, ux, uy, BULLET_SPEED);
       if (ti === null || ti > BULLET_LIFE) continue;  // shell would expire before arrival
       const bearing = Math.atan2(dy + uy * ti, dx + ux * ti);
       if (Math.abs(angleDiff(bearing, rest)) > T.arcHalf) continue;   // outside this mount's arc
-      shots.push({ focus, score, range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
+      shots.push({ tier, score, range, bearing, ax: g.x + ux * ti, ay: g.y + uy * ti });
     }
     // Nearest breaks a tie, which is what makes a flat envelope behave exactly like the
     // nearest-first rule this replaced.
-    shots.sort((p, q) => q.focus - p.focus || q.score - p.score || p.range - q.range);
+    shots.sort((p, q) => p.tier - q.tier || q.score - p.score || p.range - q.range);
 
-    // The sight budget is spent per group, not across the whole list. A focused ship
+    // The sight budget is spent per pass, not across the whole list. A focused ship
     // contributes exactly as many candidates as it has guns, so a single flat budget let
-    // one hull behind a wall consume the lot and leave the turret idle with a rock in
+    // one hull behind a wall consume the lot and leave the turret idle with a target in
     // plain view. Refusing to shoot is the envelope's job -- zero priority -- so focus
     // decides what comes first and nothing more.
     let want = null;
-    for (const group of [shots.filter(x => x.focus), shots.filter(x => !x.focus)]) {
+    for (const group of [shots.filter(x => x.tier === 0), shots.filter(x => x.tier === 1)]) {
       for (let k = 0; k < group.length && k < LOS_TRIES; k++) {
         if (polys.length && segmentBlocked(t.wx, t.wy, group[k].ax, group[k].ay, polys)) continue;
         want = group[k].bearing; break;
