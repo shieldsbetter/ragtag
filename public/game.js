@@ -131,7 +131,19 @@ function reloadWhenUp() {
 
 // Match the page's scheme: served over https (a tunnel, say) a plaintext ws:// is
 // blocked as mixed content, so the socket has to be wss:// there.
+// The session names this player to the server. Kept in localStorage so a refresh, a
+// reconnect, or coming back tomorrow resumes the same ship rather than abandoning it.
+// Nothing is answered until the server has it, so it is the first thing sent.
+const SESSION_KEY = 'ships.session';
+let session;
+try { session = localStorage.getItem(SESSION_KEY); } catch {}
+if (!session) {
+  session = (crypto.randomUUID?.() ?? String(Math.random()).slice(2) + Date.now().toString(36));
+  try { localStorage.setItem(SESSION_KEY, session); } catch {}   // private window: this session only
+}
+
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`);
+ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', session }));
 ws.onclose = reloadWhenUp;
 ws.onmessage = e => {
   const m = JSON.parse(e.data);
@@ -291,8 +303,24 @@ canvas.addEventListener('pointermove', e => {
   cam.y -= dy / cam.zoom;
 });
 
-let commanded = null;           // the ship a click orders; the first of yours, for now
-let cmdShip = null;             // ...and its latest interpolated state, for hit-testing the control
+// No ship is special: you own a fleet, and one of them is currently selected. Tapping a
+// ship of yours selects it; tapping open space orders the selected one there.
+let selected = null;            // id of the ship taking orders
+let cmdShip = null;             // ...and its latest interpolated state, for the control
+let fleet = [];                 // every ship you own, this frame
+
+// A ship is tappable at its hull size, but never smaller than a thumb: zoomed out, the
+// hull is a few pixels across and the generous radius is what makes selection possible.
+const SHIP_PICK = 60, PICK_MIN_PX = 26;
+function shipAt(world) {
+  const r = Math.max(SHIP_PICK, PICK_MIN_PX / cam.zoom);
+  let best = null, bestD = r;
+  for (const s of fleet) {
+    const d = Math.hypot(s.x - world.x, s.y - world.y);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
 
 // The heading control keeps a constant on-screen size, so its radius in world units
 // is whatever 64 screen pixels happens to be at the current zoom.
@@ -313,7 +341,7 @@ function sendFace(a, force) {
   const now = performance.now();
   if (!force && now - lastFaceSend < 80) return;
   lastFaceSend = now;
-  if (ws.readyState === 1 && commanded !== null) ws.send(JSON.stringify({ t: 'face', ship: commanded, a }));
+  if (ws.readyState === 1 && selected !== null) ws.send(JSON.stringify({ t: 'face', ship: selected, a }));
 }
 
 function release(e) {
@@ -323,10 +351,12 @@ function release(e) {
   if (pointers.size < 2) pinch = null;
   if (!wasSingle) return;
   if (rotating) { sendFace(dragHeading, true); rotating = false; dragHeading = null; return; }
-  if (dragged < 5 && performance.now() - pressedAt < 400 && ws.readyState === 1 && commanded !== null) {
+  if (dragged < 5 && performance.now() - pressedAt < 400 && ws.readyState === 1) {
     const r = canvas.getBoundingClientRect();
     const p = toWorld(e.clientX - r.left, e.clientY - r.top);
-    ws.send(JSON.stringify({ t: 'move', ship: commanded, x: p.x, y: p.y }));
+    const hit = shipAt(p);
+    if (hit) selected = hit.id;                     // tapping one of yours takes the helm
+    else if (selected !== null) ws.send(JSON.stringify({ t: 'move', ship: selected, x: p.x, y: p.y }));
   }
 }
 canvas.addEventListener('pointerup', release);
@@ -441,6 +471,25 @@ function rotateIcon(x, y, a, hot) {
 
 let badFrames = 0;
 
+// Corner brackets around the ship taking orders. The heading ring moves to the
+// destination once a move is ordered, so it cannot also say which ship is selected.
+function drawSelection(s) {
+  const x = s.x - cam.x, y = s.y - cam.y, hx = 58, hy = 24, arm = 16;
+  const p = new Path2D();
+  for (const sx of [-1, 1])
+    for (const sy of [-1, 1]) {
+      p.moveTo(x + sx * hx - sx * arm, y + sy * hy);
+      p.lineTo(x + sx * hx, y + sy * hy);
+      p.lineTo(x + sx * hx, y + sy * hy - sy * arm);
+    }
+  ctx.save();
+  ctx.strokeStyle = 'rgba(95,240,176,.55)';
+  ctx.lineWidth = 1.4 / cam.zoom;
+  ctx.lineCap = 'round';
+  ctx.stroke(p);
+  ctx.restore();
+}
+
 function drawControl(s) {
   const c = controlAt(s), h = dragHeading ?? s.hd;
   const R = CONTROL_R / cam.zoom, cx = c.x - cam.x, cy = c.y - cam.y;
@@ -547,10 +596,11 @@ function draw() {
   lastFrame = now;
   if (!state) return;
 
-  const mine = state.ships.filter(s => s.owner === myId);
-  commanded = mine.length ? mine[0].id : null;
-  cmdShip = mine.length ? mine[0] : null;
-  if (!cam.placed && mine.length) { cam.x = mine[0].x; cam.y = mine[0].y; cam.placed = true; }
+  fleet = state.ships.filter(s => s.owner === myId);
+  // Keep the selection if that ship still exists, otherwise fall back to any of yours.
+  cmdShip = fleet.find(s => s.id === selected) ?? fleet[0] ?? null;
+  selected = cmdShip ? cmdShip.id : null;
+  if (!cam.placed && fleet.length) { cam.x = fleet[0].x; cam.y = fleet[0].y; cam.placed = true; }
 
   let px = 0, py = 0;
   for (const code in PAN_KEYS) if (keys[code]) { px += PAN_KEYS[code][0]; py += PAN_KEYS[code][1]; }
@@ -598,7 +648,7 @@ function draw() {
     ctx.fillRect(x - bs / 2, y - bs / 2, bs, bs);
   }
 
-  for (const s of mine) {
+  for (const s of fleet) {
     if (s.dx === undefined) continue;
     const [mx, my] = at({ x: s.dx, y: s.dy });
     const [sx, sy] = at(s);
@@ -612,7 +662,7 @@ function draw() {
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
   }
 
-  if (cmdShip) drawControl(cmdShip);
+  if (cmdShip) { drawSelection(cmdShip); drawControl(cmdShip); }
 
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
 
@@ -658,7 +708,7 @@ function draw() {
   screen.drawImage(back, 0, 0);
 
   hud.style.color = state.stale ? '#ffb347' : '';
-  hud.textContent = `CLICK move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
+  hud.textContent = `TAP ship to select, space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
     + `  c${clientVersion}`
     + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')

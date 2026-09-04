@@ -49,6 +49,7 @@ const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 // How far a camera may see from its own centre. The client will not zoom out past
 // this, so it bounds what any one client can ask to be sent -- which is what keeps a
 // snapshot small no matter how crowded the world gets.
+const FLEET_SIZE = 2;                 // what a new commander starts with
 const MAX_VIEW = 2200, VIEW_BUFFER = 500;
 const STREAM_R = MAX_VIEW + VIEW_BUFFER;
 
@@ -74,7 +75,6 @@ const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no q
                                                // it does not need the sim's fidelity
 const BULLET_SPEED = 560, BULLET_LIFE = 1.2;
 const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silence a gun
-const ENEMY_RANGE = 900;                                   // how far off an enemy carrier arrives
 
 // Terrain. The plane is cut into fixed chunks; each chunk's walls are a pure function
 // of its coordinates, so the same patch of space is always the same walls. Chunks are
@@ -342,31 +342,18 @@ function spawnRock(size, x, y) {
 // session. Start looking near the origin and widen until there is room, which keeps
 // early spawns close together and only spreads out once it has to.
 const SPAWN_SEP = 260;
-function spawnPoint() {
+// Around an anchor -- the origin for a new arrival, or the rest of your fleet for a
+// ship joining it -- widening until there is room.
+function spawnPoint(ax = 0, ay = 0, reach0 = 300) {
   for (let i = 0; i < 60; i++) {
-    const reach = 300 + i * 45;
+    const reach = reach0 + i * 45;
     const a = rand(0, Math.PI * 2), d = Math.sqrt(Math.random()) * reach;
-    const x = Math.cos(a) * d, y = Math.sin(a) * d;
+    const x = ax + Math.cos(a) * d, y = ay + Math.sin(a) * d;
     let clear = !blockedAt(x, y, 70);
     if (clear) for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < SPAWN_SEP) { clear = false; break; }
     if (clear) return { x, y };
   }
-  return { x: rand(-3000, 3000), y: rand(-3000, 3000) };   // pathologically crowded: just go somewhere
-}
-
-// A spot at a fixed range from somewhere, on whichever bearing is least crowded.
-// Stops as soon as it finds one that is clear, so it is usually a single try.
-function ringPoint(cx, cy, radius) {
-  let best = null, bestGap = -1;
-  for (let i = 0; i < 24; i++) {
-    const a = rand(0, Math.PI * 2);
-    const x = cx + Math.cos(a) * radius, y = cy + Math.sin(a) * radius;
-    let gap = blockedAt(x, y, 70) ? -1 : Infinity;
-    for (const s of ships) gap = Math.min(gap, Math.hypot(s.x - x, s.y - y));
-    if (gap > bestGap) { bestGap = gap; best = { x, y, a }; }
-    if (bestGap >= SPAWN_SEP) break;
-  }
-  return best;
+  return { x: ax + rand(-3000, 3000), y: ay + rand(-3000, 3000) };   // pathologically crowded
 }
 
 // Uniform over the disc (hence the sqrt -- sampling the radius directly would pile
@@ -391,7 +378,7 @@ function stock(s, spot) {
 
 function newShip(owner, team, at = {}, hull = CARRIER) {
   const facing = at.a ?? rand(0, Math.PI * 2);
-  const spot = at.x === undefined ? spawnPoint() : at;
+  const spot = at.x === undefined ? spawnPoint(at.nearX ?? 0, at.nearY ?? 0, at.reach) : at;
   const s = {
     id: nextId++, owner, team, hull,
     x: spot.x, y: spot.y, vx: 0, vy: 0, a: facing,
@@ -727,23 +714,57 @@ const wss = new WebSocketServer({
   server,
   perMessageDeflate: { zlibDeflateOptions: { level: 6 }, threshold: 256 },
 });
+// A client's session names its player. Reconnecting with the same one gets the same
+// ships, score and name back, so a refresh -- or a phone that dropped wifi -- resumes
+// rather than abandoning a carrier and starting over. It is a bearer token and nothing
+// more: anyone presenting a session id is treated as its owner, which is the right
+// weight for a game with no accounts.
+const sessions = new Map();   // session id -> player id
+
 wss.on('connection', ws => {
-  const id = nextId++;
-  const p = { id, ws, name: `ship-${id}`, score: 0, chunks: new Set(), view: { x: 0, y: 0 } };
-  players.set(id, p);
-  // Every human is on the same side; the opposition is the 'enemy' team. Give players
-  // per-player teams instead and this becomes PvP.
-  const mine = newShip(id, 'players');
-  p.view = { x: mine.x, y: mine.y };                  // until the client says otherwise
-  const spot = ringPoint(mine.x, mine.y, ENEMY_RANGE);   // an opponent arrives with every player
-  newShip(null, 'enemy', { x: spot.x, y: spot.y, a: spot.a + Math.PI });   // facing the ship it came for
-  ws.send(JSON.stringify({ t: 'welcome', id, dev: DEV, cv: clientHash(), maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf }));
+  let p = null;
+
+  function join(session) {
+    p = players.get(sessions.get(session));
+    if (p) {
+      if (p.ws !== ws && p.ws.readyState === 1) p.ws.close();   // one socket per session
+      p.ws = ws;
+    } else {
+      const id = nextId++;
+      p = { id, ws, name: `ship-${id}`, score: 0, chunks: new Set(), view: { x: 0, y: 0 } };
+      players.set(id, p);
+      sessions.set(session, id);
+    }
+    p.chunks = new Set();                     // a new socket has been sent no terrain yet
+
+    // Returning players keep the fleet they left; a new commander is issued one. No ship
+    // is special -- they are simply the ships this player owns.
+    let fleet = [...ships].filter(s => s.owner === p.id);
+    if (!fleet.length)
+      for (let i = 0; i < FLEET_SIZE; i++) {
+        // The rest of the fleet forms up on the first ship rather than being scattered
+        // across the map: a squadron you cannot see together is not a squadron.
+        const lead = fleet[0];
+        fleet.push(newShip(p.id, 'players',
+          lead ? { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP } : {}));
+      }
+    p.view = { x: fleet[0].x, y: fleet[0].y };  // until the client says where it is looking
+
+    ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
+      maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf }));
+  }
 
   ws.on('message', raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
+    if (m.t === 'hello' && typeof m.session === 'string' && m.session.length <= 64) {
+      if (!p) join(m.session);
+      return;
+    }
+    if (!p) return;                            // nothing is answered before a session arrives
+
     if (m.t === 'move' && Number.isFinite(m.x) && Number.isFinite(m.y)) {
       for (const s of ships) {
-        if (s.owner !== id || s.id !== m.ship) continue;      // you may only order your own
+        if (s.owner !== p.id || s.id !== m.ship) continue;    // you may only order your own
         const dx = m.x - s.x, dy = m.y - s.y;
         s.dest = { x: m.x, y: m.y }; s.braking = false;
         // Face the way you travelled, unless the order was a nudge too small to have a
@@ -752,14 +773,13 @@ wss.on('connection', ws => {
       }
     }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
-      for (const s of ships) if (s.owner === id && s.id === m.ship) s.heading = m.a;
+      for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
     }
     else if (m.t === 'view' && Number.isFinite(m.x) && Number.isFinite(m.y)) p.view = { x: m.x, y: m.y };
     else if (m.t === 'name' && typeof m.name === 'string') p.name = m.name.slice(0, 16);
   });
   // Nothing happens on disconnect. The world outlives its players -- ships stay where
-  // they were, scores stand, and only restarting the process clears any of it. A
-  // refresh is therefore just another arrival.
+  // they were, scores stand, and only restarting the process clears any of it.
 });
 
 let last = Date.now(), frame = 0;
@@ -770,7 +790,7 @@ setInterval(() => {
   step(dt);
   const streamChunks = ++frame % 10 === 0;
   for (const p of players.values()) {
-    if (p.ws.readyState !== 1) continue;
+    if (!p.ws || p.ws.readyState !== 1) continue;
     if (streamChunks) syncChunks(p);
     p.ws.send(snapshotFor(p));
   }
