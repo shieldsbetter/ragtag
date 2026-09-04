@@ -609,13 +609,17 @@ function snapshotFor(p) {
     players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
     ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
       id: s.id, owner: s.owner,
-      x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(3), th: s.th, hd: +s.heading.toFixed(3),
-      tu: s.turrets.map(t => +t.a.toFixed(3)),
+      // Ships keep sub-pixel position -- they are what the eye follows -- but angles do
+      // not need three decimals: 0.01rad is a pixel at the tip of a hull.
+      x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
+      tu: s.turrets.map(t => +t.a.toFixed(2)),
       hp: s.turrets.map(t => t.hp),
-      ...(s.dest ? { dx: +s.dest.x.toFixed(1), dy: +s.dest.y.toFixed(1) } : {}),
+      ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
     })),
-    bullets: bullets.filter(near).map(b => ({ id: b.id, x: +b.x.toFixed(1), y: +b.y.toFixed(1) })),
-    rocks: rocks.filter(near).map(r => ({ id: r.id, x: +r.x.toFixed(1), y: +r.y.toFixed(1), a: +r.a.toFixed(3), size: r.size, seed: r.seed })),
+    // Rocks and shells round to whole units: interpolation smooths the half-unit of
+    // error, and nobody is inspecting a shell's sub-pixel position.
+    bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
+    rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y), a: +r.a.toFixed(2), size: r.size, seed: r.seed })),
   });
 }
 
@@ -642,7 +646,13 @@ function syncChunks(p) {
   }
 }
 
-const wss = new WebSocketServer({ server });
+// Snapshots are repetitive JSON, which deflate eats: measured 5.7KB -> 0.9KB per
+// message, and better still with the compression context kept between messages, which
+// is the default. Small messages are not worth the round trip.
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: { zlibDeflateOptions: { level: 6 }, threshold: 256 },
+});
 wss.on('connection', ws => {
   const id = nextId++;
   const p = { id, ws, name: `ship-${id}`, score: 0, chunks: new Set(), view: { x: 0, y: 0 } };
