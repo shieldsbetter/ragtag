@@ -260,11 +260,23 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1) {
-    dragged = 0; pressedAt = performance.now();
+    dragged = 0; pressedAt = performance.now(); longFired = false; cancelHold();
+    const r = canvas.getBoundingClientRect();
+    const w = toWorld(e.clientX - r.left, e.clientY - r.top);
     if (cmdShip) {                                  // grabbing the handle is not a pan or a click
-      const r = canvas.getBoundingClientRect();
-      const w = toWorld(e.clientX - r.left, e.clientY - r.top), i = iconPos(cmdShip);
+      const i = iconPos(cmdShip);
       if (Math.hypot(w.x - i.x, w.y - i.y) < GRAB_R / cam.zoom) { rotating = true; dragHeading = cmdShip.hd; }
+    }
+    if (!rotating) {
+      const s = shipAt(w);
+      if (s) {
+        holding = { ship: s.id, start: performance.now() };
+        longTimer = setTimeout(() => {
+          longFired = true; longTimer = null;
+          toggleInSelection(holding.ship);
+          holding = null;
+        }, LONG_PRESS_MS);
+      }
     }
   }
   if (pointers.size === 2) pinch = spread();
@@ -291,6 +303,7 @@ canvas.addEventListener('pointermove', e => {
     return;
   }
   dragged += Math.hypot(dx, dy);
+  if (dragged > LONG_PRESS_SLOP) cancelHold();      // a drag is a pan, not a hold
 
   if (rotating && cmdShip) {
     const r = canvas.getBoundingClientRect();
@@ -303,11 +316,37 @@ canvas.addEventListener('pointermove', e => {
   cam.y -= dy / cam.zoom;
 });
 
-// No ship is special: you own a fleet, and one of them is currently selected. Tapping a
-// ship of yours selects it; tapping open space orders the selected one there.
-let selected = null;            // id of the ship taking orders
-let cmdShip = null;             // ...and its latest interpolated state, for the control
+// No ship is special: you own a fleet, some of it is selected, and one of the selected
+// is designated -- the one wearing the heading ring.
+//   tap a ship outside the selection : it becomes the selection
+//   tap a ship inside the selection  : it becomes designated, group unchanged
+//   long-press a ship (shift+click)  : add it, or drop it if already in
+//   tap open space                   : the whole selection moves, keeping formation
+const selection = new Set();
+let designated = null;          // id of the ship wearing the ring
+let cmdShip = null;             // ...and its latest interpolated state
 let fleet = [];                 // every ship you own, this frame
+
+// Mobile has three gestures and drag is already the map, so adding to a selection is a
+// long press. Slop is generous: a thumb moves a little during a deliberate hold.
+const LONG_PRESS_MS = 450, LONG_PRESS_SLOP = 10;
+let holding = null;             // { ship, start } while a press is maturing
+let longTimer = null, longFired = false;
+
+function cancelHold() {
+  if (longTimer) { clearTimeout(longTimer); longTimer = null; }
+  holding = null;
+}
+
+function toggleInSelection(id) {
+  if (selection.has(id) && selection.size > 1) {
+    selection.delete(id);
+    if (designated === id) designated = [...selection][0];
+  } else {
+    selection.add(id);
+    designated = id;            // whatever you just added is what you are aiming
+  }
+}
 
 // A ship is tappable at its hull size, but never smaller than a thumb: zoomed out, the
 // hull is a few pixels across and the generous radius is what makes selection possible.
@@ -321,6 +360,19 @@ function shipAt(world) {
   }
   return best;
 }
+
+// The selection moves as a body: its centre goes where you tapped and every ship keeps
+// its offset from that centre, so a line abreast stays a line abreast.
+function orderMove(world) {
+  const picked = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean);
+  if (!picked.length) return;
+  let cx = 0, cy = 0;
+  for (const s of picked) { cx += s.x; cy += s.y; }
+  cx /= picked.length; cy /= picked.length;
+  for (const s of picked)
+    ws.send(JSON.stringify({ t: 'move', ship: s.id, x: world.x + (s.x - cx), y: world.y + (s.y - cy) }));
+}
+
 
 // The heading control keeps a constant on-screen size, so its radius in world units
 // is whatever 64 screen pixels happens to be at the current zoom.
@@ -341,7 +393,7 @@ function sendFace(a, force) {
   const now = performance.now();
   if (!force && now - lastFaceSend < 80) return;
   lastFaceSend = now;
-  if (ws.readyState === 1 && selected !== null) ws.send(JSON.stringify({ t: 'face', ship: selected, a }));
+  if (ws.readyState === 1 && designated !== null) ws.send(JSON.stringify({ t: 'face', ship: designated, a }));
 }
 
 function release(e) {
@@ -350,13 +402,17 @@ function release(e) {
   pointers.delete(e.pointerId);
   if (pointers.size < 2) pinch = null;
   if (!wasSingle) return;
+  cancelHold();
   if (rotating) { sendFace(dragHeading, true); rotating = false; dragHeading = null; return; }
+  if (longFired) { longFired = false; return; }     // the hold already acted; the release is not a tap
   if (dragged < 5 && performance.now() - pressedAt < 400 && ws.readyState === 1) {
     const r = canvas.getBoundingClientRect();
     const p = toWorld(e.clientX - r.left, e.clientY - r.top);
     const hit = shipAt(p);
-    if (hit) selected = hit.id;                     // tapping one of yours takes the helm
-    else if (selected !== null) ws.send(JSON.stringify({ t: 'move', ship: selected, x: p.x, y: p.y }));
+    if (hit && e.shiftKey) toggleInSelection(hit.id);          // desktop equivalent of the hold
+    else if (hit && selection.has(hit.id)) designated = hit.id;   // re-aim within the group
+    else if (hit) { selection.clear(); selection.add(hit.id); designated = hit.id; }
+    else orderMove(p);
   }
 }
 canvas.addEventListener('pointerup', release);
@@ -473,7 +529,22 @@ let badFrames = 0;
 
 // Corner brackets around the ship taking orders. The heading ring moves to the
 // destination once a move is ordered, so it cannot also say which ship is selected.
-function drawSelection(s) {
+// Feedback while a long press matures: an arc closing around the ship, so a hold that
+// has registered looks different from one the screen ignored.
+function drawHold(s, held) {
+  if (!s) return;
+  const p = new Path2D();
+  p.arc(s.x - cam.x, s.y - cam.y, 46, -Math.PI / 2,
+        -Math.PI / 2 + Math.PI * 2 * Math.min(1, held / LONG_PRESS_MS));
+  ctx.save();
+  ctx.strokeStyle = 'rgba(95,240,176,.7)';
+  ctx.lineWidth = 2.5 / cam.zoom;
+  ctx.lineCap = 'round';
+  ctx.stroke(p);
+  ctx.restore();
+}
+
+function drawSelection(s, isDesignated) {
   const x = s.x - cam.x, y = s.y - cam.y, hx = 58, hy = 24, arm = 16;
   const p = new Path2D();
   for (const sx of [-1, 1])
@@ -483,8 +554,8 @@ function drawSelection(s) {
       p.lineTo(x + sx * hx, y + sy * hy - sy * arm);
     }
   ctx.save();
-  ctx.strokeStyle = 'rgba(95,240,176,.55)';
-  ctx.lineWidth = 1.4 / cam.zoom;
+  ctx.strokeStyle = isDesignated ? 'rgba(150,255,205,.9)' : 'rgba(95,240,176,.4)';
+  ctx.lineWidth = (isDesignated ? 1.8 : 1.2) / cam.zoom;
   ctx.lineCap = 'round';
   ctx.stroke(p);
   ctx.restore();
@@ -597,9 +668,11 @@ function draw() {
   if (!state) return;
 
   fleet = state.ships.filter(s => s.owner === myId);
-  // Keep the selection if that ship still exists, otherwise fall back to any of yours.
-  cmdShip = fleet.find(s => s.id === selected) ?? fleet[0] ?? null;
-  selected = cmdShip ? cmdShip.id : null;
+  // Forget ships that no longer exist, and keep a designated one while anything is held.
+  for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
+  if (!selection.size && fleet.length) { selection.add(fleet[0].id); designated = fleet[0].id; }
+  if (!selection.has(designated)) designated = [...selection][0] ?? null;
+  cmdShip = fleet.find(s => s.id === designated) ?? null;
   if (!cam.placed && fleet.length) { cam.x = fleet[0].x; cam.y = fleet[0].y; cam.placed = true; }
 
   let px = 0, py = 0;
@@ -662,7 +735,9 @@ function draw() {
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
   }
 
-  if (cmdShip) { drawSelection(cmdShip); drawControl(cmdShip); }
+  for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
+  if (holding) drawHold(fleet.find(s => s.id === holding.ship), now - holding.start);
+  if (cmdShip) drawControl(cmdShip);
 
   const nameOf = id => (state.players.find(p => p.id === id) || {}).name || '?';
 
@@ -708,7 +783,7 @@ function draw() {
   screen.drawImage(back, 0, 0);
 
   hud.style.color = state.stale ? '#ffb347' : '';
-  hud.textContent = `TAP ship to select, space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
+  hud.textContent = `TAP select  HOLD add  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
     + `  c${clientVersion}`
     + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')
