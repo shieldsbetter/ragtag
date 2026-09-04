@@ -55,8 +55,10 @@ const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 // TRACTOR_R and hauls it in; nothing is aimed and nothing is ordered, so collecting is
 // a consequence of where you park, which is the same bargain the guns make.
 // Half what it was: broken rock now supplies most of it, and free-floating grains are
-// the seed rather than the crop.
-const ORE_TARGET = 7, ORE_VALUE = 5;
+// the seed rather than the crop. Grains disperse after ORE_LIFE, which is what bounds
+// the field: without it the population settles wherever collection happens to balance a
+// battle's worth of shattered rock, and a snapshot fills up with gravel.
+const ORE_TARGET = 7, ORE_VALUE = 5, ORE_LIFE = 30;
 const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 
 // Opposition is scattered through the world rather than spawned at anyone: each chunk
@@ -483,19 +485,21 @@ function spawnRock(size, x, y, grace = 0) {
 // and a handful of ore shaken loose. The pieces cannot hurt anything for a moment, which
 // is what stops a cascade landing all at once.
 //
-// Every rock sheds ore, whether it splits or simply goes: the smallest ones leave less,
-// so working a big rock all the way down pays better than picking off gravel.
-const ORE_FROM_SPLIT = [2, 5], ORE_FROM_DUST = [1, 3];
-const shed = ([lo, hi], x, y) => {
-  const n = lo + Math.floor(Math.random() * (hi - lo + 1));
-  for (let i = 0; i < n; i++) spawnOre(x, y);
-};
+// Any rock coming apart may give up ore, and mostly does not: one grain a third of the
+// time, and a second grain in a fifth of those. Two thirds of the rock you break leaves
+// nothing at all, which is what keeps a battle from carpeting the field in gravel.
+const ORE_CHANCE = 1 / 3, ORE_SECOND = 1 / 5;
+function shed(x, y) {
+  if (Math.random() >= ORE_CHANCE) return;
+  spawnOre(x, y);
+  if (Math.random() < ORE_SECOND) spawnOre(x, y);
+}
 
 function shatter(r) {
-  if (r.size <= 1) return shed(ORE_FROM_DUST, r.x, r.y);
+  shed(r.x, r.y);
+  if (r.size <= 1) return;
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
   spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
-  shed(ORE_FROM_SPLIT, r.x, r.y);
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
@@ -534,6 +538,7 @@ function spawnOre(x, y) {
     id: nextId++, x, y,
     vx: rand(-40, 40), vy: rand(-40, 40),
     a: rand(0, Math.PI * 2), spin: rand(-2, 2), r: 5,
+    life: ORE_LIFE,         // seconds before it disperses
     held: null,             // the one ship whose beam has it
   });
 }
@@ -921,7 +926,11 @@ function manageOre() {
     for (const s of ships) if (crewed(s) && Math.hypot(ore[i].x - s.x, ore[i].y - s.y) < KEEP_R) { keep = true; break; }
     if (!keep) ore.splice(i, 1);
   }
-  for (const s of ships) if (crewed(s)) stockOre(s, bandSpot);
+  // Anywhere in the neighbourhood rather than out at the edge, which is where rocks
+  // arrive from. Ore does not drift in from somewhere -- it is simply about, and with a
+  // half-minute life it would mostly expire before reaching anyone if it started at the
+  // rim. seedSpot still holds it off the hull itself.
+  for (const s of ships) if (crewed(s)) stockOre(s, seedSpot);
 }
 
 // One grain at a time, the nearest one in reach that the ship can actually see and that
@@ -999,7 +1008,12 @@ function step(dt) {
     r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt;
     if (r.grace > 0) r.grace -= dt;
   }
-  for (const o of ore) { o.x += o.vx * dt; o.y += o.vy * dt; o.a += o.spin * dt; }
+  for (let i = ore.length - 1; i >= 0; i--) {
+    const o = ore[i];
+    o.x += o.vx * dt; o.y += o.vy * dt; o.a += o.spin * dt;
+    o.life -= dt;
+    if (o.life <= 0) ore.splice(i, 1);
+  }
   for (const s of ships) tractor(s, dt);
 
   // Rocks against guns. The hull is not a target -- same as for shells -- so a rock that
