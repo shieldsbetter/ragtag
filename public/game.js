@@ -153,8 +153,8 @@ ws.onmessage = e => {
   if (m.t === 'welcome') {
     myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf;
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
-    if (m.prioKinds) prioKinds = m.prioKinds;
     if (m.prioStops) prioStops = m.prioStops;
+    if (m.wreck) wreckDepth = m.wreck;
     return;
   }
   if (m.t === 'reload') { location.reload(); return; }
@@ -526,8 +526,15 @@ detailsToggle.addEventListener('click', () => { detailsOpen = !detailsOpen; sync
 // them at a time is open. Two ships' worth of envelope editors side by side would not
 // fit a phone, and comparing them is not what the panel is for -- setting one is.
 let openShip = null;
-const PRIO_LABEL = { rock: 'Asteroids', turret: 'Turrets' };
-let prioKinds = ['rock', 'turret'], prioStops = 5;
+// Two sections, because the axis underneath differs even though the editor does not:
+// targeting reads distance, repair reads health with the wreck debt on the low end.
+const PANELS = [
+  { title: 'TARGET PRIORITY', axis: ['near', 'far'],
+    rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
+  { title: 'REPAIR PRIORITY', axis: ['wrecked', 'full'],
+    rows: [['repair', 'Damaged guns']] },
+];
+let prioStops = 5, wreckDepth = 150;
 
 const statusOf = s =>
   `${s.hp.filter(h => h > 0).length}/${s.hp.length} guns  ${s.th ? 'burn' : 'coast'}`
@@ -578,11 +585,14 @@ function buildDetails(ships) {
     if (s.id === openShip) {
       const body = document.createElement('div');
       body.className = 'shipbody';
-      const h = document.createElement('div');
-      h.className = 'sub';
-      h.textContent = 'TARGET PRIORITY';
-      body.append(h);
-      for (const k of prioKinds) body.append(envelope(s.id, k, s.pr && s.pr[k]));
+      for (const panel of PANELS) {
+        const h = document.createElement('div');
+        h.className = 'sub';
+        h.textContent = panel.title;
+        body.append(h);
+        for (const [kind, label] of panel.rows)
+          body.append(envelope(s.id, kind, label, panel.axis, s.pr && s.pr[kind]));
+      }
       row.append(body);
     }
     detailsBody.append(row);
@@ -592,7 +602,7 @@ function buildDetails(ships) {
 // One envelope: distance across, priority up. The stops are fixed in X and dragged in Y,
 // which is a one-finger gesture and needs no way to add or delete a point.
 const ENV_W = 240, ENV_H = 88, ENV_PAD = 9;
-function envelope(shipId, kind, initial) {
+function envelope(shipId, kind, label, axis, initial) {
   const n = prioStops;
   const v = (initial && initial.length === n ? initial : [100, 80, 60, 40, 20]).slice();
   const X = i => ENV_PAD + i * (ENV_W - 2 * ENV_PAD) / (n - 1);
@@ -600,14 +610,14 @@ function envelope(shipId, kind, initial) {
 
   const el = document.createElement('div');
   el.className = 'env';
-  el.innerHTML = `<div class="envhead">${PRIO_LABEL[kind] || kind}<b></b></div>`
+  el.innerHTML = `<div class="envhead">${label}<b></b></div>`
     + `<svg viewBox="0 0 ${ENV_W} ${ENV_H}">`
     +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" `
     +     `width="${ENV_W - 2 * ENV_PAD}" height="${ENV_H - 2 * ENV_PAD}"/>`
     +   `<polyline class="curve" points=""/>`
     +   v.map((_, i) => `<circle class="stop" r="4.5" cx="${X(i)}" cy="0"/>`).join('')
     + `</svg>`
-    + `<div class="envaxis"><span>near</span><span>far</span></div>`;
+    + `<div class="envaxis"><span>${axis[0]}</span><span>${axis[1]}</span></div>`;
 
   const svg = el.querySelector('svg');
   const curve = el.querySelector('.curve');
@@ -804,6 +814,28 @@ function healthColor(f) {
     ? [Math.round(510 * (1 - f)), 220, 90]
     : [235, Math.round(440 * f), 70];
   return `rgb(${r},${g_},${b})`;
+}
+
+// A ring rather than a bar, because a wreck is not a damaged gun -- it is a hole where
+// one was, and climbing out of the debt is a different thing from losing health. It
+// becomes the health bar at the moment the gun is standing again. Filled arc is progress
+// out of the debt; it goes bright while the ship's one repair point is going into it.
+const WRECK_R = 13;   // screen px: an empty mount has nothing else marking it
+function wreckRing(x, y, frac, active) {
+  const s = 1 / cam.zoom, r = WRECK_R * s;
+  ctx.save();
+  ctx.lineWidth = 2.5 * s;
+  const back = new Path2D();
+  back.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,107,138,.45)';
+  ctx.stroke(back);
+  if (frac > 0.001) {
+    const arc = new Path2D();
+    arc.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, frac));
+    ctx.strokeStyle = active ? '#ffd76a' : '#ff9a6a';
+    ctx.stroke(arc);
+  }
+  ctx.restore();
 }
 
 // Screen-oriented and screen-sized: a gauge, not part of the ship.
@@ -1225,8 +1257,11 @@ function draw() {
     const cos = Math.cos(s.a), sin = Math.sin(s.a);
     mounts.forEach((mt, i) => {
       const hp = s.hp ? s.hp[i] : TURRET_HP;
-      if (hp <= 0) return;                                // silenced guns are gone
       const gx = x + mt.at[0] * cos - mt.at[1] * sin, gy = y + mt.at[0] * sin + mt.at[1] * cos;
+      if (hp <= 0) {                                      // silenced: a mount, not a gun
+        if (!OFF.has('bars')) wreckRing(gx, gy, (hp + wreckDepth) / wreckDepth, s.rp === i);
+        return;
+      }
       if (own && !OFF.has('arcs')) {                      // show each mount's traverse limits
         ctx.save();
         ctx.strokeStyle = 'rgba(95,240,176,.10)'; ctx.lineWidth = 1 / cam.zoom;

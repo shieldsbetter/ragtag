@@ -92,10 +92,21 @@ const CARRIER = {
 // to ride in every snapshot. Zero means do not engage at all -- not "engage last" --
 // which is the hook the eventual fair-game flag hangs on.
 const PRIO_STOPS = 5;
-const PRIO_KINDS = ['rock', 'turret'];
+// 'rock' and 'turret' say what to shoot; 'repair' says what to mend. Same five-stop
+// curve, same order on the wire, same editor -- only the axis underneath differs, which
+// is distance for the first two and health for the third.
+const PRIO_KINDS = ['rock', 'turret', 'repair'];
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
-const defaultPrio = () => ({ rock: [100, 80, 60, 40, 20], turret: [100, 80, 60, 40, 20] });
+const defaultPrio = () => ({
+  rock: [100, 80, 60, 40, 20], turret: [100, 80, 60, 40, 20],
+  repair: [100, 80, 60, 40, 20],       // worst first: wrecks before dented guns
+});
+
+// Where a gun sits on the repair axis: 0 is a fresh wreck at the bottom of the debt,
+// 1 is a gun at full health. The debt is part of the axis, so a half-rebuilt wreck
+// really is further along than an untouched one.
+const repairFrac = hp => (hp + WRECK_DEPTH) / (TURRET_HP + WRECK_DEPTH);
 
 function prioAt(pts, f) {
   const x = Math.max(0, Math.min(1, f)) * (PRIO_STOPS - 1);
@@ -107,6 +118,13 @@ const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no q
                                                // it does not need the sim's fidelity
 const BULLET_SPEED = 560, BULLET_LIFE = 1.2;
 const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silence a gun
+
+// A silenced gun does not sit at zero, it falls into debt: the hit that kills it drops
+// it to -WRECK_DEPTH, and repair climbs back up the same axis. Keeping the cliff on the
+// health axis means "destroyed" stays `hp <= 0` everywhere it already was, with no
+// second pool and no rebuild state to keep in step -- and the depth is one number.
+// At one point a second that is 2.5 minutes to stand a wreck up, 100s to top a gun off.
+const WRECK_DEPTH = 150, REPAIR_RATE = 1;
 
 // Terrain. The plane is cut into fixed chunks; each chunk's walls are a pure function
 // of its coordinates, so the same patch of space is always the same walls. Chunks are
@@ -468,6 +486,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
     prio: defaultPrio(),
+    repairing: null,      // index of the one gun the repair point is going into
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
@@ -757,6 +776,33 @@ function resolveWalls(s) {
   }
 }
 
+// One point a second, into one gun at a time, and it stays there until that gun is whole
+// again. Re-picking the best target every tick would interleave: the moment a wreck is
+// worked on it climbs the axis, the untouched wreck beside it becomes the worst, and the
+// two would come up together at half speed each. A repair you commit to gives you a gun
+// back; two you hedge between give you neither. Setting that band to zero priority is
+// how you call it off.
+function repairShip(s, dt) {
+  const T = s.turrets;
+  const wants = i => T[i].hp < TURRET_HP && prioAt(s.prio.repair, repairFrac(T[i].hp)) > 0;
+  if (s.repairing !== null && !wants(s.repairing)) s.repairing = null;
+  if (s.repairing === null) {
+    let best = null, bestScore = 0;
+    for (let i = 0; i < T.length; i++) {
+      if (!wants(i)) continue;
+      const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
+      // Ties go to the gun nearest to being finished, so a shape with a flat top still
+      // completes one before starting the next.
+      if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
+        best = i; bestScore = score;
+      }
+    }
+    s.repairing = best;
+  }
+  if (s.repairing === null) return;
+  T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
+}
+
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
 // ACTIVE_R -- out past anything anyone is looking at -- and drift inward from there.
 function manageRocks() {
@@ -780,6 +826,7 @@ function step(dt) {
     advance(s, cmd, dt, s.hull);
     resolveWalls(s);
   }
+  for (const s of ships) repairShip(s, dt);
   placeTurrets();
   const byTeam = new Map();
   for (const s of ships) {
@@ -812,7 +859,8 @@ function step(dt) {
         if (t.hp <= 0) continue;
         const dx = o.x - t.wx, dy = o.y - t.wy, rr = TURRET_R + o.r;
         if (dx * dx + dy * dy >= rr * rr) continue;
-        t.hp = Math.max(0, t.hp - BULLET_DAMAGE);
+        // Over the cliff in one step: there is no such thing as a gun sitting at zero.
+        t.hp = t.hp - BULLET_DAMAGE <= 0 ? -WRECK_DEPTH : t.hp - BULLET_DAMAGE;
         bullets.splice(b, 1); struck = true;
         break;
       }
@@ -854,12 +902,17 @@ function snapshotFor(p) {
       // not need three decimals: 0.01rad is a pixel at the tip of a hull.
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
       tu: s.turrets.map(t => +t.a.toFixed(2)),
-      hp: s.turrets.map(t => t.hp),
+      // Rounded: repair moves in thirtieths of a point and nobody can see that, while
+      // the digits would ride in every snapshot.
+      hp: s.turrets.map(t => Math.round(t.hp)),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
       // Only to the ship's owner, and only because it is what the editor reads back on
       // reconnect. It is identical frame to frame, so the shared deflate context sends
       // almost nothing for it.
-      ...(s.owner === p.id ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}) } : {}),
+      ...(s.owner === p.id
+        ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
+            ...(s.repairing !== null ? { rp: s.repairing } : {}) }
+        : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
@@ -936,7 +989,7 @@ wss.on('connection', ws => {
 
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
       maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf,
-      prioKinds: PRIO_KINDS, prioStops: PRIO_STOPS }));
+      prioStops: PRIO_STOPS, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 
   ws.on('message', raw => {
