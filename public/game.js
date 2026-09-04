@@ -485,18 +485,30 @@ function buildPane() {
 const paneSpot = c => ({ x: c.cx + Math.cos(c.angle) * c.track, y: c.cy + Math.sin(c.angle) * c.track });
 
 function resolvePane(list) {
+  const { cw, ch } = view();
   for (const c of list) c.pos = paneSpot(c);
   for (const c of list) {
     if (c.pinned) continue;
-    const clashes = p => list.some(o =>
-      o !== c && o.pos && Math.hypot(o.pos.x - p.x, o.pos.y - p.y) < (o.r + c.r + CONTROL_PAD) / cam.zoom);
-    if (!clashes(c.pos)) continue;
+    const pad = (c.r + CONTROL_PAD) / cam.zoom;
+    // A spot is no good if it overlaps another control or hangs off the screen edge.
+    // Both are screen-pixel judgements -- a thumb is the same size at every zoom.
+    const blocked = p =>
+      Math.abs(p.x - cam.x) > cw / 2 / cam.zoom - pad ||
+      Math.abs(p.y - cam.y) > ch / 2 / cam.zoom - pad ||
+      list.some(o => o !== c && o.pos &&
+        Math.hypot(o.pos.x - p.x, o.pos.y - p.y) < (o.r + c.r + CONTROL_PAD) / cam.zoom);
+    if (!blocked(c.pos)) continue;
     // Walk around its own ring, alternating either way, and take the first clear spot.
-    for (let step = 1; step <= 20 && clashes(c.pos); step++)
+    // The step is one control-width of arc, not a fixed angle: a group ring can be far
+    // larger than the screen, and a fixed angle would stride straight past the sliver
+    // of it that is actually visible.
+    const dA = Math.min(0.16, (2 * c.r + CONTROL_PAD) / cam.zoom / c.track);
+    const steps = Math.min(400, Math.ceil(Math.PI / dA));
+    for (let step = 1; step <= steps && blocked(c.pos); step++)
       for (const dir of [1, -1]) {
-        const angle = c.angle + dir * step * 0.16;
+        const angle = c.angle + dir * step * dA;
         const p = paneSpot({ ...c, angle });
-        if (!clashes(p)) { c.angle = angle; c.pos = p; break; }
+        if (!blocked(p)) { c.angle = angle; c.pos = p; break; }
       }
   }
   return list;
