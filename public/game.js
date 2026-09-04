@@ -526,14 +526,16 @@ detailsToggle.addEventListener('click', () => { detailsOpen = !detailsOpen; sync
 // them at a time is open. Two ships' worth of envelope editors side by side would not
 // fit a phone, and comparing them is not what the panel is for -- setting one is.
 let openShip = null;
-// Two sections, because the axis underneath differs even though the editor does not:
-// targeting reads distance, repair reads health with the wreck debt on the low end.
+// Tabs rather than one long column: the editors are the same shape but the axis
+// underneath differs -- targeting reads distance, repair reads health with the wreck
+// debt on the low end -- and three curves stacked runs past the bottom of a phone.
 const PANELS = [
-  { title: 'TARGET PRIORITY', axis: ['near', 'far'],
+  { title: 'Targeting', axis: ['near', 'far'],
     rows: [['rock', 'Asteroids'], ['turret', 'Turrets']] },
-  { title: 'REPAIR PRIORITY', axis: ['wrecked', 'full'],
+  { title: 'Repair', axis: ['wrecked', 'full'],
     rows: [['repair', 'Damaged guns']] },
 ];
+let openTab = 0;
 let prioMax = 8, wreckDepth = 150;
 
 const statusOf = s =>
@@ -555,7 +557,7 @@ function syncDetails() {
   // Rebuilding blows away a half-dragged envelope, so it happens only when the shape of
   // the panel changes -- which ships, which one is open, which one wears the ring. The
   // live numbers are written into kept nodes every frame instead.
-  const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}`;
+  const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}|${openTab}`;
   if (key !== builtKey) { builtKey = key; buildDetails(ships); }
   for (const s of ships) {
     const el = statusEls.get(s.id);
@@ -585,14 +587,20 @@ function buildDetails(ships) {
     if (s.id === openShip) {
       const body = document.createElement('div');
       body.className = 'shipbody';
-      for (const panel of PANELS) {
-        const h = document.createElement('div');
-        h.className = 'sub';
-        h.textContent = panel.title;
-        body.append(h);
-        for (const [kind, label] of panel.rows)
-          body.append(envelope(s.id, kind, label, panel.axis, s.pr && s.pr[kind]));
-      }
+      const tabs = document.createElement('div');
+      tabs.className = 'tabs';
+      PANELS.forEach((panel, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = i === openTab ? 'on' : '';
+        b.textContent = panel.title;
+        // The tab is remembered across ships: you are usually doing the same job to each.
+        b.addEventListener('click', () => { openTab = i; syncDetails(); });
+        tabs.append(b);
+      });
+      body.append(tabs);
+      for (const [kind, label] of PANELS[openTab].rows)
+        body.append(envelope(s.id, kind, label, PANELS[openTab].axis, s.pr && s.pr[kind]));
       row.append(body);
     }
     detailsBody.append(row);

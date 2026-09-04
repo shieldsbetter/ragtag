@@ -56,6 +56,14 @@
   #details .shiphead.open .tw { transform: rotate(90deg); }
   #details .shipbody { padding: 0 0 12px; }
   #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
+  /* A thumb needs a target, so the strip is full width and the buttons split it. */
+  #details .tabs { display: flex; gap: 3px; margin: 4px 0 12px; }
+  #details .tabs button {
+    flex: 1; font: inherit; letter-spacing: .1em; padding: 9px 0; cursor: pointer;
+    color: #4e8f7d; background: none; border: 1px solid #14232f; border-radius: 3px;
+    touch-action: manipulation;
+  }
+  #details .tabs button.on { color: #cfeee2; background: #0c1420; border-color: #2a4658; }
 
   #details .env { margin-bottom: 14px; }
   #details .envhead { color: #cfeee2; display: flex; justify-content: space-between; }
