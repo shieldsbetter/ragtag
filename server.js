@@ -513,6 +513,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     prio: defaultPrio(),
     repairing: null,      // index of the one gun the repair point is going into
     repairHold: 0,        // seconds left before the crew may look elsewhere
+    repairFocus: [],      // guns named by hand, which outrank the curve entirely
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
@@ -812,7 +813,23 @@ function repairShip(s, dt) {
   const wants = i => i !== null && T[i].hp < TURRET_HP
     && prioAt(s.prio.repair, repairFrac(T[i].hp)) > 0;
   s.repairHold -= dt;
-  // Re-decide when the second is up, or the moment the gun in hand stops wanting the
+
+  // Guns named by hand are not a stronger opinion about priority, they replace it: the
+  // crew works round the named ones in turn, a dwell each, and the curve does not get a
+  // say. Naming a gun the curve refuses is a legitimate order, which is the point of
+  // being able to name one. When they are all whole the curve takes over again rather
+  // than leaving the crew idle beside a damaged gun.
+  const named = s.repairFocus.filter(i => T[i] && T[i].hp < TURRET_HP);
+  if (named.length) {
+    if (s.repairHold <= 0 || !named.includes(s.repairing)) {
+      s.repairing = named[(named.indexOf(s.repairing) + 1) % named.length];
+      s.repairHold = REPAIR_DWELL;
+    }
+    T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
+    return;
+  }
+
+  // Re-decide when the dwell is up, or the moment the gun in hand stops wanting the
   // point at all -- finished, or the band it sits in taken to zero.
   if (s.repairHold <= 0 || !wants(s.repairing)) {
     let best = null, bestScore = 0;
@@ -940,7 +957,8 @@ function snapshotFor(p) {
       // almost nothing for it.
       ...(s.owner === p.id
         ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
-            ...(s.repairing !== null ? { rp: s.repairing } : {}) }
+            ...(s.repairing !== null ? { rp: s.repairing } : {}),
+            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}) }
         : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
@@ -1050,6 +1068,12 @@ wss.on('connection', ws => {
         : [...ships].find(s => s.id === m.target && s.owner !== p.id)?.id ?? null;
       for (const s of ships)
         if (s.owner === p.id && m.ships.includes(s.id)) s.focus = target;
+    }
+    else if (m.t === 'repfocus' && Array.isArray(m.guns) && m.guns.every(Number.isInteger)) {
+      for (const s of ships) {
+        if (s.owner !== p.id || s.id !== m.ship) continue;
+        s.repairFocus = [...new Set(m.guns)].filter(i => i >= 0 && i < s.turrets.length);
+      }
     }
     else if (m.t === 'prio' && PRIO_KINDS.includes(m.kind) && Array.isArray(m.points)
              && m.points.length >= 2 && m.points.length <= PRIO_MAX

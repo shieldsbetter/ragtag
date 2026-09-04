@@ -566,8 +566,10 @@ function gunRows() {
 // creeping up from nothing means something different from a gun at 30%, and the ramp
 // would show them the same.
 function paintGuns(s) {
+  const named = s.rf || [];
   for (const g of gunEls) {
     const hp = s.hp[g.i], wreck = hp <= 0;
+    g.cell.classList.toggle('named', named.includes(g.i));
     const frac = wreck ? (hp + wreckDepth) / wreckDepth : hp / TURRET_HP;
     g.cell.classList.toggle('wrecked', wreck);
     g.fill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
@@ -665,6 +667,15 @@ function gunGrid(s) {
     cell.className = 'gun';
     cell.innerHTML = `<div class="gl">${label}${WRENCH}</div>`
       + `<div class="bar"><i></i><em>WRECK</em></div>`;
+    // Naming a gun is a toggle on the bar itself: the thing you are pointing at is the
+    // thing you are talking about, so it needs no separate control.
+    cell.addEventListener('click', () => {
+      const ship = fleet.find(q => q.id === gunShip);
+      if (!ship || ws.readyState !== 1) return;
+      const named = new Set(ship.rf || []);
+      named.has(i) ? named.delete(i) : named.add(i);
+      ws.send(JSON.stringify({ t: 'repfocus', ship: gunShip, guns: [...named] }));
+    });
     gunEls.push({ i, cell, fill: cell.querySelector('i') });
     wrap.append(cell);
   }

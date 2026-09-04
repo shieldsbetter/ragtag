@@ -67,7 +67,20 @@
 
   /* The guns, laid out the way they sit on the hull: port left, starboard right. */
   #details .guns { display: grid; gap: 8px 10px; margin: 0 0 16px; }
+  #details .gun { cursor: pointer; }
   #details .gun .gl { color: #4e8f7d; display: flex; align-items: center; gap: 4px; }
+  /* Named by hand: a pulsing outline around the whole cell, so it reads as an order
+     standing rather than a state. Around the cell rather than the bar because a full
+     bar is solid green and an outline on it disappears into the fill. */
+  #details .gun.named .gl { color: #cfeee2; }
+  #details .gun.named {
+    outline: 1px solid #5ff0b0; outline-offset: 2px; border-radius: 2px;
+    animation: named 1.1s ease-in-out infinite;
+  }
+  @keyframes named {
+    0%, 100% { outline-color: #5ff0b0; }
+    50%      { outline-color: #1d3f35; }
+  }
   #details .gun .bar {
     position: relative; height: 12px; margin-top: 3px; overflow: hidden;
     background: #101c26; border: 1px solid #14232f;
