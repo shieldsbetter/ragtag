@@ -457,6 +457,56 @@ let rotating = false, dragHeading = null, lastFaceSend = 0;
 // on arrival, so it belongs where the ship will be, not where it is.
 const anchorOf = s => s && s.dx !== undefined ? { x: s.dx, y: s.dy } : s;
 
+// ---- the details drawer ----
+// A place for controls that are lists and toggles rather than gestures -- target
+// priorities first. The canvas is for things you point at; this is for things you read.
+// It only exists while something is selected, since an empty selection is a real state
+// and not a gap to fill.
+const details = document.getElementById('details');
+const detailsBody = document.getElementById('detailsBody');
+const detailsToggle = document.getElementById('detailsToggle');
+
+// Wide screens have room for the panel beside the game, so it opens by default and the
+// button collapses it. Narrow screens do not, so the panel is a drawer over the board
+// and the button is the handle that pulls it out.
+const WIDE = matchMedia('(min-width: 900px)');
+let detailsOpen = WIDE.matches;
+WIDE.addEventListener('change', e => { detailsOpen = e.matches; syncDetails(true); });
+detailsToggle.addEventListener('click', () => { detailsOpen = !detailsOpen; syncDetails(true); });
+
+let detailsShown = '';
+function syncDetails(force) {
+  document.body.classList.toggle('has-selection', selection.size > 0);
+  document.body.classList.toggle('details-open', detailsOpen);
+  detailsToggle.textContent = detailsOpen ? '\u2715' : '\u2630';
+  if (!selection.size || !detailsOpen) return;
+  const rows = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean).map(s => {
+    const alive = s.hp.filter(h => h > 0).length;
+    return `<div class="ship"><b>${s.id === designated ? '\u25c9 ' : ''}ship ${s.id}</b><br>`
+      + `<span class="k">guns</span> ${alive}/${s.hp.length}`
+      + `  <span class="k">throttle</span> ${s.th ? 'burn' : 'coast'}`
+      + `  <span class="k">order</span> ${s.dx !== undefined ? 'move' : 'hold'}</div>`;
+  }).join('');
+  const html = rows + '<div class="todo">Target priorities go here: per ship, then per '
+    + 'turret type, then per turret.</div>';
+  // The DOM is only touched when the text actually changes -- this runs every frame.
+  if (html === detailsShown) return;
+  detailsShown = html;
+  detailsBody.innerHTML = html;
+}
+
+// The screen region the pane may place controls in: everything the drawer is not
+// covering. A control the panel has slid over is a control you cannot press.
+function freeRect() {
+  const { cw, ch } = view();
+  const r = { x0: 0, y0: 0, x1: cw, y1: ch };
+  if (!selection.size || !detailsOpen || !details.offsetWidth) return r;
+  const b = details.getBoundingClientRect();
+  // Full-height means it is docked to a side; otherwise it is the bottom drawer.
+  if (b.height >= ch - 2) r.x1 = Math.max(0, b.left); else r.y1 = Math.max(0, b.top);
+  return r;
+}
+
 // ---- the glass pane ----
 // Every tappable affordance is registered here each frame, resolved against the others,
 // then drawn and hit-tested from the same resolved position -- so what you can see and
@@ -486,17 +536,21 @@ const paneSpot = c => ({ x: c.cx + Math.cos(c.angle) * c.track, y: c.cy + Math.s
 
 function resolvePane(list) {
   const { cw, ch } = view();
+  const free = freeRect();
+  if (dev) window.__free = free;
   for (const c of list) c.pos = paneSpot(c);
   for (const c of list) {
     if (c.pinned) continue;
-    const pad = (c.r + CONTROL_PAD) / cam.zoom;
-    // A spot is no good if it overlaps another control or hangs off the screen edge.
-    // Both are screen-pixel judgements -- a thumb is the same size at every zoom.
-    const blocked = p =>
-      Math.abs(p.x - cam.x) > cw / 2 / cam.zoom - pad ||
-      Math.abs(p.y - cam.y) > ch / 2 / cam.zoom - pad ||
-      list.some(o => o !== c && o.pos &&
-        Math.hypot(o.pos.x - p.x, o.pos.y - p.y) < (o.r + c.r + CONTROL_PAD) / cam.zoom);
+    const pad = c.r + CONTROL_PAD;
+    // A spot is no good if it overlaps another control or lands outside the part of the
+    // screen still showing the game. Both are screen-pixel judgements -- a thumb is the
+    // same size at every zoom.
+    const blocked = p => {
+      const sx = cw / 2 + (p.x - cam.x) * cam.zoom, sy = ch / 2 + (p.y - cam.y) * cam.zoom;
+      return sx < free.x0 + pad || sx > free.x1 - pad || sy < free.y0 + pad || sy > free.y1 - pad ||
+        list.some(o => o !== c && o.pos &&
+          Math.hypot(o.pos.x - p.x, o.pos.y - p.y) < (o.r + c.r + CONTROL_PAD) / cam.zoom);
+    };
     if (!blocked(c.pos)) continue;
     // Walk around its own ring, alternating either way, and take the first clear spot.
     // The step is one control-width of arc, not a fixed angle: a group ring can be far
@@ -992,6 +1046,7 @@ function draw() {
   screen.setTransform(1, 0, 0, 1, 0, 0);
   screen.drawImage(back, 0, 0);
 
+  syncDetails();
   hud.style.color = state.stale ? '#ffb347' : '';
   hud.textContent = `TAP select  HOLD add/clear  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`

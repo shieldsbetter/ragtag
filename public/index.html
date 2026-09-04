@@ -14,7 +14,73 @@
     font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; text-shadow: 0 0 6px #0f6;
     pointer-events: none; white-space: pre;
   }
+
+  /* ---- details drawer ----
+     Somewhere to put controls too fiddly to draw on the canvas -- target priorities and
+     the like. It is a real DOM panel rather than canvas drawing because it holds lists
+     and toggles, which the browser already knows how to lay out and make accessible.
+     The panel and its one toggle button are placed entirely by CSS: three layouts (wide
+     dock, portrait drawer, landscape drawer) with no JS branch to keep in step. */
+  :root { --panel: 340px; --edge: 10px; }
+
+  #details, #detailsToggle {
+    font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace;
+    color: #7fe8c8; background: #080c15; border: 1px solid #1d3040;
+  }
+  /* Nothing is selected -> nothing to detail. Having no selection is a legitimate
+     state, so the panel leaves no stub behind when it is empty. */
+  #details, #detailsToggle { display: none; }
+  body.has-selection #details, body.has-selection #detailsToggle { display: block; }
+
+  /* Base case is the phone held upright: a drawer over the bottom half. */
+  #details {
+    position: fixed; left: 0; right: 0; bottom: 0; height: 50vh;
+    box-sizing: border-box; padding: 12px 14px; overflow-y: auto;
+    border-width: 1px 0 0 0;
+    transform: translateY(100%); transition: transform .18s ease;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.details-open #details { transform: none; }
+
+  #details h2 { font: inherit; letter-spacing: .18em; color: #4e8f7d; margin: 0 0 10px; }
+  #details .ship { border-top: 1px solid #14232f; padding: 8px 0; }
+  #details .ship b { color: #cfeee2; font-weight: normal; }
+  #details .k { color: #4e8f7d; }
+  #details .todo { color: #3d6b5e; margin-top: 14px; border-top: 1px solid #14232f; padding-top: 10px; }
+
+  /* One button, three homes: it sits at the screen edge when shut and rides just clear
+     of the panel when open, so it never ends up underneath what it opened. */
+  #detailsToggle {
+    position: fixed; right: var(--edge); bottom: var(--edge);
+    width: 46px; height: 46px; border-radius: 50%; padding: 0;
+    font-size: 17px; cursor: pointer; touch-action: manipulation;
+    transition: right .18s ease, bottom .18s ease;
+  }
+  body.details-open #detailsToggle { bottom: calc(50vh + var(--edge)); }
+
+  /* Turned sideways there is no vertical room to give away, so it takes the right half
+     instead. Same panel, same open state -- only which edge it slides from changes. */
+  @media (orientation: landscape) {
+    #details {
+      left: auto; top: 0; width: 50vw; height: auto;
+      border-width: 0 0 0 1px; transform: translateX(100%);
+    }
+    body.details-open #detailsToggle { bottom: var(--edge); right: calc(50vw + var(--edge)); }
+  }
+
+  /* Wide enough to give the panel a permanent home beside the game rather than over it. */
+  @media (min-width: 900px) {
+    #details {
+      left: auto; top: 0; height: auto; width: var(--panel);
+      border-width: 0 0 0 1px; transform: translateX(100%);
+    }
+    body.details-open #details { transform: none; }
+    #detailsToggle { top: var(--edge); bottom: auto; }
+    body.details-open #detailsToggle { top: var(--edge); bottom: auto; right: calc(var(--panel) + var(--edge)); }
+  }
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<button id="detailsToggle" type="button" aria-label="Details"></button>
+<aside id="details"><h2>SELECTION</h2><div id="detailsBody"></div></aside>
 <script src="/game.js" type="module"></script>
