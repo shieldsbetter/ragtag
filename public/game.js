@@ -153,7 +153,7 @@ ws.onmessage = e => {
   if (m.t === 'welcome') {
     myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf;
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
-    if (m.prioStops) prioStops = m.prioStops;
+    if (m.prioMax) prioMax = m.prioMax;
     if (m.wreck) wreckDepth = m.wreck;
     return;
   }
@@ -534,7 +534,7 @@ const PANELS = [
   { title: 'REPAIR PRIORITY', axis: ['wrecked', 'full'],
     rows: [['repair', 'Damaged guns']] },
 ];
-let prioStops = 5, wreckDepth = 150;
+let prioMax = 8, wreckDepth = 150;
 
 const statusOf = s =>
   `${s.hp.filter(h => h > 0).length}/${s.hp.length} guns  ${s.th ? 'burn' : 'coast'}`
@@ -599,63 +599,109 @@ function buildDetails(ships) {
   }
 }
 
-// One envelope: distance across, priority up. The stops are fixed in X and dragged in Y,
-// which is a one-finger gesture and needs no way to add or delete a point.
+// One envelope: the axis across, priority up. A sequence of points with straight lines
+// between them, dragged by hand. Two points sharing an x are a vertical segment -- an
+// instantaneous jump -- which is how one curve holds bands that do not overlap: every
+// wreck above every dented gun, each band rising inside itself.
+//
+//   press a point            drag it
+//   press anywhere else      a new point appears there and you are dragging it
+//   drag past the frame      it goes hollow, and letting go removes it
+//
+// Removal has to be *past* the frame rather than at its edge, because 0 and 100 are both
+// real values -- 0 is "never touch this" -- and reaching for one must not delete a point.
 const ENV_W = 240, ENV_H = 88, ENV_PAD = 9;
+const ENV_GRAB = 11, ENV_KILL = 20;                 // svg units, ~14 and ~25 screen px
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
 function envelope(shipId, kind, label, axis, initial) {
-  const n = prioStops;
-  const v = (initial && initial.length === n ? initial : [100, 80, 60, 40, 20]).slice();
-  const X = i => ENV_PAD + i * (ENV_W - 2 * ENV_PAD) / (n - 1);
-  const Y = p => ENV_PAD + (1 - p / 100) * (ENV_H - 2 * ENV_PAD);
+  const pts = (Array.isArray(initial) && initial.length >= 2 && Array.isArray(initial[0])
+    ? initial.map(p => [p[0], p[1]])
+    : [[0, 100], [1, 20]]);
+  const IW = ENV_W - 2 * ENV_PAD, IH = ENV_H - 2 * ENV_PAD;
+  const X = x => ENV_PAD + x * IW, Y = y => ENV_PAD + (1 - y / 100) * IH;
+  const xOf = px => Math.max(0, Math.min(1, (px - ENV_PAD) / IW));
+  const yOf = py => Math.max(0, Math.min(100, (1 - (py - ENV_PAD) / IH) * 100));
 
   const el = document.createElement('div');
   el.className = 'env';
   el.innerHTML = `<div class="envhead">${label}<b></b></div>`
     + `<svg viewBox="0 0 ${ENV_W} ${ENV_H}">`
-    +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" `
-    +     `width="${ENV_W - 2 * ENV_PAD}" height="${ENV_H - 2 * ENV_PAD}"/>`
-    +   `<polyline class="curve" points=""/>`
-    +   v.map((_, i) => `<circle class="stop" r="4.5" cx="${X(i)}" cy="0"/>`).join('')
+    +   `<rect class="frame" x="${ENV_PAD}" y="${ENV_PAD}" width="${IW}" height="${IH}"/>`
+    +   `<polyline class="curve" points=""/><g class="stops"></g>`
     + `</svg>`
     + `<div class="envaxis"><span>${axis[0]}</span><span>${axis[1]}</span></div>`;
 
   const svg = el.querySelector('svg');
   const curve = el.querySelector('.curve');
-  const stops = [...el.querySelectorAll('.stop')];
+  const stops = el.querySelector('.stops');
   const readout = el.querySelector('.envhead b');
+
+  let held = -1, doomed = -1, lastSend = 0;
   const paint = () => {
-    curve.setAttribute('points', v.map((p, i) => `${X(i)},${Y(p)}`).join(' '));
-    stops.forEach((c, i) => {
-      c.setAttribute('cy', Y(v[i]));
+    curve.setAttribute('points', pts.map(([x, y]) => `${X(x)},${Y(y)}`).join(' '));
+    stops.textContent = '';
+    pts.forEach(([x, y], i) => {
+      const c = document.createElementNS(SVG_NS, 'circle');
+      c.setAttribute('cx', X(x)); c.setAttribute('cy', Y(y)); c.setAttribute('r', 4.5);
       // Zero is not a low priority, it is a refusal, so it is worth being able to see.
-      c.classList.toggle('off', v[i] === 0);
+      c.setAttribute('class', 'stop' + (y === 0 ? ' off' : '') + (i === doomed ? ' doomed' : ''));
+      stops.append(c);
     });
-    readout.textContent = v.join('  ');
+    readout.textContent = pts.map(p => Math.round(p[1])).join(' ');
   };
   paint();
 
-  let held = -1, lastSend = 0;
   const send = () => {
     lastSend = performance.now();
-    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'prio', ship: shipId, kind, points: v }));
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'prio', ship: shipId, kind,
+      points: pts.map(([x, y]) => [+x.toFixed(3), Math.round(y)]) }));
   };
-  const apply = e => {
+  const local = e => {
     const r = svg.getBoundingClientRect(), sc = ENV_W / r.width;
-    const x = (e.clientX - r.left) * sc, y = (e.clientY - r.top) * sc;
-    // The stop is chosen once, on the press. After that the drag is vertical only, so a
-    // thumb sliding sideways cannot rewrite the neighbours on its way past.
-    if (held < 0) held = Math.max(0, Math.min(n - 1,
-      Math.round((x - ENV_PAD) / ((ENV_W - 2 * ENV_PAD) / (n - 1)))));
-    v[held] = Math.round(Math.max(0, Math.min(100,
-      (1 - (y - ENV_PAD) / (ENV_H - 2 * ENV_PAD)) * 100)));
-    paint();
-    if (performance.now() - lastSend > 120) send();   // the ship answers while you drag
+    return [(e.clientX - r.left) * sc, (e.clientY - r.top) * sc];
   };
+
   svg.addEventListener('pointerdown', e => {
-    e.preventDefault(); svg.setPointerCapture(e.pointerId); held = -1; apply(e);
+    e.preventDefault(); svg.setPointerCapture(e.pointerId);
+    const [px, py] = local(e);
+    let near = -1, best = ENV_GRAB;
+    pts.forEach(([x, y], i) => {
+      const d = Math.hypot(X(x) - px, Y(y) - py);
+      if (d < best) { best = d; near = i; }
+    });
+    if (near < 0) {
+      if (pts.length >= prioMax) return;            // full: nothing to add it to
+      const x = xOf(px);
+      let i = 1;
+      while (i < pts.length && pts[i][0] < x) i++;  // the ends stay the ends
+      pts.splice(i, 0, [x, yOf(py)]);
+      near = i;
+    }
+    held = near; doomed = -1; paint();
   });
-  svg.addEventListener('pointermove', e => { if (svg.hasPointerCapture(e.pointerId)) apply(e); });
-  svg.addEventListener('pointerup', () => { if (held >= 0) send(); held = -1; });
+
+  svg.addEventListener('pointermove', e => {
+    if (held < 0 || !svg.hasPointerCapture(e.pointerId)) return;
+    const [px, py] = local(e);
+    const end = held === 0 || held === pts.length - 1;
+    if (!end) {
+      // Clamped to its neighbours, which keeps the sequence ordered and lets a point be
+      // dragged onto its neighbour's x -- that coincidence is the jump.
+      pts[held][0] = Math.max(pts[held - 1][0], Math.min(pts[held + 1][0], xOf(px)));
+    }
+    pts[held][1] = yOf(py);
+    doomed = (!end && (py < ENV_PAD - ENV_KILL || py > ENV_H - ENV_PAD + ENV_KILL)) ? held : -1;
+    paint();
+    if (doomed < 0 && performance.now() - lastSend > 120) send();   // the ship answers as you drag
+  });
+
+  svg.addEventListener('pointerup', () => {
+    if (held < 0) return;
+    if (doomed === held) pts.splice(held, 1);
+    held = -1; doomed = -1;
+    paint(); send();
+  });
   return el;
 }
 

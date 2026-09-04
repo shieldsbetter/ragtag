@@ -91,27 +91,43 @@ const CARRIER = {
 // off" or "only in the middle band", it is editable with a thumb, and it is small enough
 // to ride in every snapshot. Zero means do not engage at all -- not "engage last" --
 // which is the hook the eventual fair-game flag hangs on.
-const PRIO_STOPS = 5;
+const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-editable
 // 'rock' and 'turret' say what to shoot; 'repair' says what to mend. Same five-stop
 // curve, same order on the wire, same editor -- only the axis underneath differs, which
 // is distance for the first two and health for the third.
 const PRIO_KINDS = ['rock', 'turret', 'repair'];
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
-const defaultPrio = () => ({
-  rock: [100, 80, 60, 40, 20], turret: [100, 80, 60, 40, 20],
-  repair: [100, 80, 60, 40, 20],       // worst first: wrecks before dented guns
-});
+// Two bands that do not overlap: every wreck outranks every dented gun, and inside each
+// band priority *rises* with health. Rising inside a band is what makes repair stay on
+// one gun until it is done -- working on it moves it right, which only strengthens its
+// claim. A falling band would abandon whatever it just touched.
+const defaultPrio = () => {
+  const w = WRECK_DEPTH / (TURRET_HP + WRECK_DEPTH);    // where the debt ends and damage begins
+  return {
+    rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
+    repair: [[0, 50], [w, 100], [w, 0], [1, 49]],
+  };
+};
 
 // Where a gun sits on the repair axis: 0 is a fresh wreck at the bottom of the debt,
 // 1 is a gun at full health. The debt is part of the axis, so a half-rebuilt wreck
 // really is further along than an untouched one.
 const repairFrac = hp => (hp + WRECK_DEPTH) / (TURRET_HP + WRECK_DEPTH);
 
+// An ordered sequence of points, straight lines between them, x never going backwards.
+// Two points sharing an x are a vertical segment -- an instantaneous jump, up or down --
+// which is what lets one curve hold bands that do not overlap. The arriving line wins the
+// sample exactly on the boundary; which way the jump goes is the order of the pair, not
+// which value is larger, so a step up is as expressible as a step down.
 function prioAt(pts, f) {
-  const x = Math.max(0, Math.min(1, f)) * (PRIO_STOPS - 1);
-  const i = Math.min(PRIO_STOPS - 2, Math.floor(x));
-  return pts[i] + (pts[i + 1] - pts[i]) * (x - i);
+  const x = Math.max(0, Math.min(1, f));
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+    if (x1 <= x0) continue;                       // a jump spans no distance
+    if (x <= x1) return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+  }
+  return pts[pts.length - 1][1];
 }
 
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
@@ -776,31 +792,27 @@ function resolveWalls(s) {
   }
 }
 
-// One point a second, into one gun at a time, and it stays there until that gun is whole
-// again. Re-picking the best target every tick would interleave: the moment a wreck is
-// worked on it climbs the axis, the untouched wreck beside it becomes the worst, and the
-// two would come up together at half speed each. A repair you commit to gives you a gun
-// back; two you hedge between give you neither. Setting that band to zero priority is
-// how you call it off.
+// One point a second, into whichever gun the curve rates highest. There is no rule here
+// making it stick: a band that rises with health is self-reinforcing, so the curve says
+// whether repair finishes what it starts. Draw a falling band and it will genuinely
+// interleave, because that is what "always work on the worst one" means. Zero priority
+// is how you call the crew off a gun entirely.
 function repairShip(s, dt) {
   const T = s.turrets;
-  const wants = i => T[i].hp < TURRET_HP && prioAt(s.prio.repair, repairFrac(T[i].hp)) > 0;
-  if (s.repairing !== null && !wants(s.repairing)) s.repairing = null;
-  if (s.repairing === null) {
-    let best = null, bestScore = 0;
-    for (let i = 0; i < T.length; i++) {
-      if (!wants(i)) continue;
-      const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
-      // Ties go to the gun nearest to being finished, so a shape with a flat top still
-      // completes one before starting the next.
-      if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
-        best = i; bestScore = score;
-      }
+  let best = null, bestScore = 0;
+  for (let i = 0; i < T.length; i++) {
+    if (T[i].hp >= TURRET_HP) continue;
+    const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
+    if (score <= 0) continue;
+    // Ties go to the gun nearest to being finished, so even a flat band completes one
+    // before starting the next.
+    if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
+      best = i; bestScore = score;
     }
-    s.repairing = best;
   }
-  if (s.repairing === null) return;
-  T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
+  s.repairing = best;
+  if (best === null) return;
+  T[best].hp = Math.min(TURRET_HP, T[best].hp + REPAIR_RATE * dt);
 }
 
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
@@ -989,7 +1001,7 @@ wss.on('connection', ws => {
 
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
       maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf,
-      prioStops: PRIO_STOPS, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
+      prioMax: PRIO_MAX, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 
   ws.on('message', raw => {
@@ -1023,9 +1035,16 @@ wss.on('connection', ws => {
         if (s.owner === p.id && m.ships.includes(s.id)) s.focus = target;
     }
     else if (m.t === 'prio' && PRIO_KINDS.includes(m.kind) && Array.isArray(m.points)
-             && m.points.length === PRIO_STOPS && m.points.every(Number.isFinite)) {
-      const pts = m.points.map(v => Math.max(0, Math.min(100, Math.round(v))));
-      for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.prio[m.kind] = pts;
+             && m.points.length >= 2 && m.points.length <= PRIO_MAX
+             && m.points.every(q => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite))) {
+      const pts = m.points.map(([x, y]) => [Math.max(0, Math.min(1, x)),
+                                            Math.max(0, Math.min(100, Math.round(y)))]);
+      // The ends anchor the axis and x never runs backwards. A curve that breaks either
+      // cannot be evaluated, so it is dropped rather than repaired into something the
+      // player did not draw.
+      let ok = pts[0][0] === 0 && pts[pts.length - 1][0] === 1;
+      for (let i = 1; ok && i < pts.length; i++) if (pts[i][0] < pts[i - 1][0]) ok = false;
+      if (ok) for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.prio[m.kind] = pts;
     }
     else if (m.t === 'view' && Number.isFinite(m.x) && Number.isFinite(m.y)) p.view = { x: m.x, y: m.y };
     else if (m.t === 'name' && typeof m.name === 'string') p.name = m.name.slice(0, 16);
