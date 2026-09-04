@@ -263,12 +263,19 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1) {
-    dragged = 0; pressedAt = performance.now(); longFired = false; cancelHold();
+    dragged = 0; pressedAt = performance.now(); longFired = false; pressedClear = false; cancelHold();
     const r = canvas.getBoundingClientRect();
     const w = toWorld(e.clientX - r.left, e.clientY - r.top);
     if (cmdShip) {                                  // grabbing the handle is not a pan or a click
       const i = iconPos(cmdShip);
       if (Math.hypot(w.x - i.x, w.y - i.y) < GRAB_R / cam.zoom) { rotating = true; dragHeading = cmdShip.hd; }
+    }
+    // The dismiss icon is a tap target, checked before anything else could claim the
+    // press -- including the hold, which would otherwise arm underneath it.
+    const clr = clearIconAt();
+    if (!rotating && clr && Math.hypot(w.x - clr.x, w.y - clr.y) < GRAB_R / cam.zoom) {
+      pressedClear = true;
+      return;
     }
     if (!rotating) {
       const s = shipAt(w);
@@ -342,7 +349,7 @@ let fleet = [];                 // every ship you own, this frame
 const LONG_PRESS_MS = 450, LONG_PRESS_SLOP = 10;
 let holding = null;             // { ship, x, y, start } while a press is maturing
 let hasSelected = false;        // one ship is picked on arrival; after that, empty is a choice
-let longTimer = null, longFired = false;
+let longTimer = null, longFired = false, pressedClear = false;
 // Haptics exist on Chrome/Android and nowhere else -- Firefox disabled vibration in 79
 // and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
 // gesture on its own. A ring flies out on add and collapses in on drop.
@@ -426,6 +433,25 @@ function orderMove(world) {
 // The heading control keeps a constant on-screen size, so its radius in world units
 // is whatever 64 screen pixels happens to be at the current zoom.
 const CONTROL_R = 64, GRAB_R = 18;
+// The selection as a whole gets a dotted ring, with a dismiss icon sitting on it. The
+// long press clears too, but a gesture nobody can see is a gesture nobody finds.
+const GROUP_PAD = 90, GROUP_MIN_R = 130, CLEAR_ANGLE = -Math.PI * 0.75;   // up and to the left
+
+function groupCircle() {
+  const picked = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean);
+  if (!picked.length) return null;
+  let cx = 0, cy = 0;
+  for (const s of picked) { cx += s.x; cy += s.y; }
+  cx /= picked.length; cy /= picked.length;
+  let far = 0;
+  for (const s of picked) far = Math.max(far, Math.hypot(s.x - cx, s.y - cy));
+  return { x: cx, y: cy, r: Math.max(far + GROUP_PAD, GROUP_MIN_R) };
+}
+
+function clearIconAt() {
+  const g = groupCircle();
+  return g && { x: g.x + Math.cos(CLEAR_ANGLE) * g.r, y: g.y + Math.sin(CLEAR_ANGLE) * g.r };
+}
 let rotating = false, dragHeading = null, lastFaceSend = 0;
 
 // The control surrounds the destination while one is outstanding: the heading applies
@@ -453,6 +479,11 @@ function release(e) {
   if (!wasSingle) return;
   cancelHold();
   if (BUZZ_TEST) haptic(200);
+  if (pressedClear) {
+    pressedClear = false;
+    if (dragged < 8) { const c = clearIconAt(); haptic(PULSE_DROP); if (c) clearSelection(c.x, c.y); }
+    return;
+  }
   if (rotating) { sendFace(dragHeading, true); rotating = false; dragHeading = null; return; }
   if (longFired) { longFired = false; return; }     // the hold already acted; the release is not a tap
   if (dragged < 5 && performance.now() - pressedAt < 400 && ws.readyState === 1) {
@@ -580,6 +611,34 @@ let badFrames = 0;
 
 // Corner brackets around the ship taking orders. The heading ring moves to the
 // destination once a move is ordered, so it cannot also say which ship is selected.
+// The selection's outline, and the icon that dismisses it.
+function drawGroup() {
+  const g = groupCircle();
+  if (!g) return;
+  const x = g.x - cam.x, y = g.y - cam.y, s = 1 / cam.zoom;
+  ctx.save();
+  const ring = new Path2D();
+  ring.arc(x, y, g.r, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(95,240,176,.30)';
+  ctx.lineWidth = 1.2 * s;
+  ctx.setLineDash([7 * s, 9 * s]);
+  ctx.stroke(ring);
+  ctx.setLineDash([]);
+
+  // A cross in a circle: dismiss, in the same weight as the rotate handle.
+  const ix = x + Math.cos(CLEAR_ANGLE) * g.r, iy = y + Math.sin(CLEAR_ANGLE) * g.r;
+  const r = 9 * s, arm = 4.5 * s;
+  const icon = new Path2D();
+  icon.arc(ix, iy, r, 0, Math.PI * 2);
+  icon.moveTo(ix - arm, iy - arm); icon.lineTo(ix + arm, iy + arm);
+  icon.moveTo(ix + arm, iy - arm); icon.lineTo(ix - arm, iy + arm);
+  ctx.strokeStyle = '#5ff0b0';
+  ctx.lineWidth = 1.7 * s;
+  ctx.lineCap = 'round';
+  ctx.stroke(icon);
+  ctx.restore();
+}
+
 // Feedback while a long press matures: an arc closing around the ship, so a hold that
 // has registered looks different from one the screen ignored.
 function drawHold(s, held) {
@@ -803,6 +862,7 @@ function draw() {
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
   }
 
+  drawGroup();
   for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
   if (holding) {
     const on = holding.ship !== null ? fleet.find(s => s.id === holding.ship) : holding;
