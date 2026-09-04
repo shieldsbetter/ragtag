@@ -338,13 +338,21 @@ function cancelHold() {
   holding = null;
 }
 
+// A short pulse confirms a gesture the screen cannot: during a long press your thumb is
+// covering the ship. Android only -- iOS Safari has no Vibration API, and desktop
+// browsers accept the call and do nothing, so no feature test beyond the optional call.
+const haptic = pattern => { try { navigator.vibrate?.(pattern); } catch {} };
+const PULSE_ADD = 18, PULSE_DROP = [9, 45, 9];   // one tick to add, two to remove
+
 function toggleInSelection(id) {
   if (selection.has(id) && selection.size > 1) {
     selection.delete(id);
     if (designated === id) designated = [...selection][0];
+    haptic(PULSE_DROP);
   } else {
     selection.add(id);
     designated = id;            // whatever you just added is what you are aiming
+    haptic(PULSE_ADD);
   }
 }
 

@@ -40,7 +40,9 @@ both must work. Walls will eventually be destructible, which is why overlapping 
 are merged into single polygons rather than left stacked.
 
 **One game on every screen.** Phone and desktop show the same thing. Platform-specific
-rendering tricks are a bug, not an optimisation.
+rendering tricks are a bug, not an optimisation. Input is mobile-first: the gesture
+budget is tap, drag, long-press and pinch, and drag is already the map. Anything
+needing a fifth gesture needs a rethink instead.
 
 **Open questions** — undecided, do not assume an answer:
 - Pathfinding. Ships currently collide with walls and stop; they do not route around
