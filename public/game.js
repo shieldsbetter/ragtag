@@ -272,14 +272,17 @@ canvas.addEventListener('pointerdown', e => {
     }
     if (!rotating) {
       const s = shipAt(w);
-      if (s) {
-        holding = { ship: s.id, start: performance.now() };
+      // A hold over open space is worth arming too -- that is how a selection is put
+      // down -- but only when there is something to clear.
+      if (s || selection.size) {
+        holding = { ship: s ? s.id : null, x: w.x, y: w.y, start: performance.now() };
         // Scheduled here, inside the gesture, so the engine honours it. Cancelled below
         // if the press becomes a drag or lifts early.
-        haptic(holdPulse(!(selection.has(s.id) && selection.size > 1)));
+        haptic(holdPulse(s ? !(selection.has(s.id) && selection.size > 1) : false));
         longTimer = setTimeout(() => {
           longFired = true; longTimer = null;
-          toggleInSelection(holding.ship);
+          if (holding.ship !== null) toggleInSelection(holding.ship);
+          else clearSelection(holding.x, holding.y);
           holding = null;
         }, LONG_PRESS_MS);
       }
@@ -327,6 +330,7 @@ canvas.addEventListener('pointermove', e => {
 //   tap a ship outside the selection : it becomes the selection
 //   tap a ship inside the selection  : it becomes designated, group unchanged
 //   long-press a ship (shift+click)  : add it, or drop it if already in
+//   long-press open space            : clear the selection
 //   tap open space                   : the whole selection moves, keeping formation
 const selection = new Set();
 let designated = null;          // id of the ship wearing the ring
@@ -336,7 +340,8 @@ let fleet = [];                 // every ship you own, this frame
 // Mobile has three gestures and drag is already the map, so adding to a selection is a
 // long press. Slop is generous: a thumb moves a little during a deliberate hold.
 const LONG_PRESS_MS = 450, LONG_PRESS_SLOP = 10;
-let holding = null;             // { ship, start } while a press is maturing
+let holding = null;             // { ship, x, y, start } while a press is maturing
+let hasSelected = false;        // one ship is picked on arrival; after that, empty is a choice
 let longTimer = null, longFired = false;
 // Haptics exist on Chrome/Android and nowhere else -- Firefox disabled vibration in 79
 // and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
@@ -369,6 +374,15 @@ const PULSE_ADD = 25, PULSE_DROP = 12;           // one long tick to add, two sh
 const holdPulse = adding => adding
   ? [0, LONG_PRESS_MS, PULSE_ADD]                             // pause, then one buzz
   : [0, LONG_PRESS_MS, PULSE_DROP, 60, PULSE_DROP];           // pause, then two
+
+// Nothing selected is a legitimate state, not an empty one to be filled: it is how you
+// put the fleet down without giving it an order by accident.
+function clearSelection(x, y) {
+  if (!selection.size) return;
+  selection.clear();
+  designated = null;
+  confirm = { x, y, start: performance.now(), adding: false };
+}
 
 function toggleInSelection(id) {
   const ship = fleet.find(s => s.id === id);
@@ -445,7 +459,8 @@ function release(e) {
     const r = canvas.getBoundingClientRect();
     const p = toWorld(e.clientX - r.left, e.clientY - r.top);
     const hit = shipAt(p);
-    if (hit && e.shiftKey) toggleInSelection(hit.id);          // desktop equivalent of the hold
+    if (e.shiftKey && hit) toggleInSelection(hit.id);          // desktop equivalent of the hold
+    else if (e.shiftKey) clearSelection(p.x, p.y);
     else if (hit && selection.has(hit.id)) designated = hit.id;   // re-aim within the group
     else if (hit) { selection.clear(); selection.add(hit.id); designated = hit.id; }
     else orderMove(p);
@@ -721,7 +736,9 @@ function draw() {
   fleet = state.ships.filter(s => s.owner === myId);
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
-  if (!selection.size && fleet.length) { selection.add(fleet[0].id); designated = fleet[0].id; }
+  if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
+    selection.add(fleet[0].id); designated = fleet[0].id; hasSelected = true;
+  }
   if (!selection.has(designated)) designated = [...selection][0] ?? null;
   cmdShip = fleet.find(s => s.id === designated) ?? null;
   if (!cam.placed && fleet.length) { cam.x = fleet[0].x; cam.y = fleet[0].y; cam.placed = true; }
@@ -787,7 +804,10 @@ function draw() {
   }
 
   for (const s of fleet) if (selection.has(s.id)) drawSelection(s, s.id === designated);
-  if (holding) drawHold(fleet.find(s => s.id === holding.ship), now - holding.start);
+  if (holding) {
+    const on = holding.ship !== null ? fleet.find(s => s.id === holding.ship) : holding;
+    drawHold(on, now - holding.start);
+  }
   if (confirm) drawConfirm(now);
   if (cmdShip) drawControl(cmdShip);
 
@@ -835,7 +855,7 @@ function draw() {
   screen.drawImage(back, 0, 0);
 
   hud.style.color = state.stale ? '#ffb347' : '';
-  hud.textContent = `TAP select  HOLD add  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
+  hud.textContent = `TAP select  HOLD add/clear  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
     + `  c${clientVersion}`
     + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')

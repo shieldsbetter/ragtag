@@ -41,7 +41,8 @@ are merged into single polygons rather than left stacked.
 
 **Mobile first.** The phone is the target; desktop is the phone with a mouse. The whole
 gesture budget is tap, drag, long-press and pinch — and drag is already the map, so it
-is really three. A feature needing a fifth gesture needs a different design, not a
+is really three. Having nothing selected is a legitimate state, not an empty one to fill:
+it is how a fleet is put down without ordering it somewhere by accident. A feature needing a fifth gesture needs a different design, not a
 modifier key. Feedback is sized in screen pixels, never world units, because a thumb is
 the same size at every zoom and covers roughly 45px of whatever is under it.
 
