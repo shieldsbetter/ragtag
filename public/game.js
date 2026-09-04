@@ -453,16 +453,30 @@ function focusTargets() {
   return [...ids].map(id => allShips.find(s => s.id === id)).filter(Boolean);
 }
 
+// The formation is taken from the first order given to a group and held until the group
+// changes. Ships under way are strung out along their courses, so re-deriving the shape
+// at every tap would bake in whatever disorder the fleet happened to be in mid-flight;
+// a redirected fleet would arrive in a different shape than the one it set out in.
+let formation = new Map(), formed = false, lastSelKey = '';
+
 // The selection moves as a body: its centre goes where you tapped and every ship keeps
-// its offset from that centre, so a line abreast stays a line abreast.
+// the offset it had when the group was first sent somewhere, so a line abreast stays a
+// line abreast however often the destination changes.
 function orderMove(world) {
   const picked = [...selection].map(id => fleet.find(s => s.id === id)).filter(Boolean);
   if (!picked.length) return;
-  let cx = 0, cy = 0;
-  for (const s of picked) { cx += s.x; cy += s.y; }
-  cx /= picked.length; cy /= picked.length;
-  for (const s of picked)
-    ws.send(JSON.stringify({ t: 'move', ship: s.id, x: world.x + (s.x - cx), y: world.y + (s.y - cy) }));
+  if (!formed) {
+    formed = true;
+    formation = new Map();
+    let cx = 0, cy = 0;
+    for (const s of picked) { cx += s.x; cy += s.y; }
+    cx /= picked.length; cy /= picked.length;
+    for (const s of picked) formation.set(s.id, { dx: s.x - cx, dy: s.y - cy });
+  }
+  for (const s of picked) {
+    const off = formation.get(s.id) ?? { dx: 0, dy: 0 };
+    ws.send(JSON.stringify({ t: 'move', ship: s.id, x: world.x + off.dx, y: world.y + off.dy }));
+  }
 }
 
 
@@ -1107,12 +1121,19 @@ function draw() {
   if (dev) window.__fleet = fleet;
   if (dev) window.__all = allShips;
   if (dev) window.__cam = cam;
+  if (dev) window.__sel = [...selection];
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
     selection.add(fleet[0].id); designated = fleet[0].id; hasSelected = true;
   }
   if (!selection.has(designated)) designated = [...selection][0] ?? null;
+  // Any change to the group drops the formation, so the next order takes a fresh one.
+  // Comparing against the last *used* group instead would make re-picking the same two
+  // ships keep their old shape, leaving no way to re-form short of adding a ship you
+  // did not want.
+  const selKey = [...selection].sort((a, b) => a - b).join(',');
+  if (selKey !== lastSelKey) { lastSelKey = selKey; formed = false; }
   cmdShip = fleet.find(s => s.id === designated) ?? null;
   if (!cam.placed && fleet.length) { cam.x = fleet[0].x; cam.y = fleet[0].y; cam.placed = true; }
 
