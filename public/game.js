@@ -99,17 +99,21 @@ const wallChunks = new Map();   // chunk key -> polygons, pushed by the server a
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
 // to fill a screen a fraction of its size.
-function withBox(pts) {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, sx = 0, sy = 0;
-  for (const [x, y] of pts) {
-    if (x < x0) x0 = x; if (x > x1) x1 = x;
-    if (y < y0) y0 = y; if (y > y1) y1 = y;
-    sx += x; sy += y;
+// A wall arrives as a list of rings: outline first, then any holes. Bounds cover all of
+// them, and both paths are built once -- walls never move.
+function withBox(rings) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const ring of rings)
+    for (const [x, y] of ring) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+  const path = new Path2D();
+  for (const ring of rings) {
+    ring.forEach(([x, y], i) => i ? path.lineTo(x, y) : path.moveTo(x, y));
+    path.closePath();
   }
-  // Centroid too: these blobs are generated radially, so every vertex is visible from
-  // it and a triangle fan about it tiles the polygon exactly (verified over the real
-  // generated terrain, 966 of 966).
-  return { pts, x0, y0, x1, y1, cx: sx / pts.length, cy: sy / pts.length };
+  return { rings, x0, y0, x1, y1, path };
 }
 
 // Losing the socket already costs you your ship, so the simplest recovery is to
@@ -469,43 +473,29 @@ function drawControl(s) {
 // close the hairline seams anti-aliasing leaves between adjacent triangles.
 const WALL_FILL = '#171f2b', WALL_EDGE = 'rgba(132,156,190,.85)';
 
-// Walls never move, so each polygon's two paths are built once, in world coordinates,
-// and the camera is applied as a transform instead of by shifting every point each frame.
-function wallPaths(w) {
-  if (!w.fill) {
-    const fill = new Path2D(), edge = new Path2D(), n = w.pts.length;
-    for (let i = 0; i < n; i++) {
-      const a = w.pts[i], b = w.pts[(i + 1) % n];
-      fill.moveTo(w.cx, w.cy); fill.lineTo(a[0], a[1]); fill.lineTo(b[0], b[1]); fill.closePath();
-      i ? edge.lineTo(a[0], a[1]) : edge.moveTo(a[0], a[1]);
-    }
-    edge.closePath();
-    w.fill = fill; w.edge = edge;
-  }
-  return w;
-}
-
 function drawWalls(vis) {
+  const visible = [];
+  for (const walls of wallChunks.values())
+    for (const w of walls) {
+      if (w.x1 < vis.x0 || w.x0 > vis.x1 || w.y1 < vis.y0 || w.y0 > vis.y1) continue;
+      visible.push(w);
+    }
+  if (!visible.length) return;
+
   ctx.save();
   ctx.translate(-cam.x, -cam.y);
   ctx.lineJoin = 'round';
-  for (const polys of wallChunks.values()) {
-    for (const w of polys) {
-      if (w.x1 < vis.x0 || w.x0 > vis.x1 || w.y1 < vis.y0 || w.y0 > vis.y1) continue;
-      wallPaths(w);
-      if (!OFF.has('wallfill')) {
-        // Fan of convex triangles: an anti-aliased concave fill has no GPU path in
-        // either engine. Stroked in its own colour too, to close the seams between them.
-        ctx.fillStyle = WALL_FILL; ctx.strokeStyle = WALL_FILL;
-        ctx.lineWidth = 1 / cam.zoom;
-        ctx.fill(w.fill);
-        ctx.stroke(w.fill);
-      }
-      ctx.strokeStyle = WALL_EDGE;
-      ctx.lineWidth = 1.4 / cam.zoom;
-      ctx.stroke(w.edge);
-    }
+
+  // Overlapping walls were merged server-side, so there are no seams to hide any more:
+  // one fill, one outline, each wall a single shape. evenodd is what makes the holes in
+  // a merged wall read as open space rather than being painted over.
+  if (!OFF.has('wallfill')) {
+    ctx.fillStyle = WALL_FILL;
+    for (const w of visible) ctx.fill(w.path, 'evenodd');
   }
+  ctx.strokeStyle = WALL_EDGE;
+  ctx.lineWidth = 1.4 / cam.zoom;
+  for (const w of visible) ctx.stroke(w.path);
   ctx.restore();
 }
 

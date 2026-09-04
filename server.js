@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
+import polygonClipping from 'polygon-clipping';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 8080;
@@ -81,6 +82,8 @@ const ENEMY_RANGE = 900;                                   // how far off an ene
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
+const WALL_FORMAT = 2;                // stored geometry is merged; older files regenerate
+const BLOB_MAX_R = 280;               // the generator's widest blob, used to bound merging
 const MAX_BLOBS = 6;                  // per chunk, at density 1
 const WALL_DENSITY = 0.5;             // deliberately mid-scale: neither extreme is the design target
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
@@ -120,25 +123,86 @@ function chunkRng(cx, cy) {
   return () => { v = (Math.imul(v, 1664525) + 1013904223) >>> 0; return v / 4294967296; };
 }
 
-// Irregular blobs. Their centres are inside the chunk but their edges may spill over
-// it, which is why anything asking about walls looks at a 3x3 block of chunks.
-function generateChunk(cx, cy) {
+// The seed layer: irregular blobs, a pure function of the chunk's coordinates. These are
+// never stored -- they are the input to merging, and merging is what gets kept.
+function rawBlobs(cx, cy) {
   const rnd = chunkRng(cx, cy);
   rnd(); rnd();                                       // shake off the seed
   const expected = WALL_DENSITY * MAX_BLOBS;
   let n = Math.floor(expected);
   if (rnd() < expected - n) n++;
-  const walls = [];
+  const out = [];
   for (let i = 0; i < n; i++) {
     const ox = cx * CHUNK + rnd() * CHUNK, oy = cy * CHUNK + rnd() * CHUNK;
     const base = 60 + rnd() * 160, sides = 6 + Math.floor(rnd() * 5);
-    const poly = [];
+    const ring = [];
+    let far = 0;
     for (let k = 0; k < sides; k++) {
       const a = (k / sides) * Math.PI * 2 + rnd() * 0.25;
       const r = base * (0.6 + rnd() * 0.65);
-      poly.push([+(ox + Math.cos(a) * r).toFixed(1), +(oy + Math.sin(a) * r).toFixed(1)]);
+      if (r > far) far = r;
+      ring.push([+(ox + Math.cos(a) * r).toFixed(1), +(oy + Math.sin(a) * r).toFixed(1)]);
     }
-    walls.push(poly);
+    out.push({ ring, x: ox, y: oy, r: far, cx, cy });
+  }
+  return out;
+}
+
+// Blobs that touch each other have to become one wall, or destroying part of one would
+// leave the other's edge hanging inside solid rock. Connectivity is by overlapping
+// bounding circles -- conservative, and a false positive merely unions two shapes that
+// turn out to be disjoint, which polygon-clipping returns unchanged.
+function componentsAround(cx, cy) {
+  for (let ring = 1; ; ring++) {
+    const blobs = [];
+    for (let x = cx - ring; x <= cx + ring; x++)
+      for (let y = cy - ring; y <= cy + ring; y++)
+        blobs.push(...rawBlobs(x, y));
+
+    const parent = blobs.map((_, i) => i);
+    const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+    for (let i = 0; i < blobs.length; i++)
+      for (let j = i + 1; j < blobs.length; j++) {
+        const a = blobs[i], b = blobs[j];
+        if (Math.hypot(a.x - b.x, a.y - b.y) <= a.r + b.r) parent[find(i)] = find(j);
+      }
+    const groups = new Map();
+    blobs.forEach((b, i) => {
+      const k = find(i);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(b);
+    });
+
+    // A component that reaches the edge of what we generated might continue past it, so
+    // widen and start again -- but only if it could plausibly own geometry near us.
+    const comps = [...groups.values()];
+    const near = c => c.some(b => Math.abs(b.cx - cx) <= 1 && Math.abs(b.cy - cy) <= 1);
+    const openEnded = comps.some(c => near(c) &&
+      c.some(b => Math.abs(b.cx - cx) === ring || Math.abs(b.cy - cy) === ring));
+    if (!openEnded || ring >= 4) return comps.filter(near);
+  }
+}
+
+// Walls for one chunk: merge each connected component, then keep the merged shapes whose
+// centroid falls in this chunk. Every chunk computes the same components from the same
+// blobs, so exactly one of them claims each shape however the world is explored.
+function generateChunk(cx, cy) {
+  const walls = [];
+  for (const comp of componentsAround(cx, cy)) {
+    let merged;
+    try {
+      merged = polygonClipping.union(...comp.map(b => [b.ring]));
+    } catch {
+      merged = comp.map(b => [b.ring]);               // degenerate input: leave it unmerged
+    }
+    for (const poly of merged) {
+      const outer = poly[0];
+      let sx = 0, sy = 0;
+      for (const [x, y] of outer) { sx += x; sy += y; }
+      const mx = sx / outer.length, my = sy / outer.length;
+      if (chunkOf(mx) !== cx || chunkOf(my) !== cy) continue;
+      walls.push(poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])));
+    }
   }
   return walls;
 }
@@ -150,12 +214,14 @@ function loadChunk(cx, cy) {
   const file = path.join(WORLD_DIR, `${cx}_${cy}.json`);
   let walls;
   try {
-    walls = JSON.parse(fs.readFileSync(file, 'utf8')).walls;
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (saved.v !== WALL_FORMAT) throw new Error('old format');
+    walls = saved.walls;
   } catch {
     walls = generateChunk(cx, cy);
     try {
       fs.mkdirSync(WORLD_DIR, { recursive: true });
-      fs.writeFileSync(file, JSON.stringify({ cx, cy, walls }));
+      fs.writeFileSync(file, JSON.stringify({ v: WALL_FORMAT, cx, cy, walls }));
     } catch { /* unwritable store: the world is still consistent, just not persisted */ }
   }
   const c = { cx, cy, key, walls };
@@ -199,30 +265,37 @@ function nearbyWalls(x, y, ensure = false) {
   for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
     for (let cy = cy0 - 1; cy <= cy0 + 1; cy++) {
       const c = ensure ? loadChunk(cx, cy) : chunks.get(chunkKey(cx, cy));
-      if (c) for (const poly of c.walls) out.push(poly);
+      if (c) for (const wall of c.walls) out.push(wall);
     }
   return out;
 }
 
-function pointInPoly(poly, x, y) {
+// A wall is a list of rings: the first is its outline, any others are holes punched
+// through it. Crossing-count over every ring at once gives the even-odd answer, which
+// puts a point inside a hole correctly outside the wall.
+function pointInWall(wall, x, y) {
   let inside = false;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const [xi, yi] = poly[i], [xj, yj] = poly[j];
-    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-  }
+  for (const ring of wall)
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
   return inside;
 }
 
-function closestOnPoly(poly, x, y) {
+// Nearest point on any edge of any ring: a hole's rim is a surface to be pushed off
+// exactly as the outline is.
+function closestOnWall(wall, x, y) {
   let px = 0, py = 0, best = Infinity;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-    const [ax, ay] = poly[j], [bx, by] = poly[i];
-    const ex = bx - ax, ey = by - ay;
-    const t = Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey || 1)));
-    const qx = ax + ex * t, qy = ay + ey * t;
-    const d = Math.hypot(x - qx, y - qy);
-    if (d < best) { best = d; px = qx; py = qy; }
-  }
+  for (const ring of wall)
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [ax, ay] = ring[j], [bx, by] = ring[i];
+      const ex = bx - ax, ey = by - ay;
+      const t = Math.max(0, Math.min(1, ((x - ax) * ex + (y - ay) * ey) / (ex * ex + ey * ey || 1)));
+      const qx = ax + ex * t, qy = ay + ey * t;
+      const d = Math.hypot(x - qx, y - qy);
+      if (d < best) { best = d; px = qx; py = qy; }
+    }
   return { x: px, y: py, d: best };
 }
 
@@ -237,20 +310,21 @@ function segsCross(ax, ay, bx, by, cx, cy, dx, dy) {
 
 // Does a straight line from A to B meet rock? Shared by shells in flight and by guns
 // deciding whether a shot is worth taking, so the two can never disagree.
-function segmentBlocked(ax, ay, bx, by, polys) {
-  for (const poly of polys) {
-    if (pointInPoly(poly, ax, ay) || pointInPoly(poly, bx, by)) return true;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++)
-      if (segsCross(ax, ay, bx, by, poly[j][0], poly[j][1], poly[i][0], poly[i][1])) return true;
+function segmentBlocked(ax, ay, bx, by, walls) {
+  for (const wall of walls) {
+    if (pointInWall(wall, ax, ay) || pointInWall(wall, bx, by)) return true;
+    for (const ring of wall)
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++)
+        if (segsCross(ax, ay, bx, by, ring[j][0], ring[j][1], ring[i][0], ring[i][1])) return true;
   }
   return false;
 }
 
 // Is a disc of radius r at (x,y) touching a wall? Used to keep spawns out of rock.
 function blockedAt(x, y, r) {
-  for (const poly of nearbyWalls(x, y, true)) {
-    if (pointInPoly(poly, x, y)) return true;
-    if (closestOnPoly(poly, x, y).d < r) return true;
+  for (const wall of nearbyWalls(x, y, true)) {
+    if (pointInWall(wall, x, y)) return true;
+    if (closestOnWall(wall, x, y).d < r) return true;
   }
   return false;
 }
@@ -496,14 +570,14 @@ function aimTurrets(s, targets, dt) {
 // which is what makes a ship slide along a face instead of sticking to it. Positional
 // correction, run after the move: cheap, and stable because walls never move.
 function resolveWalls(s) {
-  const polys = nearbyWalls(s.x, s.y);
-  if (!polys.length) return;
+  const walls = nearbyWalls(s.x, s.y);
+  if (!walls.length) return;
   const cos = Math.cos(s.a), sin = Math.sin(s.a);
   for (const [ox, oy, r] of s.hull.collide) {
     let px = s.x + ox * cos - oy * sin, py = s.y + ox * sin + oy * cos;
-    for (const poly of polys) {
-      const inside = pointInPoly(poly, px, py);
-      const near = closestOnPoly(poly, px, py);
+    for (const wall of walls) {
+      const inside = pointInWall(wall, px, py);
+      const near = closestOnWall(wall, px, py);
       if (!inside && near.d >= r) continue;
       let dx, dy, push;
       if (inside) { dx = near.x - px; dy = near.y - py; push = near.d + r; }
