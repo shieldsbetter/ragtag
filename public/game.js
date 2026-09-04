@@ -357,6 +357,11 @@ let confirm = null;             // { x, y, start, adding }
 // Screen pixels, not world units: these are feedback about a gesture, so they must clear
 // the thumb making it whatever the zoom happens to be.
 const CONFIRM_MS = 320, HOLD_R = 62, CONFIRM_R0 = 70, CONFIRM_GROW = 95;
+// Nothing is drawn for the first fraction of a press. A tap is over in about a tenth of
+// a second, and flashing a ring for every one of them turns ordinary tapping into
+// visual noise. Past this the arc sweeps from empty to full, finishing exactly as the
+// long press fires.
+const HOLD_DELAY = 150;
 
 function cancelHold() {
   if (longTimer) { clearTimeout(longTimer); longTimer = null; haptic(0); }   // 0 cancels
@@ -643,11 +648,13 @@ function drawGroup() {
 // has registered looks different from one the screen ignored.
 function drawHold(s, held) {
   if (!s) return;
+  const t = (held - HOLD_DELAY) / (LONG_PRESS_MS - HOLD_DELAY);
+  if (t <= 0) return;                               // still short enough to be a tap
   const p = new Path2D();
   p.arc(s.x - cam.x, s.y - cam.y, HOLD_R / cam.zoom, -Math.PI / 2,
-        -Math.PI / 2 + Math.PI * 2 * Math.min(1, held / LONG_PRESS_MS));
+        -Math.PI / 2 + Math.PI * 2 * Math.min(1, t));
   ctx.save();
-  ctx.strokeStyle = 'rgba(95,240,176,.7)';
+  ctx.strokeStyle = `rgba(95,240,176,${Math.min(1, t * 4) * 0.7})`;   // fades in, no pop
   ctx.lineWidth = 2.5 / cam.zoom;
   ctx.lineCap = 'round';
   ctx.stroke(p);
