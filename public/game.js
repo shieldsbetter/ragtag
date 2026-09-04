@@ -667,7 +667,18 @@ function envelope(shipId, kind, label, panel, initial) {
 
   let held = -1, doomed = -1, lastSend = 0;
   const paint = () => {
-    curve.setAttribute('points', pts.map(([x, y]) => `${X(x)},${Y(y)}`).join(' '));
+    // The warp kinks at the separator, so a segment that spans it is two straight lines
+    // on screen, not one: split it there at the value the real function has. Without
+    // this the drawing quietly disagrees with what the ship is actually doing.
+    const drawn = [];
+    pts.forEach(([x, y], i) => {
+      if (i > 0 && mark !== null) {
+        const [x0, y0] = pts[i - 1];
+        if (x0 < mark && x > mark) drawn.push([mark, y0 + (y - y0) * (mark - x0) / (x - x0)]);
+      }
+      drawn.push([x, y]);
+    });
+    curve.setAttribute('points', drawn.map(([x, y]) => `${X(x)},${Y(y)}`).join(' '));
     stops.textContent = '';
     pts.forEach(([x, y], i) => {
       const c = document.createElementNS(SVG_NS, 'circle');
