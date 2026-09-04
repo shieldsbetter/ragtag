@@ -561,7 +561,7 @@ function envelope(shipId, kind, initial) {
     +   `<polyline class="curve" points=""/>`
     +   v.map((_, i) => `<circle class="stop" r="4.5" cx="${X(i)}" cy="0"/>`).join('')
     + `</svg>`
-    + `<div class="envaxis"><span>touching</span><span>max range</span></div>`;
+    + `<div class="envaxis"><span>near</span><span>far</span></div>`;
 
   const svg = el.querySelector('svg');
   const curve = el.querySelector('.curve');
