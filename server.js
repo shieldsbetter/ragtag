@@ -145,6 +145,10 @@ const TURRET_HP = 100, TURRET_R = 9, BULLET_DAMAGE = 20;   // five hits to silen
 // second pool and no rebuild state to keep in step -- and the depth is one number.
 // At one point a second that is 2.5 minutes to stand a wreck up, 100s to top a gun off.
 const WRECK_DEPTH = 150, REPAIR_RATE = 1;
+// Once the crew starts on a gun it gives it a whole second -- one whole point -- before
+// looking again. A tick is a thirtieth of a point, so re-deciding every tick makes the
+// crew strobe between guns the moment two of them rate the same.
+const REPAIR_DWELL = 1;
 
 // Terrain. The plane is cut into fixed chunks; each chunk's walls are a pure function
 // of its coordinates, so the same patch of space is always the same walls. Chunks are
@@ -507,6 +511,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown), hp: TURRET_HP, wx: 0, wy: 0 })),
     prio: defaultPrio(),
     repairing: null,      // index of the one gun the repair point is going into
+    repairHold: 0,        // seconds left before the crew may look elsewhere
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
@@ -803,20 +808,27 @@ function resolveWalls(s) {
 // is how you call the crew off a gun entirely.
 function repairShip(s, dt) {
   const T = s.turrets;
-  let best = null, bestScore = 0;
-  for (let i = 0; i < T.length; i++) {
-    if (T[i].hp >= TURRET_HP) continue;
-    const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
-    if (score <= 0) continue;
-    // Ties go to the gun nearest to being finished, so even a flat band completes one
-    // before starting the next.
-    if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
-      best = i; bestScore = score;
+  const wants = i => i !== null && T[i].hp < TURRET_HP
+    && prioAt(s.prio.repair, repairFrac(T[i].hp)) > 0;
+  s.repairHold -= dt;
+  // Re-decide when the second is up, or the moment the gun in hand stops wanting the
+  // point at all -- finished, or the band it sits in taken to zero.
+  if (s.repairHold <= 0 || !wants(s.repairing)) {
+    let best = null, bestScore = 0;
+    for (let i = 0; i < T.length; i++) {
+      if (!wants(i)) continue;
+      const score = prioAt(s.prio.repair, repairFrac(T[i].hp));
+      // Ties go to the gun nearest to being finished, so even a flat band completes one
+      // before starting the next.
+      if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
+        best = i; bestScore = score;
+      }
     }
+    s.repairing = best;
+    s.repairHold = best === null ? 0 : REPAIR_DWELL;
   }
-  s.repairing = best;
-  if (best === null) return;
-  T[best].hp = Math.min(TURRET_HP, T[best].hp + REPAIR_RATE * dt);
+  if (s.repairing === null) return;
+  T[s.repairing].hp = Math.min(TURRET_HP, T[s.repairing].hp + REPAIR_RATE * dt);
 }
 
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
