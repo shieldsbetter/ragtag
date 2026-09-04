@@ -775,6 +775,11 @@ function targetsFor(team) {
 const FIGHT_R = 900;                  // how far off it will notice you
 const ORBIT_R = 200;                  // how close it tries to cut past
 const WANDER = 0.9, SIDE_MIN = 1.2, SIDE_MAX = 3.5;
+// How far ahead it looks, and a feeler either side of the nose to say which way is open.
+// The horizon has to beat the turn: flat out it needs about maxSpeed/turn = 100 units to
+// come round, so looking half a second (170) ahead left it committing too late to matter.
+// Nearly a second gives it room to have turned before it arrives.
+const FEEL_MIN = 110, FEEL_TIME = 0.9, FEEL_SPREAD = 0.6;
 
 function fighterCmd(s, dt) {
   let prey = null, best = FIGHT_R;
@@ -790,15 +795,40 @@ function fighterCmd(s, dt) {
   // A slow random walk on the aim, bounded, so it weaves instead of tracking cleanly.
   s.wander = clamp(s.wander + rand(-WANDER, WANDER) * dt, 0.5);
 
+  const polys = nearbyWalls(s.x, s.y);
+  const bearing = Math.atan2(prey.y - s.y, prey.x - s.x);
+  // With rock in between there is nothing to circle: come straight on and let the
+  // feelers below work out how to get round. Circling something you cannot see is how a
+  // fighter ends up grinding along the far side of a wall.
+  const sighted = !polys.length || !segmentBlocked(s.x, s.y, prey.x, prey.y, polys);
   // Tangent to a circle of ORBIT_R about the quarry: zero far out, a quarter turn at the
   // circle itself. Newton does the rest -- it overshoots, and coming back round is the
   // orbit.
-  const lead = Math.asin(Math.min(1, ORBIT_R / Math.max(best, ORBIT_R)));
-  const want = Math.atan2(prey.y - s.y, prey.x - s.x) + s.side * lead + s.wander;
+  const lead = sighted ? Math.asin(Math.min(1, ORBIT_R / Math.max(best, ORBIT_R))) : 0;
+  let want = bearing + s.side * lead + s.wander;
+  let hold = false;                                    // cut thrust rather than pile in
+
+  // Feelers. Nothing here plans a route: it looks a moment ahead along its own nose, and
+  // if that moment ends in rock it takes whichever way round is open. A fighter carries
+  // its speed into whatever it hits, so the useful question is not "where is the wall"
+  // but "will I still be flying in half a second".
+  if (polys.length) {
+    const reach = Math.max(FEEL_MIN, Math.hypot(s.vx, s.vy) * FEEL_TIME);
+    const clear = a => !segmentBlocked(s.x, s.y, s.x + Math.cos(a) * reach,
+                                       s.y + Math.sin(a) * reach, polys);
+    if (!clear(s.a)) {
+      const port = clear(s.a - FEEL_SPREAD), star = clear(s.a + FEEL_SPREAD);
+      // Keep breaking the way it was already breaking when both are open, so avoiding a
+      // wall does not undo the weave.
+      if (port || star) want = s.a + (star && (!port || s.side > 0) ? FEEL_SPREAD : -FEEL_SPREAD);
+      else { want = s.a + Math.PI; hold = true; }      // boxed in: come about, off the gas
+    }
+  }
+
   const err = angleDiff(want, s.a);
   // Burn whenever it is roughly pointed where it wants to go; a fighter is never coasting
   // for long, which is what keeps it hard to lead.
-  return { turn: clamp(err, s.hull.turn * dt), thrust: Math.abs(err) < 0.9 ? 1 : 0 };
+  return { turn: clamp(err, s.hull.turn * dt), thrust: !hold && Math.abs(err) < 0.9 ? 1 : 0 };
 }
 
 // With no move order the ship holds station and simply comes round to its heading.
