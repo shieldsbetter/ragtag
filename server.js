@@ -226,7 +226,7 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 3;                // walls come from a biome now; older files regenerate
+const WALL_FORMAT = 4;                // chunks store units now; walls are derived from them
 const BLOB_MAX_R = 280;               // the generator's widest blob, used to bound merging
 const MAX_BLOBS = 6;                  // per chunk, at density 1
 const WALL_DENSITY = 0.5;             // the fallback when no biome has an opinion
@@ -563,7 +563,17 @@ function chunkRng(cx, cy) {
 
 // The seed layer: irregular blobs, a pure function of the chunk's coordinates. These are
 // never stored -- they are the input to merging, and merging is what gets kept.
-function rawBlobs(cx, cy) {
+// ---- units ----
+//
+// A unit is one lump of matter as generated: a small polygon and what it is made of.
+// Units are the stored truth. What everything else deals in -- the walls the client
+// draws, the walls a hull collides against -- is merged out of them, and is a cache.
+//
+// The split is for what comes next. A vein of ore is units of another material sitting
+// among the rock. Laying material down is adding units. Destruction is a boolean against
+// the units it touches. None of that needs to know what a wall is, because a wall is only
+// ever the answer to "what does this look like from outside".
+function rawUnits(cx, cy) {
   const rnd = chunkRng(cx, cy);
   rnd(); rnd();                                       // shake off the seed
   // A chunk can straddle several cells, so the biome is asked for per blob rather than
@@ -586,9 +596,17 @@ function rawBlobs(cx, cy) {
       if (r > far) far = r;
       ring.push([+(ox + Math.cos(a) * r).toFixed(1), +(oy + Math.sin(a) * r).toFixed(1)]);
     }
-    out.push({ ring, x: ox, y: oy, r: far, cx, cy });
+    out.push({ ring, x: ox, y: oy, r: far, cx, cy, mat: 'rock' });
   }
   return out;
+}
+
+// The units of a chunk. A resident chunk's are its stored ones, which is what makes them
+// the truth once anything has changed them; anywhere else they are generated fresh, the
+// way they always were, so asking a neighbour costs no file read and creates no chunk.
+function chunkUnits(cx, cy) {
+  const had = chunks.get(chunkKey(cx, cy));
+  return had ? had.units : rawUnits(cx, cy);
 }
 
 // Blobs that touch each other have to become one wall, or destroying part of one would
@@ -600,13 +618,16 @@ function componentsAround(cx, cy) {
     const blobs = [];
     for (let x = cx - ring; x <= cx + ring; x++)
       for (let y = cy - ring; y <= cy + ring; y++)
-        blobs.push(...rawBlobs(x, y));
+        blobs.push(...chunkUnits(x, y));
 
     const parent = blobs.map((_, i) => i);
     const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
     for (let i = 0; i < blobs.length; i++)
       for (let j = i + 1; j < blobs.length; j++) {
         const a = blobs[i], b = blobs[j];
+        // Units of different stuff never merge into one shape: a vein is not the rock
+        // around it, however tightly it sits in it.
+        if (a.mat !== b.mat) continue;
         if (Math.hypot(a.x - b.x, a.y - b.y) <= a.r + b.r) parent[find(i)] = find(j);
       }
     const groups = new Map();
@@ -626,10 +647,28 @@ function componentsAround(cx, cy) {
   }
 }
 
-// Walls for one chunk: merge each connected component, then keep the merged shapes whose
-// centroid falls in this chunk. Every chunk computes the same components from the same
-// blobs, so exactly one of them claims each shape however the world is explored.
-function generateChunk(cx, cy) {
+// Vertices that carry no shape are worth nothing and cost forever: a boolean leaves
+// duplicates and near-collinear runs behind, and a unit cut into a hundred times would
+// otherwise get steadily more expensive with nothing to show for it.
+const SIMPLIFY = 0.05;                // how far off the line a corner may sit and still go
+function simplify(ring) {
+  if (ring.length < 4) return ring;
+  const out = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[(i - 1 + ring.length) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < SIMPLIFY) continue;      // a duplicate corner
+    const dx = c[0] - a[0], dy = c[1] - a[1], L = Math.hypot(dx, dy);
+    if (L > 0 && Math.abs(dx * (a[1] - b[1]) - dy * (a[0] - b[0])) / L < SIMPLIFY) continue;
+    out.push(b);
+  }
+  return out.length >= 3 ? out : ring;
+}
+
+// Walls for one chunk: merge each connected component of units, then keep the merged
+// shapes whose centroid falls in this chunk. Every chunk computes the same components
+// from the same units, so exactly one of them claims each shape however the world is
+// explored.
+function deriveWalls(cx, cy) {
   const walls = setPieceWalls(cx, cy);
   for (const comp of componentsAround(cx, cy)) {
     let merged;
@@ -644,7 +683,7 @@ function generateChunk(cx, cy) {
       for (const [x, y] of outer) { sx += x; sy += y; }
       const mx = sx / outer.length, my = sy / outer.length;
       if (chunkOf(mx) !== cx || chunkOf(my) !== cy) continue;
-      walls.push(poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])));
+      walls.push(poly.map(r => simplify(r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]))));
     }
   }
   return walls;
@@ -655,20 +694,24 @@ function loadChunk(cx, cy) {
   const had = chunks.get(key);
   if (had) return had;
   const file = path.join(WORLD_DIR, `${cx}_${cy}.json`);
-  let walls;
+  let units = null, walls = null;
   try {
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (saved.v !== WALL_FORMAT) throw new Error('old format');
-    walls = saved.walls;
-  } catch {
-    walls = generateChunk(cx, cy);
+    units = saved.units; walls = saved.walls;
+  } catch { /* new ground, or a format we no longer read */ }
+  const c = { cx, cy, key, units: units || rawUnits(cx, cy), walls: [] };
+  // In the map before deriving, because deriving asks the neighbours for their units and
+  // a neighbour asking back must find this chunk's stored ones rather than making a
+  // second set that nothing has happened to.
+  chunks.set(key, c);
+  c.walls = walls || deriveWalls(cx, cy);
+  if (!units || !walls) {
     try {
       fs.mkdirSync(WORLD_DIR, { recursive: true });
-      fs.writeFileSync(file, JSON.stringify({ v: WALL_FORMAT, cx, cy, walls }));
+      fs.writeFileSync(file, JSON.stringify({ v: WALL_FORMAT, cx, cy, units: c.units, walls: c.walls }));
     } catch { /* unwritable store: the world is still consistent, just not persisted */ }
   }
-  const c = { cx, cy, key, walls };
-  chunks.set(key, c);
   // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which
   // would land back in here. The queue is drained once loading has settled.
   if (Math.random() < NEST_CHANCE) pendingNests.push([cx, cy]);
