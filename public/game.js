@@ -797,12 +797,13 @@ const REFIT_DROP = 30;
 
 // Where a module let go at p would land: the nearest install point that is free and would
 // not overlap anything, or null for "off the hull, into the hold".
-function refitDropAt(fit, where, held, p) {
+function refitDropAt(fit, where, held, p, type = null) {
   let best = null, bd = Infinity;
   const rest = fit.filter(f => f !== held);
+  const what = type || held.type;
   for (const id in where) {
     if (rest.some(f => f.install === id)) continue;
-    if (refitClash(rest, where, id, held.type)) continue;
+    if (refitClash(rest, where, id, what)) continue;
     const d = Math.hypot(where[id][0] - p.x, where[id][1] - p.y);
     if (d < bd) { bd = d; best = id; }
   }
@@ -854,7 +855,11 @@ function drawRefit() {
   // the point it would land on is lit up. Without that a drag is invisible and letting go
   // is a guess.
   const lift = refitDrag && !refitDrag.ring && refitDrag.moved && refitDrag.at ? refitDrag : null;
-  const carried = lift ? refitting.fit.find(f => f.install === lift.install) : null;
+  // Either a module lifted off a point, or one being carried out of the hold, which has no
+  // point to have come from.
+  const carried = !lift ? null
+    : lift.type !== undefined ? { install: null, type: lift.type, rot: 0 }
+    : refitting.fit.find(f => f.install === lift.install);
   const onto = carried ? refitDropAt(refitting.fit, where, carried, lift.at) : null;
 
   for (const p of (hulls[s.h] || {}).installs || []) {
@@ -909,39 +914,42 @@ function drawRefit() {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'mod' + (refitting.pick === t ? ' on' : '');
+    b.dataset.type = t;
     b.innerHTML = `${modName(t)} <span class="n">×${stock[t]}</span>`;
-    b.addEventListener('click', () => {
-      refitting.pick = refitting.pick === t ? null : t;
-      refitting.sel = null;
-      drawRefit();
-    });
     refitPalette.append(b);
   }
 }
 
-// One pointer, three outcomes, decided by what it went down on and where it came up:
-// the ring rotates, a module dragged to another point moves and dragged off the hull
-// stows, and a module merely tapped is selected.
+// One pointer, four outcomes, told apart by what it went down on and where it came up: the
+// ring rotates, a module dragged from a point moves or stows, a module dragged out of the
+// hold installs, and anything merely tapped selects or is picked up.
+//
+// The listeners are on the sheet rather than on the board or the palette buttons, because
+// every redraw replaces both -- an element holding a pointer capture is gone by the second
+// frame of a drag, and a drag from the hold to the hull crosses from one to the other.
 let refitDrag = null;
-refitBoard.addEventListener('pointerdown', e => {
+
+refitEl.addEventListener('pointerdown', e => {
   if (!refitting) return;
-  const svg = refitBoard.querySelector('svg');
-  if (!svg) return;
+  const mod = e.target.closest('.palette .mod');
+  if (mod) {
+    refitDrag = { type: mod.dataset.type, at: null, moved: false };
+    refitEl.setPointerCapture(e.pointerId);
+    return;
+  }
+  if (!e.target.closest('.board')) return;      // the header's buttons are not a drag
   const target = e.target.closest('[data-install],[data-ring]');
   if (!target) { refitting.sel = null; refitting.pick = null; drawRefit(); return; }
   const ring = target.getAttribute('data-ring');
   const install = ring || target.closest('[data-install]').getAttribute('data-install');
-  refitDrag = { install, ring: !!ring, moved: false };
-  svg.setPointerCapture(e.pointerId);
+  refitDrag = { install, ring: !!ring, moved: false, at: null };
+  refitEl.setPointerCapture(e.pointerId);
 });
-refitBoard.addEventListener('pointermove', e => {
+
+refitEl.addEventListener('pointermove', e => {
   if (!refitDrag || !refitting) return;
   refitDrag.moved = true;
-  if (!refitDrag.ring) {
-    refitDrag.at = svgPoint(e);
-    drawRefit();
-    return;
-  }
+  if (!refitDrag.ring) { refitDrag.at = svgPoint(e); drawRefit(); return; }
   const s = (fleet || []).find(q => q.id === refitting.ship);
   const where = installsOf(s.h)[refitDrag.install];
   const p = svgPoint(e);
@@ -950,19 +958,37 @@ refitBoard.addEventListener('pointermove', e => {
   held.rot = snapRot(Math.atan2(p.y - where[1], p.x - where[0]));
   drawRefit();
 });
-refitBoard.addEventListener('pointerup', e => {
+
+refitEl.addEventListener('pointerup', e => {
   if (!refitDrag || !refitting) return;
   const drag = refitDrag;
   refitDrag = null;
   const s = (fleet || []).find(q => q.id === refitting.ship);
   if (!s) return;
   const where = installsOf(s.h);
-  const held = refitting.fit.find(f => f.install === drag.install);
 
+  // Out of the hold. Dragged onto the hull it installs; dragged nowhere in particular it
+  // simply stays in the hold, which is where it already was.
+  if (drag.type !== undefined) {
+    if (drag.moved) {
+      const onto = drag.at && refitDropAt(refitting.fit, where, null, drag.at, drag.type);
+      if (onto) { refitting.fit.push({ install: onto, type: drag.type, rot: 0 }); refitting.pick = null; }
+    } else {
+      // Tapped rather than dragged: choose it, and the next tap on a free point puts it
+      // there. Handled here rather than by a click listener, because capturing the pointer
+      // on the sheet retargets the click away from the button it started on.
+      refitting.pick = refitting.pick === drag.type ? null : drag.type;
+      refitting.sel = null;
+    }
+    drawRefit();
+    return;
+  }
+
+  const held = refitting.fit.find(f => f.install === drag.install);
   if (drag.ring) { drawRefit(); return; }
   if (!drag.moved) {
-    // A tap. On an empty point it installs whatever the palette has chosen; on a module
-    // it selects it, which is what makes the rotate ring appear.
+    // A tap. On an empty point it installs whatever the palette has chosen; on a module it
+    // selects it, which is what makes the rotate ring appear.
     if (!held && refitting.pick) {
       if (!refitClash(refitting.fit, where, drag.install, refitting.pick))
         refitting.fit.push({ install: drag.install, type: refitting.pick, rot: 0 });
