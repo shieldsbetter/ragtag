@@ -709,7 +709,7 @@ function buildDetails(ships) {
         for (const [type, n] of carried) {
           const row = document.createElement('div');
           row.className = 'hold mod';
-          row.innerHTML = `<span class="k">${modTitle(type)}</span><b>${n}</b>`;
+          row.innerHTML = `${moduleSvg(type)}<span class="k">${modTitle(type)}</span><b>${n}</b>`;
           body.append(row);
         }
         if (!carried.length) {
@@ -1188,9 +1188,10 @@ function gunGrid(s) {
   gunEls = [];
   gunShip = s.id;
   for (const { i, label } of list) {
+    const type = (s.ft[i] || [])[1];
     const cell = document.createElement('div');
     cell.className = 'gun';
-    cell.innerHTML = `<div class="gl">${label}${WRENCH}</div>`
+    cell.innerHTML = `<div class="gl">${moduleSvg(type, 12)}${label}${WRENCH}</div>`
       + `<div class="bar"><i></i><em>WRECK</em></div>`;
     // Naming a gun is a toggle on the bar itself: the thing you are pointing at is the
     // thing you are talking about, so it needs no separate control.
@@ -1601,8 +1602,51 @@ const HULL_ART = {
            deathMs: 10000, deathSpin: 0.25, oreSparks: true, debrisRgb: '230,237,246' },
 };
 const MARKER = [[0, -9], [9, 0], [0, 9], [-9, 0]];
-// A dropped module, drawn as the crate it arrives in.
-const CRATE = [[-7, -7], [7, -7], [7, 7], [-7, 7]];
+
+// ---- module marks ----
+//
+// One mark per module, as SVG path data on a 24-unit grid, drawn into the panels as an
+// <svg> and onto the board through Path2D -- which takes the same strings. So the mark
+// beside the name in the cargo list is the mark on the crate out in space, and learning
+// one teaches the other.
+//
+// A mark is a silhouette and nothing else: it takes the colour of whatever it is sitting
+// in, and never carries meaning in its colour. Two modules that looked alike but for their
+// colour would be indistinguishable to a colour-blind player and on a bleached phone
+// screen, and a shape that has to be coloured to be read is not a shape that works.
+const MODULE_ART = {
+  gun: [                                            // a crosshair: the thing that aims
+    'M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0',
+    'M8 12a4 4 0 1 0 8 0a4 4 0 1 0-8 0',
+    'M22 12h-3M5 12H2M12 5V2M12 22v-3',
+  ],
+  tractor: [                                        // an emitter: waves closing on a point
+    'M10 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0',
+    'M16 8a6 6 0 0 1 0 8', 'M8 16a6 6 0 0 1 0-8',
+    'M19.5 4.5a11 11 0 0 1 0 15', 'M4.5 19.5a11 11 0 0 1 0-15',
+  ],
+};
+const moduleArt = t => MODULE_ART[t] || ['M4 4h16v16H4z'];
+// Salvage is salvage: one colour for the tile, whatever is in the crate.
+const SALVAGE = '#9fd4ff';
+
+// For a panel. `em` sizing so it sits on the text baseline beside the word it labels.
+function moduleSvg(type, px = 13) {
+  return `<svg class="mi" viewBox="0 0 24 24" width="${px}" height="${px}" fill="none"`
+    + ` stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">`
+    + moduleArt(type).map(d => `<path d="${d}"/>`).join('') + '</svg>';
+}
+
+// For the board. Built once per module type and reused every frame.
+const modulePaths = new Map();
+function modulePath(type) {
+  if (!modulePaths.has(type)) {
+    const p = new Path2D();
+    for (const d of moduleArt(type)) p.addPath(new Path2D(d));
+    modulePaths.set(type, p);
+  }
+  return modulePaths.get(type);
+}
 // Ore is drawn small and warm so it does not read as a rock you should be shooting.
 const ORE = [[0, -5], [4, -2], [3, 4], [-3, 4], [-4, -2]];
 const ORE_COLOR = '#d8a851';
@@ -2066,23 +2110,22 @@ function draw() {
   for (const o of state.ore || []) {
     if (!onScreen(o.x, o.y, 20)) continue;
     if (!o.m) { poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2); continue; }
-    // Salvage: a crate with the module's own mark on it, so what has been dropped is
-    // legible before you have gone to fetch it. Same marks the hull and the refit sheet
-    // use -- a barrel is a thing that shoots, an eye is a thing that pulls.
+    // Salvage, drawn as a marker rather than as an object: a coloured tile with the
+    // module's mark cut out of it in black. It does not turn with the grain it is attached
+    // to -- a label that tumbles is a label you have to read twice.
     const x = o.x - cam.x, y = o.y - cam.y;
-    poly(CRATE, x, y, o.a, '#9fd4ff', true, 1.2);
-    if (aims(o.m)) poly(TURRET, x, y, o.a, '#cfe6ff', true, 1);
-    else {
-      ctx.save();
-      ctx.lineWidth = 1 / cam.zoom;
-      ctx.strokeStyle = '#cfe6ff';
-      const collar = new Path2D(); collar.arc(x, y, 3.4, 0, Math.PI * 2);
-      ctx.stroke(collar);
-      ctx.fillStyle = 'rgba(106,184,255,.9)';
-      const eye = new Path2D(); eye.arc(x, y, 1.8, 0, Math.PI * 2);
-      ctx.fill(eye);
-      ctx.restore();
-    }
+    const R = 8;
+    ctx.save();
+    ctx.fillStyle = SALVAGE;
+    ctx.fillRect(x - R, y - R, R * 2, R * 2);
+    ctx.translate(x, y);
+    ctx.scale(R * 2 / 24 * 0.82, R * 2 / 24 * 0.82);
+    ctx.translate(-12, -12);
+    ctx.strokeStyle = '#06090d';
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = 'round';
+    ctx.stroke(modulePath(o.m));
+    ctx.restore();
   }
   // A tractor with nothing to show for itself looks like a bug, so the beam is drawn --
   // for anyone's ship, since it is a thing happening in the world. A wedge spreading from
