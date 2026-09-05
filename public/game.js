@@ -170,6 +170,7 @@ ws.onmessage = e => {
   if (m.t === 'welcome') {
     myId = m.id; dev = m.dev; hulls = m.hulls || {};
     modules = m.modules || {}; refitRates = m.refit || refitRates;
+    market = m.market || market;
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
     if (m.prioMax) prioMax = m.prioMax;
     if (m.wreck) wreckDepth = m.wreck;
@@ -202,6 +203,12 @@ ws.onmessage = e => {
   // The server says this ship has arrived somewhere it can be worked on.
   if (m.t === 'interact') {
     if (m.kind === 'refit') openRefit(m.ship);
+    if (m.kind === 'market') openMarket(m.ship);
+    return;
+  }
+  if (m.t === 'trade') {
+    if (m.ok) closeMarket();
+    else if (trading) marketWhy.textContent = m.why;
     return;
   }
   if (m.t === 'refit') {
@@ -766,6 +773,109 @@ function buildDetails(ships) {
     detailsBody.append(row);
   }
 }
+
+// ---- the market ----
+//
+// A basket, not a till: nothing changes hands until CONFIRM, and then all of it does. The
+// running figure is a preview of what the server will work out for itself, which is the
+// same bargain the refit sheet makes.
+const marketEl = document.getElementById('market');
+const marketCost = marketEl.querySelector('.cost b');
+const marketHave = marketEl.querySelector('.cost i');
+const marketShort = marketEl.querySelector('.cost .short');
+const marketOk = marketEl.querySelector('.confirm');
+const marketWhy = marketEl.querySelector('.why');
+let market = { stock: [], resale: 0.45 };
+let trading = null;   // { ship, buy, sell }
+
+function openMarket(id) {
+  const s = (fleet || []).find(q => q.id === id);
+  if (!s) return;
+  trading = { ship: id, buy: {}, sell: {} };
+  marketEl.hidden = false;
+  drawMarket();
+}
+
+function closeMarket() {
+  trading = null;
+  marketEl.hidden = true;
+  if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'interact-done' }));
+}
+
+const buyPrice = t => (modules[t] || {}).price || 0;
+const sellPrice = t => Math.round(buyPrice(t) * market.resale);
+
+function marketNet() {
+  let net = 0;
+  for (const [t, n] of Object.entries(trading.buy)) net += buyPrice(t) * n;
+  for (const [t, n] of Object.entries(trading.sell)) net -= sellPrice(t) * n;
+  return net;
+}
+
+function marketRow(type, price, count, max, onStep) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `${moduleSvg(type, 16)}<span class="nm">${modTitle(type)}</span>`
+    + `<span class="pr">${price}</span>`;
+  const less = document.createElement('button');
+  less.type = 'button'; less.textContent = '\u2212'; less.disabled = count <= 0;
+  const n = document.createElement('span');
+  n.className = 'n'; n.textContent = count;
+  const more = document.createElement('button');
+  more.type = 'button'; more.textContent = '+'; more.disabled = count >= max;
+  less.addEventListener('click', () => onStep(-1));
+  more.addEventListener('click', () => onStep(1));
+  row.append(less, n, more);
+  return row;
+}
+
+function drawMarket() {
+  if (!trading) return;
+  const s = (fleet || []).find(q => q.id === trading.ship);
+  if (!s) return closeMarket();
+  const net = marketNet();
+  const have = s.or || 0;
+  const short = net > have;
+  marketCost.textContent = net < 0 ? `+${-net}` : net;
+  marketHave.textContent = have;
+  marketShort.hidden = !short;
+  marketCost.parentElement.classList.toggle('over', short);
+  marketCost.parentElement.classList.toggle('paid', net < 0);
+  marketOk.disabled = short || (!Object.keys(trading.buy).length && !Object.keys(trading.sell).length);
+  marketWhy.textContent = '';
+
+  const step = (bag, t, d, max) => {
+    bag[t] = Math.max(0, Math.min(max, (bag[t] || 0) + d));
+    if (!bag[t]) delete bag[t];
+    drawMarket();
+  };
+  const buyRows = marketEl.querySelector('.buy .rows');
+  buyRows.textContent = '';
+  for (const t of market.stock)
+    buyRows.append(marketRow(t, buyPrice(t), trading.buy[t] || 0, 99,
+                             d => step(trading.buy, t, d, 99)));
+
+  const sellRows = marketEl.querySelector('.sell .rows');
+  sellRows.textContent = '';
+  // Only what is aboard now. Something bought in this same basket is not yours to sell
+  // back in it, which is also the rule the server checks.
+  const carried = Object.entries(s.hold || {}).filter(([, n]) => n > 0);
+  for (const [t, n] of carried)
+    sellRows.append(marketRow(t, sellPrice(t), trading.sell[t] || 0, n,
+                              d => step(trading.sell, t, d, n)));
+  if (!carried.length) {
+    const e = document.createElement('div');
+    e.className = 'none';
+    e.textContent = 'nothing aboard to sell';
+    sellRows.append(e);
+  }
+}
+
+marketEl.querySelector('.cancel').addEventListener('click', closeMarket);
+marketOk.addEventListener('click', () => {
+  if (!trading) return;
+  ws.send(JSON.stringify({ t: 'trade', ship: trading.ship, buy: trading.buy, sell: trading.sell }));
+});
 
 // ---- refit ----
 //

@@ -98,6 +98,39 @@
   #refit .mod .pending { color: #5ff0b0; }
   #refit .mod .n { color: #8ba0bb; }
   #refit .empty { color: #55677d; align-self: center; }
+  /* The market wears the refit sheet's clothes: same overlay, same header, same buttons. */
+  #market { position: fixed; inset: 0; background: #060a10; z-index: 40;
+            display: flex; align-items: stretch; justify-content: center; }
+  #market[hidden] { display: none; }
+  #market .sheet { display: flex; flex-direction: column; width: 100%; max-width: 900px;
+                   padding: 10px 12px 14px; gap: 10px; }
+  #market header { display: flex; align-items: center; gap: 10px; }
+  #market .cost { margin-left: auto; color: #8ba0bb; }
+  #market .cost b { color: #d8a851; font-weight: normal; font-size: 18px; }
+  #market .cost i { color: #8ba0bb; font-style: normal; font-size: 18px; }
+  #market .cost.over b { color: #ff6b8a; }
+  #market .cost.paid b { color: #5ff0b0; }
+  #market .cost .short { color: #ff6b8a; margin-right: 6px; }
+  #market button { background: #101a26; color: #cfe6ff; border: 1px solid #24384f;
+                   padding: 8px 14px; font: inherit; letter-spacing: .08em; }
+  #market button.confirm { border-color: #2f6f57; color: #5ff0b0; }
+  #market button.confirm:disabled { opacity: .35; color: #8ba0bb; border-color: #24384f; }
+  /* Stacked on a phone, side by side once there is width for it. */
+  #market .cols { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+  #market section { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid #1b2735; padding: 8px 10px; }
+  #market h3 { margin: 0 0 8px; font-size: 11px; font-weight: normal;
+               letter-spacing: .16em; color: #5ff0b0; }
+  #market .sell h3 { color: #d8a851; }
+  /* The row sets the colour the mark inherits: currentColor otherwise falls all the way
+     through to the page default, and the icon comes out invisible on the dark sheet. */
+  #market .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; color: #cfe6ff; }
+  #market .row .nm { flex: 1 1 auto; color: #cfe6ff; }
+  #market .row .pr { color: #8ba0bb; }
+  #market .row .n { min-width: 2ch; text-align: center; color: #cfe6ff; }
+  #market .row button { padding: 4px 12px; min-width: 44px; }
+  #market .row button:disabled { opacity: .3; }
+  #market .none { color: #55677d; padding: 6px 0; }
+  @media (min-width: 700px) { #market .cols { flex-direction: row; } }
   #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
   #details .hold { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 12px; }
   #details .hold b { color: #d8a851; font-weight: normal; font-size: 20px; }
@@ -200,6 +233,20 @@
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<div id="market" hidden>
+  <div class="sheet">
+    <header>
+      <span class="cost"><span class="short" hidden>✗</span><b>0</b> / <i>0</i> ore</span>
+      <button type="button" class="cancel">CANCEL</button>
+      <button type="button" class="confirm">CONFIRM</button>
+    </header>
+    <div class="cols">
+      <section class="buy"><h3>FOR SALE</h3><div class="rows"></div></section>
+      <section class="sell"><h3>YOUR HOLD</h3><div class="rows"></div></section>
+    </div>
+    <div class="why"></div>
+  </div>
+</div>
 <div id="refit" hidden>
   <div class="sheet">
     <header>

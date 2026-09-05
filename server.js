@@ -138,15 +138,17 @@ const CARRIER = {
 // with it. Pulling a gun and putting it back does mend it, and is priced so that is a silly
 // way to do repairs rather than an impossible one.
 const MODULES = {
+  // `price` is what the market asks for one. It is well over an uninstall plus an install,
+  // so shuffling what you have is always cheaper than buying your way out of a layout.
   gun: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4, hitR: 9, hp: TURRET_HP,
-         size: 10, install: 40 },
+         size: 10, install: 40, price: 140 },
   // Not a weapon: no reach, so gunnery never picks a target for it. What it does is give
   // the hull a tractor beam, and a second gives a second beam -- the beams come out of the
   // ship rather than out of the module, so where it sits decides nothing except what else
   // will fit beside it. Small enough to go between the guns amidships, which is the point
   // of it: a radius of 3 clears the 13.6 to a neighbouring gun.
   tractor: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 7, hp: 60,
-             size: 3, install: 60 },
+             size: 3, install: 60, price: 220 },
   // Fixed to their hulls and never in anybody's hold, but they are what sits in an install
   // point, so they are modules like any other.
   fighterGun: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200,
@@ -163,6 +165,9 @@ const MODULES = {
 // such rule that is obviously fair. Buying a new module will cost more than 1.5 installs,
 // so relocating is still the cheap way to rearrange.
 const REFIT_REMOVE = 0.5, REFIT_ROTATE = 0.25;
+// What the market gives you for one, as a fraction of what it asks. The spread is the
+// reason to fit what you find rather than sell it and buy the thing you wanted.
+const RESALE = 0.45;
 
 // A module points at one of 32 stops around the circle, 11.25 degrees apart. Fine enough
 // to aim an arc where you want it, coarse enough that two guns set the same way are
@@ -432,16 +437,24 @@ function wobbleRing(cx, cy, r, sides, wobble, rnd) {
 // chunk holding them loads, so a station needs no matching artwork built into the client
 // and a new set piece can look like whatever it wants without one being shipped.
 //
-// The yard: staging built out from the cavern wall with two cranes over it, drawn in a
-// frame where x runs along the wall and y points into the cavern.
-function townArt() {
-  const A = -Math.PI * 3 / 4;                       // up and to the left, against the wall
+// Anything built against the cavern wall is drawn in a frame where x runs along the wall
+// and y points inward, so a bearing is the only thing that decides where it stands.
+function wallFrame(A, back = 20) {
   const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
   const nx = Math.cos(A), ny = Math.sin(A);         // out towards the rock
-  const ox = cx + nx * (TOWN_CAVE - 20), oy = cy + ny * (TOWN_CAVE - 20);
+  const ox = cx + nx * (TOWN_CAVE - back), oy = cy + ny * (TOWN_CAVE - back);
   const px = -ny, py = nx;                          // along the wall
   const at = (u, v) => [+(ox + px * u - nx * v).toFixed(1), +(oy + py * u - ny * v).toFixed(1)];
-  const line = (...pts) => pts.map(([u, v]) => at(u, v));
+  return { at, line: (...pts) => pts.map(([u, v]) => at(u, v)),
+           inward: (u, v) => [ox + px * u - nx * v, oy + py * u - ny * v] };
+}
+
+const YARD_A = -Math.PI * 3 / 4;                    // the yard, up and to the left
+const MARKET_A = -Math.PI / 2;                      // the market, on the north wall
+
+// The yard: staging built out from the cavern wall with two cranes over it.
+function townArt() {
+  const { line } = wallFrame(YARD_A);
   const lines = [];
 
   // The staging: a deck off the wall, uprights, and two galleries above it.
@@ -465,7 +478,59 @@ function townArt() {
   lines.push(line([-90, 200], [60, 200], [96, 224], [60, 248], [-90, 248], [-110, 224], [-90, 200]));
   lines.push(line([-60, 200], [-60, 248]), line([10, 200], [10, 248]));
   for (const u of [-70, 40]) lines.push(line([u, 150], [u, 200]));     // props down to the deck
-  return [{ key: 'town:yard', lines }];
+  return [{ key: 'town:yard', lines }, ...marketArt()];
+}
+
+// The market: a faceted dome on a plinth with a dish beside it, because a place that talks
+// to other places is a place that has an antenna.
+function marketArt() {
+  const { line } = wallFrame(MARKET_A);
+  const lines = [];
+  const R = 190, cy = R + 40;                       // dome centre, out from the wall
+  const ring = (r, n, phase = 0) => {
+    const pts = [];
+    for (let i = 0; i <= n; i++) {
+      const a = phase + i / n * Math.PI * 2;
+      pts.push([Math.cos(a) * r, cy + Math.sin(a) * r]);
+    }
+    return line(...pts);
+  };
+  // Three rings of facets, each turned half a step against the last, and struts between
+  // them that alternate -- which is what makes it read as triangles rather than a wheel.
+  const rs = [R, R * 0.66, R * 0.33];
+  rs.forEach((r, k) => lines.push(ring(r, 12, k % 2 ? Math.PI / 12 : 0)));
+  for (let k = 0; k < 2; k++) {
+    const [r0, r1] = [rs[k], rs[k + 1]];
+    const [p0, p1] = [k % 2 ? Math.PI / 12 : 0, (k + 1) % 2 ? Math.PI / 12 : 0];
+    for (let i = 0; i < 12; i++) {
+      const a0 = p0 + i / 12 * Math.PI * 2, a1 = p1 + i / 12 * Math.PI * 2;
+      lines.push(line([Math.cos(a0) * r0, cy + Math.sin(a0) * r0],
+                      [Math.cos(a1) * r1, cy + Math.sin(a1) * r1]));
+      lines.push(line([Math.cos(a1) * r1, cy + Math.sin(a1) * r1],
+                      [Math.cos(a0 + Math.PI / 6) * r0, cy + Math.sin(a0 + Math.PI / 6) * r0]));
+    }
+  }
+  // The plinth it stands on, and legs down to the rock.
+  lines.push(line([-250, 0], [250, 0]));
+  lines.push(line([-215, 34], [215, 34]));
+  for (const u of [-215, -120, 0, 120, 215]) lines.push(line([u, 0], [u, 34]));
+  for (const u of [-150, -60, 60, 150]) lines.push(line([u, 34], [u * 0.55, cy - R + 10]));
+  // The dish: a mast, a bowl on it, and a feed on arms at the focus.
+  const mx = 300, my = 60;
+  lines.push(line([mx, 0], [mx, my]));
+  lines.push(line([mx - 26, 0], [mx, 30]), line([mx + 26, 0], [mx, 30]));
+  const bowl = [];
+  for (let i = 0; i <= 14; i++) {
+    const a = -Math.PI * 0.86 + i / 14 * Math.PI * 1.12;
+    bowl.push([mx + Math.cos(a) * 78, my + 78 + Math.sin(a) * 78]);
+  }
+  lines.push(line(...bowl));
+  lines.push(line(bowl[0], bowl[bowl.length - 1]));
+  const focus = [mx + Math.cos(-Math.PI * 0.3) * 40, my + 78 + Math.sin(-Math.PI * 0.3) * 40];
+  lines.push(line(bowl[2], focus), line(bowl[bowl.length - 3], focus));
+  lines.push(line([focus[0] - 9, focus[1] - 9], [focus[0] + 9, focus[1] - 9],
+                  [focus[0] + 9, focus[1] + 9], [focus[0] - 9, focus[1] + 9], [focus[0] - 9, focus[1] - 9]));
+  return [{ key: 'town:market', lines }];
 }
 
 // Somewhere you can do something. A marker is a point, a reach, and an icon it carries
@@ -473,14 +538,18 @@ function townArt() {
 // the art, so a new set piece can offer a new thing to do without the client learning
 // about it first. What the interaction *is* stays on the server.
 function townMarks() {
-  const A = -Math.PI * 3 / 4;
-  const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
-  const x = cx + Math.cos(A) * (TOWN_CAVE - 300), y = cy + Math.sin(A) * (TOWN_CAVE - 300);
+  const yard = wallFrame(YARD_A).inward(0, 280);
+  const market = wallFrame(MARKET_A).inward(0, 300);
   return [{
-    key: 'town:yard', kind: 'refit', x: +x.toFixed(1), y: +y.toFixed(1), r: 260,
+    key: 'town:yard', kind: 'refit', x: +yard[0].toFixed(1), y: +yard[1].toFixed(1), r: 260,
     // A spanner, drawn on the same 24-unit grid the module marks use.
     icon: ['M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94'
          + 'l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z'],
+  }, {
+    key: 'town:market', kind: 'market', x: +market[0].toFixed(1), y: +market[1].toFixed(1), r: 260,
+    // Scales.
+    icon: ['M12 3v18M7 21h10', 'M12 6l-7 2 7-2 7 2-7-2',
+           'M5 8l-3 7a3 3 0 0 0 6 0z', 'M19 8l-3 7a3 3 0 0 0 6 0z'],
   }];
 }
 
@@ -1208,6 +1277,51 @@ function refit(s, want) {
   // Indices into the gun list no longer mean what they meant, and the crew's standing
   // orders were written in them.
   s.repairing = null; s.repairFocus = [];
+  return null;
+}
+
+// ---- the market ----
+//
+// A basket rather than a till: everything being bought and everything being sold goes over
+// as one order and settles in a single figure, so a trade is never half done and there is
+// no order in which to do it that costs less. The client's running total is a preview; the
+// price is worked out here from what the ship is actually carrying.
+const forSale = () => Object.keys(MODULES).filter(t => !MODULES[t].fixed && MODULES[t].price);
+const sellPrice = t => Math.round(MODULES[t].price * RESALE);
+
+function canTrade(s) {
+  if (!crewed(s)) return false;
+  for (const m of marks.values())
+    if (m.kind === 'market' && Math.hypot(s.x - m.x, s.y - m.y) <= m.r) return true;
+  return false;
+}
+
+function trade(s, buy, sell) {
+  if (!canTrade(s)) return 'not at a market';
+  const count = o => {
+    const out = {};
+    for (const [t, n] of Object.entries(o || {})) {
+      const k = Math.floor(Number(n));
+      if (!Number.isFinite(k) || k < 0 || k > 999) return null;
+      if (k && !MODULES[t]?.price) return null;     // nothing else is traded
+      if (k) out[t] = k;
+    }
+    return out;
+  };
+  const buying = count(buy), selling = count(sell);
+  if (!buying || !selling) return 'bad basket';
+  for (const [t, n] of Object.entries(selling))
+    if ((s.hold[t] || 0) < n) return `no ${n} ${t} to sell`;
+
+  let owed = 0;
+  for (const [t, n] of Object.entries(buying)) owed += MODULES[t].price * n;
+  for (const [t, n] of Object.entries(selling)) owed -= sellPrice(t) * n;
+  if (owed > s.ore) return `needs ${owed} ore`;
+
+  s.ore -= owed;
+  for (const [t, n] of Object.entries(selling)) s.hold[t] = (s.hold[t] || 0) - n;
+  for (const [t, n] of Object.entries(buying)) s.hold[t] = (s.hold[t] || 0) + n;
+  for (const t of Object.keys(s.hold)) if (!s.hold[t]) delete s.hold[t];
   return null;
 }
 
@@ -2636,6 +2750,7 @@ wss.on('connection', ws => {
       maxView: MAX_VIEW,
       hulls: Object.fromEntries(Object.entries(HULLS).map(([k, h]) => [k, { installs: h.installs }])),
       modules: MODULES, refit: { remove: REFIT_REMOVE, rotate: REFIT_ROTATE, stops: ROT_STOPS },
+      market: { stock: forSale(), resale: RESALE },
       prioMax: PRIO_MAX, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 
@@ -2685,6 +2800,13 @@ wss.on('connection', ws => {
       }
     }
     else if (m.t === 'interact-done') { p.busy = null; }
+    else if (m.t === 'trade' && m.buy && m.sell) {
+      for (const s of ships) {
+        if (s.owner !== p.id || s.id !== m.ship) continue;
+        const why = trade(s, m.buy, m.sell);
+        ws.send(JSON.stringify({ t: 'trade', ship: s.id, ok: !why, ...(why ? { why } : {}) }));
+      }
+    }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
       for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
     }
