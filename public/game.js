@@ -561,7 +561,8 @@ let openShip = null;
 const PANELS = [
   { title: 'Targeting', axis: ['near', 'far'],
     rows: [['rock', 'Asteroids'], ['turret', 'Turrets'],
-           ['fighter', 'Fighters'], ['cache', 'Caches']] },
+           ['fighter', 'Fighters'], ['cache', 'Caches'],
+           ['ore', 'Ore'], ['module', 'Modules']] },
   { title: 'Cargo', cargo: true, rows: [] },
   { title: 'Repair', axis: ['wrecked', 'full'], guns: true,
     // Everything left of this is a gun that is not there any more. It is worth seeing
@@ -1583,6 +1584,8 @@ const HULL_ART = {
            deathMs: 10000, deathSpin: 0.25, oreSparks: true, debrisRgb: '230,237,246' },
 };
 const MARKER = [[0, -9], [9, 0], [0, 9], [-9, 0]];
+// A dropped module, drawn as the crate it arrives in.
+const CRATE = [[-7, -7], [7, -7], [7, 7], [-7, 7]];
 // Ore is drawn small and warm so it does not read as a rock you should be shooting.
 const ORE = [[0, -5], [4, -2], [3, 4], [-3, 4], [-4, -2]];
 const ORE_COLOR = '#d8a851';
@@ -2045,7 +2048,24 @@ function draw() {
 
   for (const o of state.ore || []) {
     if (!onScreen(o.x, o.y, 20)) continue;
-    poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2);
+    if (!o.m) { poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2); continue; }
+    // Salvage: a crate with the module's own mark on it, so what has been dropped is
+    // legible before you have gone to fetch it. Same marks the hull and the refit sheet
+    // use -- a barrel is a thing that shoots, an eye is a thing that pulls.
+    const x = o.x - cam.x, y = o.y - cam.y;
+    poly(CRATE, x, y, o.a, '#9fd4ff', true, 1.2);
+    if (aims(o.m)) poly(TURRET, x, y, o.a, '#cfe6ff', true, 1);
+    else {
+      ctx.save();
+      ctx.lineWidth = 1 / cam.zoom;
+      ctx.strokeStyle = '#cfe6ff';
+      const collar = new Path2D(); collar.arc(x, y, 3.4, 0, Math.PI * 2);
+      ctx.stroke(collar);
+      ctx.fillStyle = 'rgba(106,184,255,.9)';
+      const eye = new Path2D(); eye.arc(x, y, 1.8, 0, Math.PI * 2);
+      ctx.fill(eye);
+      ctx.restore();
+    }
   }
   // A tractor with nothing to show for itself looks like a bug, so the beam is drawn --
   // for anyone's ship, since it is a thing happening in the world. A wedge spreading from

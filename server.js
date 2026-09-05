@@ -186,7 +186,8 @@ const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-edita
 // Repair curves are per module type, under `repair:<type>`, and `repair` is what anything
 // without its own falls back to. A crew told to leave guns alone until they are nearly
 // wrecked should not thereby be told the same about the winch.
-const PRIO_KINDS = ['rock', 'turret', 'fighter', 'cache', 'repair', 'repair:tractor'];
+const PRIO_KINDS = ['rock', 'turret', 'fighter', 'cache', 'ore', 'module',
+                    'repair', 'repair:tractor'];
 const repairCurve = (s, t) => s.prio['repair:' + t.type] || s.prio.repair;
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
@@ -203,6 +204,9 @@ const defaultPrio = () => {
   return {
     rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
     fighter: [[0, 100], [1, 20]], cache: [[0, 100], [1, 20]],
+    // A beam chooses the same way a gun does. Modules start above ore, because a grain is
+    // five ore and a module is a thing you cannot buy.
+    ore: [[0, 100], [1, 20]], module: [[0, 100], [1, 60]],
     repair: [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
     'repair:tractor': [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
   };
@@ -1607,15 +1611,22 @@ const rockBandSpot = s => {
   return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
 };
 
-function spawnOre(x, y) {
+function spawnOre(x, y, mod = null) {
   ore.push({
     id: nextId++, x, y,
     vx: rand(-40, 40), vy: rand(-40, 40),
-    a: rand(0, Math.PI * 2), spin: rand(-2, 2), r: 5,
-    life: ORE_LIFE,         // seconds before it disperses
+    a: rand(0, Math.PI * 2), spin: rand(-2, 2), r: mod ? 7 : 5,
+    // A module is loot rather than scenery: it waits far longer than a grain, because
+    // watching one disperse while you turn towards it would be the worst thing in the game.
+    life: mod ? ORE_LIFE * 20 : ORE_LIFE,
     held: null,             // the one ship whose beam has it
+    mod,                    // a module type if this is one, null if it is ore
   });
 }
+
+// What a cache lets go of besides its ore. Only what can actually be installed by hand --
+// the fixed sorts are part of a hull and are nobody's salvage.
+const LOOT = Object.keys(MODULES).filter(t => !MODULES[t].fixed);
 
 // Top a ship's neighbourhood back up to ROCK_TARGET, placing new rocks where `spot` says.
 // Outside every ship's area of interest, not just the one being stocked. A fleet spread
@@ -1858,7 +1869,11 @@ function wound(s, t, amount) {
     // A broken cache does not vanish: it lets its ore go over the same ten seconds the
     // client spends drawing it coming apart, so what you see and what you can collect
     // are the same event.
-    if (s.hull.spills) spills.push({ x: s.x, y: s.y, left: s.hull.spills, due: 0 });
+    if (s.hull.spills) {
+      spills.push({ x: s.x, y: s.y, left: s.hull.spills, due: 0 });
+      // And one module, which is the thing actually worth crossing the map for.
+      spawnOre(s.x + rand(-24, 24), s.y + rand(-24, 24), LOOT[Math.floor(Math.random() * LOOT.length)]);
+    }
     kills.push({ x: Math.round(s.x), y: Math.round(s.y), a: +s.a.toFixed(2), h: hullKey(s.hull) });
   }
 }
@@ -2153,7 +2168,9 @@ function manageRocks() {
 // Top a ship's neighbourhood back up, same shape as stock() for rocks.
 function stockOre(s, spot) {
   let near = 0;
-  for (const o of ore) if (Math.hypot(o.x - s.x, o.y - s.y) < ACTIVE_R) near++;
+  // Salvage is not scenery: a module lying about must not stand in for the ore this is
+  // meant to keep topped up, or a cache's drop quietly thins the field around it.
+  for (const o of ore) if (!o.mod && Math.hypot(o.x - s.x, o.y - s.y) < ACTIVE_R) near++;
   for (; near < ORE_TARGET; near++) spawnOre(...spot(s));
 }
 
@@ -2193,23 +2210,30 @@ function tractor(s, dt) {
   if (!crewed(s) || !beams) return drop([]);
   const polys = nearbyWalls(s.x, s.y);
   for (let b = 0; b < beams; b++) {
-    let best = null, bestD = TRACTOR_R;
+    // Chosen by the same envelope a gun uses: the curve for its kind against how far out
+    // it is, best score first and nearest breaking a tie. A beam can be told to ignore ore
+    // and hold out for modules exactly as a battery can be told to ignore rock.
+    let best = null, bestD = 0, bestScore = 0;
     for (const o of ore) {
       // Spoken for: two beams on one grain would fight over its velocity and neither would
       // land it. Which now includes this ship's own other beams.
       if (o.held !== null && o.held !== s.id) continue;
       if (s.beams.includes(o.id)) continue;
       const d = Math.hypot(o.x - s.x, o.y - s.y);
-      if (d >= bestD) continue;
+      if (d >= TRACTOR_R) continue;
+      const score = prioAt(s.prio[o.mod ? 'module' : 'ore'], d / TRACTOR_R);
+      if (score <= 0) continue;                     // zero priority is "leave it"
+      if (score < bestScore || (score === bestScore && d >= bestD)) continue;
       // Rock stops a beam the way it stops a shell. Checked only for grains that would
       // actually win, so the sight test runs a handful of times rather than once per grain.
       if (polys.length && segmentBlocked(s.x, s.y, o.x, o.y, polys)) continue;
-      bestD = d; best = o;
+      bestD = d; bestScore = score; best = o;
     }
     if (!best) break;
     if (bestD <= ORE_GRAB) {
       ore.splice(ore.indexOf(best), 1);
-      s.ore += ORE_VALUE;
+      if (best.mod) s.hold[best.mod] = (s.hold[best.mod] || 0) + 1;
+      else s.ore += ORE_VALUE;
       continue;                                     // that beam is free again this tick
     }
     best.held = s.id;
@@ -2391,7 +2415,8 @@ function snapshotFor(p) {
     bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
     rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y),
       a: +r.a.toFixed(2), size: r.size, seed: r.seed, ...(r.rich ? { rich: r.rich } : {}) })),
-    ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y), a: +o.a.toFixed(2) })),
+    ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y),
+                                      a: +o.a.toFixed(2), ...(o.mod ? { m: o.mod } : {}) })),
     ...(kills.length ? { kills: kills.filter(near) } : {}),
   });
 }
