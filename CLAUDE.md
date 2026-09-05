@@ -170,6 +170,16 @@ back from the border, and one landing across the mouth would seal the starting t
 everybody, for good. The other five get whatever they get: a decree is for what a set
 piece actually needs, not for tidiness.
 
+**Sites are sown ahead of loading, not placed while a cell loads.** A cell wants to be
+surrounded by neighbours *before* it loads, because loading fixes it forever. Leaving that
+to `bindCell` -- placing neighbours while the cell is already being loaded -- fails in a way
+that compounds: `loadCell` accepts anything that merely misses the far box, which permits a
+radius near 27,000, and a cell that size then vetoes new sites for 40,000 units around
+itself, so nothing can subdivide near it and the next cell out is bigger still. Measured
+before the fix: 29 attempts to tidy a cell, 2 successes, 1,058 refusals of which every one
+was admissibility, and a median loaded radius of 4,955 against a 3,240 target. Sowing over
+the area of interest first brings the median to 2,701 and the worst to 3,672.
+
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off
 a convex cell always takes a corner with it. Cull that check by the cell's own reach

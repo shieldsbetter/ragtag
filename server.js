@@ -1125,10 +1125,35 @@ function watchAnchors() {
 const pendingCells = [];
 const queuedCells = new Set();        // in memory only: a restart before generating must requeue
 let cellTick = 0;
+
+// Scatter sites over the ground around an anchor, out past the area of interest so that
+// cells inside it are already surrounded by the time they load. Spacing is one cell, and a
+// site is dropped only where there is actually room -- so this settles down to nothing
+// once an area is sown, and re-sowing costs the checks and no more.
+const SOW_R = AOI_R + CELL_R * 2;
+function sowSites(ax, ay) {
+  for (let x = ax - SOW_R; x <= ax + SOW_R; x += CELL_R)
+    for (let y = ay - SOW_R; y <= ay + SOW_R; y += CELL_R) {
+      const px = x + rand(-CELL_R * 0.3, CELL_R * 0.3), py = y + rand(-CELL_R * 0.3, CELL_R * 0.3);
+      const near = nearestSite(px, py);
+      if (near && Math.hypot(near.x - px, near.y - py) < CELL_R * 0.75) continue;
+      if (!admissible(px, py)) continue;    // never take ground from a cell already loaded
+      addSite(px, py);
+    }
+}
 function manageCells() {
   if (cellTick++ % 30 === 0) {
     const anchors = shipAnchors();
-    // First grow the mesh over the ground anyone is near...
+    // Sow first, load second. Sites are cheap and decide nothing until their cell loads,
+    // and a cell surrounded by neighbours before it loads comes out the size it should be.
+    // Leaving it to bindCell instead -- placing neighbours while the cell is already being
+    // loaded -- was far too late: loadCell accepts anything that merely misses the far box,
+    // which permits a radius near 27,000, and a cell that size then vetoes new sites for
+    // 40,000 units around itself, so nothing could subdivide near it and the next cell out
+    // was bigger still. Over one flight, 29 attempts to tidy a cell, 2 successes, and 1,058
+    // refusals of which every single one was admissibility.
+    for (const a of anchors) sowSites(a.x, a.y);
+    // ...then grow the mesh over the ground anyone is near...
     for (const a of anchors)
       for (let x = a.x - AOI_R; x <= a.x + AOI_R; x += CELL_R / 2)
         for (let y = a.y - AOI_R; y <= a.y + AOI_R; y += CELL_R / 2) siteFor(x, y);
