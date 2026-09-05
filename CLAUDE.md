@@ -113,6 +113,16 @@ what it is looking at so nothing vanishes in front of you, but it may never call
 into being: otherwise a finger on the map drags the world into existence for as far as
 anyone cares to scroll, deciding biomes for ground nobody has been near.
 
+**Nothing rock-shaped arrives in sight.** Asteroids are stocked and culled across the
+whole area of interest rather than a small disc: they appear only in a thin band just
+outside `AOI_R` and are culled past `AOI_KEEP`, so no one watches one wink in or out.
+Density is what is preserved, not the count — the same rock per unit of space over an
+area twenty times larger, about 500 a ship. The band has to sit *inside* the radius the
+stocking counts over, or rocks spawn where they are never counted and the field grows
+without bound. Ore is exempt on purpose: it comes and goes near the ship, because it
+is meant to be noticed. Nests are placed past `AOI_R * NEST_EDGE` for the same reason a
+rock is — found at the rim, a nest was always there and you sailed up to it.
+
 **Clients receive only what they can see.** `MAX_VIEW` bounds the camera, the client
 reports where it is looking, and snapshots carry only nearby entities plus your own
 ships. World *simulation* stays anchored to ships; only delivery follows the camera.

@@ -49,6 +49,11 @@ if (DEV) setInterval(() => { stale = sourceHash() !== VERSION; }, 2000);
 // rocks are kept stocked within ACTIVE_R of every ship and culled past KEEP_R, so
 // space is populated where anyone is and empty everywhere else.
 const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
+// Rock is managed over the whole area of interest rather than a small disc around the
+// ship, so it comes and goes only where nobody can see it. What is preserved is the
+// density, not the count -- the same rock per unit of space over an area twenty times
+// larger, which is what it costs never to watch one appear.
+const ROCK_DENSITY = ROCK_TARGET / (Math.PI * ACTIVE_R * ACTIVE_R);
 
 // Ore drifts like rock and is kept stocked the same way, so it is found by going
 // somewhere rather than by waiting. A ship reaches for the nearest grain inside
@@ -664,6 +669,11 @@ function manageEncounters(dt) {
 // rule two: there is nowhere for one fighter to hold a private opinion about who it is
 // fighting.
 const NEST_R = 1200;                  // how close you have to be for it to exist at all
+// And placed only out at the rim of what anyone can reach. A nest that appeared beside you
+// would be a nest that was not there a moment ago; found at the edge, it was always there
+// and you sailed up to it. Once placed, how long it stays is the encounter's own business
+// -- nothing sweeps it up for being outside the boundary later.
+const NEST_EDGE = 0.8;                // of AOI_R, from the nearest crewed ship
 const NEST_NOTICE = 900, NEST_FORGET = 1700;
 // No two nests within twice the leash, so their pursuits cannot overlap: there is always
 // a direction that takes you out of one without carrying you into the next. Spacing is
@@ -750,6 +760,10 @@ function trySpawnNest(cx, cy) {
   for (let i = 0; i < 10; i++) {
     const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
     if (blockedAt(x, y, HULL_CLEAR, false)) continue;
+    let far = true;
+    for (const s of ships)
+      if (crewed(s) && Math.hypot(s.x - x, s.y - y) < AOI_R * NEST_EDGE) { far = false; break; }
+    if (!far) continue;
     // Against the other nests, not against their fighters. This used to test ships, which
     // worked only because a nest built itself the instant it was placed -- once placement
     // and building came apart, a dormant nest had no hulls to keep the next one away and
@@ -920,8 +934,7 @@ function blockedAt(x, y, r, ensure = true) {
 // MAX_VIEW^2 * 576/337 of area; rock sits at ROCK_TARGET per ACTIVE_R disc. Multiply and
 // a screen holds about two dozen rocks -- so "one +1 per screen" is one in two dozen,
 // "one +2 per 5x5 screens" is one in twenty-five of those, and +3 one in a hundred.
-const ROCKS_PER_SCREEN = (MAX_VIEW * MAX_VIEW * 576 / 337)
-  * ROCK_TARGET / (Math.PI * ACTIVE_R * ACTIVE_R);
+const ROCKS_PER_SCREEN = (MAX_VIEW * MAX_VIEW * 576 / 337) * ROCK_DENSITY;
 const RICH_SCREENS = [1, 25, 100];    // screens you cross, on average, per +1, +2, +3
 
 function rollRich() {
@@ -991,13 +1004,24 @@ function spawnPoint(ax = 0, ay = 0, reach0 = 300) {
 // Uniform over the disc (hence the sqrt -- sampling the radius directly would pile
 // rocks up around the ship), holding them off the hull itself.
 const SEED_MIN = 150;
-const seedSpot = s => {
+// Ore is allowed to come and go in plain sight, so it is scattered near the ship the way
+// it always was.
+const oreSpot = s => {
   const a = rand(0, Math.PI * 2), d = Math.sqrt(rand(SEED_MIN ** 2, ACTIVE_R ** 2));
   return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
 };
-// Out at the edge of the active area, past anything anyone is looking at.
-const bandSpot = s => {
-  const a = rand(0, Math.PI * 2), d = rand(ACTIVE_R * 0.8, ACTIVE_R);
+
+// Rock is not. A new ship gets its field laid out across the whole area it will hold...
+const rockSeedSpot = s => {
+  const a = rand(0, Math.PI * 2), d = Math.sqrt(rand(SEED_MIN ** 2, AOI_KEEP ** 2));
+  return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
+};
+// ...and everything after that arrives in the thin band just past the edge of interest,
+// three screens out, where nobody can watch it happen. The band sits inside the cull
+// radius on purpose: a rock spawned beyond what the stocking counts would never be
+// counted, and the field would grow without bound.
+const rockBandSpot = s => {
+  const a = rand(0, Math.PI * 2), d = rand(AOI_R, AOI_R * 1.06);
   return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
 };
 
@@ -1012,10 +1036,30 @@ function spawnOre(x, y) {
 }
 
 // Top a ship's neighbourhood back up to ROCK_TARGET, placing new rocks where `spot` says.
+// Outside every ship's area of interest, not just the one being stocked. A fleet spread
+// out puts one ship's rim through another ship's neighbourhood, and a rock arriving at
+// six thousand units from one hull can be three hundred from the next.
+function outsideEveryone(at) {
+  for (const q of ships)
+    if (crewed(q) && Math.hypot(at[0] - q.x, at[1] - q.y) < AOI_R) return false;
+  return true;
+}
+
 function stock(s, spot) {
+  // Counted over the same disc it is culled at, so a rock placed in the band counts
+  // toward the target that asked for it.
+  const want = Math.round(ROCK_DENSITY * Math.PI * AOI_KEEP * AOI_KEEP);
   let near = 0;
-  for (const r of rocks) if (Math.hypot(r.x - s.x, r.y - s.y) < ACTIVE_R) near++;
-  for (; near < ROCK_TARGET; near++) spawnRock(3, ...spot(s));
+  for (const r of rocks) if (Math.hypot(r.x - s.x, r.y - s.y) < AOI_KEEP) near++;
+  for (; near < want; near++) {
+    let at = null;
+    for (let try_ = 0; try_ < 8 && !at; try_++) {
+      const p = spot(s);
+      if (outsideEveryone(p)) at = p;
+    }
+    if (!at) break;             // hemmed in this tick; the next one will place it
+    spawnRock(3, ...at);
+  }
 }
 
 function newShip(owner, team, at = {}, hull = CARRIER) {
@@ -1041,7 +1085,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     focus: null,          // one ship this one shoots at in preference to anything else
   };
   ships.add(s);
-  if (crewed(s)) { stock(s, seedSpot); stockOre(s, seedSpot); }   // arrives in a populated neighbourhood, not a void
+  if (crewed(s)) { stock(s, rockSeedSpot); stockOre(s, oreSpot); }   // arrives in a populated neighbourhood, not a void
   return s;
 }
 
@@ -1501,10 +1545,10 @@ function manageRocks() {
   for (let i = rocks.length - 1; i >= 0; i--) {
     const r = rocks[i];
     let keep = false;
-    for (const s of ships) if (crewed(s) && Math.hypot(r.x - s.x, r.y - s.y) < KEEP_R) { keep = true; break; }
+    for (const s of ships) if (crewed(s) && Math.hypot(r.x - s.x, r.y - s.y) < AOI_KEEP) { keep = true; break; }
     if (!keep) rocks.splice(i, 1);
   }
-  for (const s of ships) if (crewed(s)) stock(s, bandSpot);
+  for (const s of ships) if (crewed(s)) stock(s, rockBandSpot);
 }
 
 // Top a ship's neighbourhood back up, same shape as stock() for rocks.
@@ -1521,11 +1565,10 @@ function manageOre() {
     for (const s of ships) if (crewed(s) && Math.hypot(ore[i].x - s.x, ore[i].y - s.y) < KEEP_R) { keep = true; break; }
     if (!keep) ore.splice(i, 1);
   }
-  // Anywhere in the neighbourhood rather than out at the edge, which is where rocks
-  // arrive from. Ore does not drift in from somewhere -- it is simply about, and with a
-  // half-minute life it would mostly expire before reaching anyone if it started at the
-  // rim. seedSpot still holds it off the hull itself.
-  for (const s of ships) if (crewed(s)) stockOre(s, seedSpot);
+  // Anywhere in the neighbourhood rather than out at the rim. Ore does not drift in from
+  // somewhere -- it is simply about -- and with a half-minute life it would mostly expire
+  // before reaching anyone if it started three screens away.
+  for (const s of ships) if (crewed(s)) stockOre(s, oreSpot);
 }
 
 // One grain at a time, the nearest one in reach that the ship can actually see and that
