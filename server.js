@@ -112,10 +112,10 @@ const CARRIER = {
 // to ride in every snapshot. Zero means do not engage at all -- not "engage last" --
 // which is the hook the eventual fair-game flag hangs on.
 const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-editable
-// 'rock', 'turret' and 'fighter' say what to shoot; 'repair' says what to mend. Same
-// curve, same order on the wire, same editor -- only the axis underneath differs, which
-// is distance for the first three and health for the last.
-const PRIO_KINDS = ['rock', 'turret', 'fighter', 'repair'];
+// 'rock', 'turret', 'fighter' and 'cache' say what to shoot; 'repair' says what to mend.
+// Same curve, same order on the wire, same editor -- only the axis underneath differs,
+// which is distance for the first four and health for the last.
+const PRIO_KINDS = ['rock', 'turret', 'fighter', 'cache', 'repair'];
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
 // Two bands that do not overlap, split at a quarter health. Below the split priority
@@ -129,7 +129,8 @@ const defaultPrio = () => {
   const span = WRECK_DEPTH + TURRET_HP;
   const quarter = (WRECK_DEPTH + TURRET_HP * 0.25) / span;   // a quarter of positive health
   return {
-    rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]], fighter: [[0, 100], [1, 20]],
+    rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
+    fighter: [[0, 100], [1, 20]], cache: [[0, 100], [1, 20]],
     repair: [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
   };
 };
@@ -186,6 +187,7 @@ const CACHE = {
   turret: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 26, hp: 600 },
   collide: [[0, 0, 20]],
   frail: true, rockProof: true, ai: 'static',
+  targetKind: 'cache',
   spills: 50,           // grains it lets go of when it breaks
 };
 
