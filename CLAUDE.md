@@ -235,6 +235,14 @@ tick loop completely -- the server clock froze while wall time ran on, which loo
 exactly like ships being stuck rather than like a busy process. Work triggered by chunk
 loading goes on a queue drained after loading settles, and asks with `ensure = false`.
 
+**`siteFor` can answer with a site that is not in the mesh.** When it cannot settle a
+cell it hands back a throwaway `{ kind: 'open' }` so terrain does not stall over one
+stubborn cell. That object is new every call, so anything that remembers sites in a Set or
+keys work off them will never deduplicate it. Queueing it for generation filled the work
+queue with jobs that could never be done, and real cells starved behind it at one a tick:
+fly far enough from the town and terrain simply stopped arriving. Anything walking the
+mesh should iterate `sites`, not collect what `siteFor` returns.
+
 **Raiders are not anchors.** Terrain stays resident and asteroid fields stay stocked
 around *crewed* ships only. A ship left in every chunk you have ever visited would
 otherwise hold both open for the life of the process, and the world would grow without

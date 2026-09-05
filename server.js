@@ -1126,13 +1126,25 @@ const pendingCells = [];
 const queuedCells = new Set();        // in memory only: a restart before generating must requeue
 let cellTick = 0;
 function manageCells() {
-  if (cellTick++ % 30 === 0)
-    for (const a of shipAnchors())
+  if (cellTick++ % 30 === 0) {
+    const anchors = shipAnchors();
+    // First grow the mesh over the ground anyone is near...
+    for (const a of anchors)
       for (let x = a.x - AOI_R; x <= a.x + AOI_R; x += CELL_R / 2)
-        for (let y = a.y - AOI_R; y <= a.y + AOI_R; y += CELL_R / 2) {
-          const s = siteFor(x, y);
-          if (s.kind && !s.gen && !queuedCells.has(s)) { queuedCells.add(s); pendingCells.push(s); }
-        }
+        for (let y = a.y - AOI_R; y <= a.y + AOI_R; y += CELL_R / 2) siteFor(x, y);
+    // ...then queue the real sites that still owe content. Taking what siteFor handed back
+    // instead was a bug worth remembering: it answers with a throwaway {kind:'open'} when
+    // it cannot settle a cell, and that object is new every sweep, so it never deduplicated
+    // and the queue filled with work that could never be done while real cells starved
+    // behind it at one a tick. Flying out far enough, terrain simply stopped arriving.
+    for (const s of sites) {
+      if (!s.kind || s.gen || queuedCells.has(s)) continue;
+      // Still only ground somebody is near: reach is measured from the cell, not the site,
+      // because a sprawling one is a long way across.
+      if (!anchors.some(a => Math.hypot(a.x - s.x, a.y - s.y) < AOI_R + cellRadius(s))) continue;
+      queuedCells.add(s); pendingCells.push(s);
+    }
+  }
   // One cell per tick. Generating is a boolean over a few hundred polygons and has no
   // business in the same frame as the physics; the queue is what keeps it out.
   const s = pendingCells.shift();
