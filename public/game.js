@@ -790,6 +790,25 @@ function refitClash(fit, where, install, type) {
   return false;
 }
 
+// How near a drop has to land to count as putting the module somewhere, rather than taking
+// it off. Points are 32 apart along the hull, so anywhere on the deck finds one and letting
+// go well clear of it stows the module instead.
+const REFIT_DROP = 30;
+
+// Where a module let go at p would land: the nearest install point that is free and would
+// not overlap anything, or null for "off the hull, into the hold".
+function refitDropAt(fit, where, held, p) {
+  let best = null, bd = Infinity;
+  const rest = fit.filter(f => f !== held);
+  for (const id in where) {
+    if (rest.some(f => f.install === id)) continue;
+    if (refitClash(rest, where, id, held.type)) continue;
+    const d = Math.hypot(where[id][0] - p.x, where[id][1] - p.y);
+    if (d < bd) { bd = d; best = id; }
+  }
+  return bd <= REFIT_DROP ? best : null;
+}
+
 const SVGNS = 'http://www.w3.org/2000/svg';
 const svgEl = (n, attrs) => {
   const e = document.createElementNS(SVGNS, n);
@@ -797,6 +816,19 @@ const svgEl = (n, attrs) => {
   return e;
 };
 const svgPath = pts => pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + ' Z';
+
+// Drawn at half the module's own size. The circle is no longer the footprint the validity
+// test uses -- that is still the module's size radius -- but at full size six of them cover
+// the deck and there is nothing left to aim at.
+function moduleIcon(held, lit) {
+  const mod = modules[held.type] || {};
+  const g = svgEl('g', {});
+  g.append(svgEl('circle', { r: (mod.size || 8) / 2, fill: '#16283a',
+                             stroke: lit ? '#5ff0b0' : '#cfe6ff', 'stroke-width': .8 }));
+  g.append(svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
+                           transform: `rotate(${held.rot * 180 / Math.PI}) scale(.35)` }));
+  return g;
+}
 
 function drawRefit() {
   if (!refitting) return;
@@ -818,14 +850,23 @@ function drawRefit() {
   svg.append(svgEl('path', { d: `M${DECK[0][0]} ${DECK[0][1]}L${DECK[1][0]} ${DECK[1][1]}`,
                              stroke: '#24384f', 'stroke-width': .8 }));
 
+  // A module under the finger is drawn at the finger, not at the point it came from, and
+  // the point it would land on is lit up. Without that a drag is invisible and letting go
+  // is a guess.
+  const lift = refitDrag && !refitDrag.ring && refitDrag.moved && refitDrag.at ? refitDrag : null;
+  const carried = lift ? refitting.fit.find(f => f.install === lift.install) : null;
+  const onto = carried ? refitDropAt(refitting.fit, where, carried, lift.at) : null;
+
   for (const p of (hulls[s.h] || {}).installs || []) {
-    const held = refitting.fit.find(f => f.install === p.id);
+    const held = carried && carried.install === p.id ? null
+               : refitting.fit.find(f => f.install === p.id);
     const g = svgEl('g', { transform: `translate(${p.at[0]} ${p.at[1]})`, 'data-install': p.id });
     if (!held) {
       const free = !refitting.pick || !refitClash(refitting.fit, where, p.id, refitting.pick);
-      g.append(svgEl('circle', { r: 7, fill: 'transparent',
-        stroke: refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
-        'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+      const target = onto === p.id;
+      g.append(svgEl('circle', { r: target ? 9 : 7, fill: 'transparent',
+        stroke: target ? '#5ff0b0' : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
+        'stroke-width': target ? 1.6 : 1, 'stroke-dasharray': '3 3' }));
     } else {
       const mod = modules[held.type] || {};
       if (refitting.sel === p.id) {
@@ -841,13 +882,17 @@ function drawRefit() {
              + `${Math.cos(held.rot + mod.arcHalf) * 26} ${Math.sin(held.rot + mod.arcHalf) * 26}` });
         g.append(arc);
       }
-      g.append(svgEl('circle', { r: mod.size || 8, fill: '#16283a',
-                                 stroke: refitting.sel === p.id ? '#5ff0b0' : '#cfe6ff', 'stroke-width': 1 }));
-      const gun = svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
-                                  transform: `rotate(${held.rot * 180 / Math.PI}) scale(.7)` });
-      g.append(gun);
+      g.append(moduleIcon(held, refitting.sel === p.id));
     }
     svg.append(g);
+  }
+  // Last, so it rides over everything else.
+  if (carried) {
+    const ghost = svgEl('g', { transform: `translate(${lift.at.x} ${lift.at.y})`, opacity: .95 });
+    ghost.append(moduleIcon(carried, true));
+    if (!onto) ghost.append(svgEl('circle', { r: 11, fill: 'none', stroke: '#ff6b8a',
+                                              'stroke-width': 1, 'stroke-dasharray': '2 2' }));
+    svg.append(ghost);
   }
   refitBoard.textContent = '';
   refitBoard.append(svg);
@@ -892,7 +937,11 @@ refitBoard.addEventListener('pointerdown', e => {
 refitBoard.addEventListener('pointermove', e => {
   if (!refitDrag || !refitting) return;
   refitDrag.moved = true;
-  if (!refitDrag.ring) return;
+  if (!refitDrag.ring) {
+    refitDrag.at = svgPoint(e);
+    drawRefit();
+    return;
+  }
   const s = (fleet || []).find(q => q.id === refitting.ship);
   const where = installsOf(s.h)[refitDrag.install];
   const p = svgPoint(e);
@@ -925,16 +974,12 @@ refitBoard.addEventListener('pointerup', e => {
     return;
   }
   if (!held) { drawRefit(); return; }
-  // Dropped somewhere. On another point it moves, anywhere else it comes off.
-  const p = svgPoint(e);
-  let onto = null;
-  if (p) for (const q of (hulls[s.h] || {}).installs || [])
-    if (Math.hypot(q.at[0] - p.x, q.at[1] - p.y) < 11) onto = q.id;
-  if (onto === drag.install) { drawRefit(); return; }
-  if (onto && !refitting.fit.some(f => f.install === onto)) {
-    const rest = refitting.fit.filter(f => f !== held);
-    if (!refitClash(rest, where, onto, held.type)) held.install = onto;
-  } else if (!onto) {
+  // Let go. It goes to the nearest point that will take it, or into the hold if there is
+  // none near enough -- so a drop does not have to be accurate, only unambiguous.
+  const p = drag.at || svgPoint(e);
+  const onto = p ? refitDropAt(refitting.fit, where, held, p) : drag.install;
+  if (onto) held.install = onto;
+  else {
     refitting.fit = refitting.fit.filter(f => f !== held);
     if (refitting.sel === drag.install) refitting.sel = null;
   }
