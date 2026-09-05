@@ -813,19 +813,22 @@ function refitClash(fit, where, install, type) {
 // go well clear of it stows the module instead.
 const REFIT_DROP = 30;
 
-// Where a module let go at p would land: the nearest install point that is free and would
-// not overlap anything, or null for "off the hull, into the hold".
-function refitDropAt(fit, where, held, p, type = null) {
+// Which install point a module let go at p is aimed at, and whether it may go there. The
+// nearest point always wins, even when it cannot take the module: searching only among the
+// points that would accept it meant hovering over a full or blocked one silently reached
+// past it to a free one further away, and the module jumped somewhere nobody pointed at.
+// Null means no point is near enough, which is the hold.
+function refitTargetAt(fit, where, held, p, type = null) {
   let best = null, bd = Infinity;
-  const rest = fit.filter(f => f !== held);
-  const what = type || held.type;
   for (const id in where) {
-    if (rest.some(f => f.install === id)) continue;
-    if (refitClash(rest, where, id, what)) continue;
     const d = Math.hypot(where[id][0] - p.x, where[id][1] - p.y);
     if (d < bd) { bd = d; best = id; }
   }
-  return bd <= REFIT_DROP ? best : null;
+  if (best === null || bd > REFIT_DROP) return null;
+  const rest = fit.filter(f => f !== held);
+  const what = type || held.type;
+  const ok = !rest.some(f => f.install === best) && !refitClash(rest, where, best, what);
+  return { id: best, ok };
 }
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -899,7 +902,7 @@ function drawRefit() {
   const carried = !lift ? null
     : lift.type !== undefined ? { install: null, type: lift.type, rot: 0 }
     : refitting.fit.find(f => f.install === lift.install);
-  const onto = carried ? refitDropAt(refitting.fit, where, carried, lift.at) : null;
+  const onto = carried ? refitTargetAt(refitting.fit, where, carried, lift.at) : null;
 
   for (const p of (hulls[s.h] || {}).installs || []) {
     const held = carried && carried.install === p.id ? null
@@ -907,12 +910,16 @@ function drawRefit() {
     const g = svgEl('g', { transform: `translate(${p.at[0]} ${p.at[1]})`, 'data-install': p.id });
     if (!held) {
       const free = !refitting.pick || !refitClash(refitting.fit, where, p.id, refitting.pick);
-      const target = onto === p.id;
+      const target = onto && onto.id === p.id;
       g.append(svgEl('circle', { r: target ? 9 : 7, fill: 'transparent',
-        stroke: target ? '#5ff0b0' : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
+        stroke: target ? (onto.ok ? '#5ff0b0' : '#ff6b8a')
+              : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
         'stroke-width': target ? 1.6 : 1, 'stroke-dasharray': '3 3' }));
     } else {
       const mod = modules[held.type] || {};
+      if (onto && onto.id === p.id)
+        g.append(svgEl('circle', { r: 12, fill: 'none', stroke: '#ff6b8a', 'stroke-width': 1.2,
+                                   'stroke-dasharray': '3 3' }));
       if (refitting.sel === p.id) {
         // The rotate ring. Dragging it points the module; dragging the module itself moves
         // it, so the two gestures never have to be told apart.
@@ -934,6 +941,7 @@ function drawRefit() {
   if (carried) {
     const ghost = svgEl('g', { transform: `translate(${lift.at.x} ${lift.at.y})`, opacity: .95 });
     ghost.append(moduleIcon(carried, true));
+    // No point near enough: this is going in the hold, and says so.
     if (!onto) ghost.append(svgEl('circle', { r: 11, fill: 'none', stroke: '#ff6b8a',
                                               'stroke-width': 1, 'stroke-dasharray': '2 2' }));
     svg.append(ghost);
@@ -1020,8 +1028,13 @@ refitEl.addEventListener('pointerup', e => {
   // simply stays in the hold, which is where it already was.
   if (drag.type !== undefined) {
     if (drag.moved) {
-      const onto = drag.at && refitDropAt(refitting.fit, where, null, drag.at, drag.type);
-      if (onto) { refitting.fit.push({ install: onto, type: drag.type, rot: 0 }); refitting.pick = null; }
+      // Only a point that will take it. Aimed at one that will not, the module stays in the
+      // hold rather than being put somewhere else that happened to be free.
+      const onto = drag.at && refitTargetAt(refitting.fit, where, null, drag.at, drag.type);
+      if (onto && onto.ok) {
+        refitting.fit.push({ install: onto.id, type: drag.type, rot: 0 });
+        refitting.pick = null;
+      }
     } else {
       // Tapped rather than dragged: choose it, and the next tap on a free point puts it
       // there. Handled here rather than by a click listener, because capturing the pointer
@@ -1052,12 +1065,14 @@ refitEl.addEventListener('pointerup', e => {
   // Let go. It goes to the nearest point that will take it, or into the hold if there is
   // none near enough -- so a drop does not have to be accurate, only unambiguous.
   const p = drag.at || svgPoint(e);
-  const onto = p ? refitDropAt(refitting.fit, where, held, p) : drag.install;
-  if (onto) held.install = onto;
-  else {
+  const onto = p ? refitTargetAt(refitting.fit, where, held, p) : { id: drag.install, ok: true };
+  if (!onto) {
+    // Nowhere near a point: into the hold.
     refitting.fit = refitting.fit.filter(f => f !== held);
     if (refitting.sel === drag.install) refitting.sel = null;
-  }
+  } else if (onto.ok) held.install = onto.id;
+  // Aimed at a point that will not take it: it goes back where it came from, which is the
+  // one answer that is neither a surprise move nor an unasked-for removal.
   drawRefit();
 });
 
