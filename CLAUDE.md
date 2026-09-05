@@ -170,15 +170,23 @@ back from the border, and one landing across the mouth would seal the starting t
 everybody, for good. The other five get whatever they get: a decree is for what a set
 piece actually needs, not for tidiness.
 
-**Sites are sown ahead of loading, not placed while a cell loads.** A cell wants to be
-surrounded by neighbours *before* it loads, because loading fixes it forever. Leaving that
-to `bindCell` -- placing neighbours while the cell is already being loaded -- fails in a way
-that compounds: `loadCell` accepts anything that merely misses the far box, which permits a
-radius near 27,000, and a cell that size then vetoes new sites for 40,000 units around
-itself, so nothing can subdivide near it and the next cell out is bigger still. Measured
-before the fix: 29 attempts to tidy a cell, 2 successes, 1,058 refusals of which every one
-was admissibility, and a median loaded radius of 4,955 against a 3,240 target. Sowing over
-the area of interest first brings the median to 2,701 and the worst to 3,672.
+**A cell must finish binding before it loads, or it sterilises its neighbourhood.** No
+cell has to be any particular size — too big and we subdivide, too small is fine — but
+subdividing only works while a cell is still potential. A loaded cell's corners are
+protected, and admissibility refuses any site nearer a corner than the cell's own site is,
+so one cell loaded at 21,000 across forbids new sites for 21,000 units around every corner
+it has. Nothing near it can be subdivided again, so its neighbours load oversized too, and
+it spreads. Letting one through cost 27,577 refused placements against 27 accepted, and 3
+cells in 463 that could be tidied at all. `loadCell` therefore refuses a cell `bindCell`
+could not bring under `CELL_MAX`; it stays potential and is tried again next sweep. Ground
+with nothing on it for a second is recoverable, a sterilised neighbourhood is not.
+
+**Closing a cell and subdividing it are the same move.** `bindCell` goes at whichever
+corner is furthest from the site, over and over. A corner still out on the far clipping box
+means nothing bounds the cell that way; a corner at 9,000 means the cell is merely too big;
+both are answered by a site between here and there. Sowing sites over the area of interest
+in advance also produces compact cells, and was tried, but it commits partition for ground
+nobody has reached — which is ground a set piece can no longer claim.
 
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off

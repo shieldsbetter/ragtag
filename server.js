@@ -552,31 +552,38 @@ function admissible(x, y) {
   return true;
 }
 
-// Close a cell by placing sites where it is actually open, rather than scattering a ring
-// and hoping. A vertex still out on the far box means nothing bounds the cell in that
-// direction, so that is exactly where the next site goes. Directed placement terminates;
-// a blind ring leaves gaps that another blind ring is no more likely to fill.
+// Bind a cell by going at whichever corner is furthest out, over and over, until none of
+// them reaches further than a cell ought to. Closing and subdividing are the same move: a
+// corner still out on the far box means nothing bounds the cell that way, a corner at 9,000
+// means the cell is simply too big, and either way the answer is a site between here and
+// there. A placement at CELL_R cuts that direction to about half, so every accepted site is
+// real progress and the loop ends.
+//
+// No cell has to be any particular size. This is about what they average: too big and we
+// subdivide, too small is fine and left alone.
 function bindCell(s) {
-  for (let pass = 0; pass < 40; pass++) {
+  for (let pass = 0; pass < 60; pass++) {
     const poly = cellOf(s);
-    const open = poly.filter(v => Math.hypot(v[0] - s.x, v[1] - s.y) > CELL_MAX);
-    if (!open.length) return true;
-    // Work on the worst corner first, so a long spur is closed before a marginal one.
-    let v = open[0];
-    for (const q of open)
-      if (Math.hypot(q[0] - s.x, q[1] - s.y) > Math.hypot(v[0] - s.x, v[1] - s.y)) v = q;
+    let v = null, far = 0;
+    for (const q of poly) {
+      const d = Math.hypot(q[0] - s.x, q[1] - s.y);
+      if (d > far) { far = d; v = q; }
+    }
+    if (far <= CELL_MAX) return true;
     const a = Math.atan2(v[1] - s.y, v[0] - s.x) + rand(-0.35, 0.35);
-    const d = CELL_R * (1 + rand(-CELL_JITTER, CELL_JITTER));
+    // Never past the corner being cut: for a cell that is merely too big the site belongs
+    // inside it, where the only ground it takes is that cell's own.
+    const d = Math.min(far * 0.9, CELL_R * (1 + rand(-CELL_JITTER, CELL_JITTER)));
     const x = s.x + Math.cos(a) * d, y = s.y + Math.sin(a) * d;
     // Crowding is relaxed as the attempts wear on: a cell that will not close is worse
     // than a mesh with one short edge in it.
-    const room = CELL_R * (0.5 - 0.4 * pass / 40);
+    const room = CELL_R * (0.5 - 0.4 * pass / 60);
     const near = nearestSite(x, y);
     if (near && Math.hypot(near.x - x, near.y - y) < room) continue;
     if (!admissible(x, y)) continue;
     addSite(x, y);
   }
-  return cellBounded(s);
+  return cellRadius(s) <= CELL_MAX;
 }
 
 // Give it a shape, then give it a kind. The kind is chosen from whatever the registry
@@ -587,9 +594,15 @@ function bindCell(s) {
 // refuse every site placed anywhere near it -- one cell loaded early and open would
 // sterilise its whole neighbourhood, and nothing could ever close it again.
 function loadCell(s) {
-  // Compactness is the goal; boundedness is the requirement. A cell that will not tidy up
-  // any further is still fit to load, so long as it closes.
-  bindCell(s);
+  // Binding has to succeed before the cell loads, and this is not fussiness. A loaded
+  // cell's corners are protected, and admissibility refuses any site nearer a corner than
+  // its own site is -- so a cell loaded at 21,000 across forbids new sites for 21,000
+  // units around every corner it has, and nothing near it can be subdivided ever again.
+  // Letting one through cost 27,577 refused placements against 27 accepted, and three
+  // cells in 463 that could be tidied at all. A cell that will not bind is left potential
+  // and tried again next sweep; ground with nothing on it for a second is recoverable,
+  // and a sterilised neighbourhood is not.
+  if (!bindCell(s)) return null;
   if (!cellBounded(s)) return null;
   s.kind = s.want || BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
   meshDirty = true;
@@ -1126,39 +1139,11 @@ const pendingCells = [];
 const queuedCells = new Set();        // in memory only: a restart before generating must requeue
 let cellTick = 0;
 
-// Scatter sites over the ground around an anchor, out past the area of interest so that
-// cells inside it are already surrounded by the time they load. Spacing is one cell, and a
-// site is dropped only where there is actually room -- so this settles down to nothing
-// once an area is sown, and re-sowing costs the checks and no more.
-// Two rings past the area of interest. Every site sown is partition committed in advance,
-// which is ground a set piece can no longer claim, so this wants to be as small as it can
-// be -- but one ring measurably is not enough: cells load with their sites out at the edge
-// of the sown ring and are never fully surrounded, and the median radius goes from 2,701
-// to 3,531 with the worst at 6,868.
-const SOW_R = AOI_R + CELL_R * 2;
-function sowSites(ax, ay) {
-  for (let x = ax - SOW_R; x <= ax + SOW_R; x += CELL_R)
-    for (let y = ay - SOW_R; y <= ay + SOW_R; y += CELL_R) {
-      const px = x + rand(-CELL_R * 0.3, CELL_R * 0.3), py = y + rand(-CELL_R * 0.3, CELL_R * 0.3);
-      const near = nearestSite(px, py);
-      if (near && Math.hypot(near.x - px, near.y - py) < CELL_R * 0.75) continue;
-      if (!admissible(px, py)) continue;    // never take ground from a cell already loaded
-      addSite(px, py);
-    }
-}
 function manageCells() {
   if (cellTick++ % 30 === 0) {
     const anchors = shipAnchors();
-    // Sow first, load second. Sites are cheap and decide nothing until their cell loads,
-    // and a cell surrounded by neighbours before it loads comes out the size it should be.
-    // Leaving it to bindCell instead -- placing neighbours while the cell is already being
-    // loaded -- was far too late: loadCell accepts anything that merely misses the far box,
-    // which permits a radius near 27,000, and a cell that size then vetoes new sites for
-    // 40,000 units around itself, so nothing could subdivide near it and the next cell out
-    // was bigger still. Over one flight, 29 attempts to tidy a cell, 2 successes, and 1,058
-    // refusals of which every single one was admissibility.
-    for (const a of anchors) sowSites(a.x, a.y);
-    // ...then grow the mesh over the ground anyone is near...
+    // Grow the mesh over the ground anyone is near. Nothing is partitioned ahead of this:
+    // a cell is bound, and its neighbours placed, at the moment it is first asked for.
     for (const a of anchors)
       for (let x = a.x - AOI_R; x <= a.x + AOI_R; x += CELL_R / 2)
         for (let y = a.y - AOI_R; y <= a.y + AOI_R; y += CELL_R / 2) siteFor(x, y);
