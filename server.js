@@ -308,15 +308,18 @@ const BIOME_NAMES = ['open', 'dense'];
 const SCREEN = 1732;                  // the unit content is drawn against; see CLAUDE.md
 const TOWN_SIDE = 2.12 * SCREEN;      // a regular hexagon; area goes as the side squared,
                                       // so 2.12 screens is half the three-screen one it was
-const TOWN_R = 2400;                  // the asteroid's mean radius. It has to clear the
-                                      // cell's apothem, jitter and offset included, or the
-                                      // rock crosses into a neighbour's ground
-const TOWN_CAVE = 1730;               // the cavern hollowed out of it: about half its area
-const TOWN_SHIFT = 350;               // how far the rock sits off the origin. The cavern is
-                                      // centred on the spawn, the rock is not, which is what
-                                      // makes one side thick enough to be worth tunnelling
+const TOWN_CAVE = 1730;               // the cavern: a bit over two screens across
+const TOWN_SHIFT = 350;               // how far the cavern sits back from the origin, away
+                                      // from the tunnel, so there is rock worth tunnelling
+                                      // through on the way out and a thick back wall behind
 const TOWN_TUNNEL = 380;              // clear width of the passage out
 const TOWN_OUT = -Math.PI / 4;        // which way it runs: up and to the right
+const TOWN_DOOR = 0.45;               // half-width of the wedge the rock stands back in
+const TOWN_STAND = 2400;              // ...and how far out it stands there. The mouth has to
+                                      // stay clear of the border by more than a blob's reach
+const TOWN_LAP = 1.05;                // everywhere else it laps over the border instead, so
+                                      // a neighbour's rock merges into it rather than
+                                      // leaving the town sitting in a moat
 
 // A regular hexagon's edge normals -- where the neighbouring sites go -- fall at 30, 90,
 // 150 ... which is what makes the town's cell come out as the hexagon it claims.
@@ -345,12 +348,36 @@ function wobbleRing(cx, cy, r, sides, wobble, rnd) {
 // The tunnel is cut as one long slab that starts inside the cavern and ends well outside
 // the rock, so the two cuts join into a single opening instead of leaving a plug standing
 // at the cavern wall.
+// How far the cell reaches in a direction. The town's cell is the authored hexagon, whose
+// edge normals are at 30, 90, 150 ... so the support distance is the apothem over the
+// cosine to the nearest of them -- no polygon needed.
+function townReach(a) {
+  let best = Infinity;
+  for (let k = 0; k < 6; k++) {
+    const c = Math.cos(angleDiff(a, Math.PI / 6 + k * Math.PI / 3));
+    if (c > 0.01) best = Math.min(best, TOWN_SIDE * APOTHEM / c);
+  }
+  return best;
+}
+
 function townMatter() {
   const rnd = siteRng({ x: 0, y: 0 });
   const ux = Math.cos(TOWN_OUT), uy = Math.sin(TOWN_OUT);
-  const rock = [wobbleRing(ux * TOWN_SHIFT, uy * TOWN_SHIFT, TOWN_R, 28, 0.22, rnd)];
-  const cave = [wobbleRing(0, 0, TOWN_CAVE, 36, 0.1, rnd)];
-  const L = TOWN_R * 2 + TOWN_SHIFT, w = TOWN_TUNNEL / 2, px = -uy, py = ux;
+  // The rock laps over its own cell everywhere except a wedge around the tunnel, where it
+  // stands well back. Overhang is how matter merges across a seam, so the town reads as
+  // part of the rock around it rather than an island in a clearing -- but a blob landing
+  // across the mouth would seal the starting town for good, so the doorway keeps its moat.
+  const ring = [];
+  for (let k = 0; k < 40; k++) {
+    const a = (k / 40) * Math.PI * 2;
+    const off = Math.abs(angleDiff(a, TOWN_OUT));
+    const t = Math.min(1, Math.max(0, (off - TOWN_DOOR) / TOWN_DOOR));
+    const r = (TOWN_STAND + (townReach(a) * TOWN_LAP - TOWN_STAND) * t) * (1 + (rnd() - 0.5) * 0.16);
+    ring.push([Math.cos(a) * r, Math.sin(a) * r]);
+  }
+  const rock = [ring];
+  const cave = [wobbleRing(-ux * TOWN_SHIFT, -uy * TOWN_SHIFT, TOWN_CAVE, 36, 0.1, rnd)];
+  const L = 5000, w = TOWN_TUNNEL / 2, px = -uy, py = ux;
   const tunnel = [[
     [px * w, py * w], [ux * L + px * w, uy * L + py * w],
     [ux * L - px * w, uy * L - py * w], [-px * w, -py * w],
