@@ -385,18 +385,28 @@ const pendingNests = [];
 // somebody comes near and packs itself away when they leave, so an unvisited corner of
 // the map costs one record and no ships.
 const encounters = [];
-const ENC_HYSTERESIS = 1.5;           // leave wider than you arrive, or it thrashes on the edge
+// It builds when a ship is inside its own area, and holds until nobody could be looking:
+// past MAX_VIEW of every ship *and* every camera, with room to spare. Unloading anywhere
+// nearer means ships blinking out in front of you, which is what an area of interest is
+// for in the first place. Spawning keys on ships alone, so panning the camera across an
+// empty corner does not populate it.
+const ENC_KEEP = MAX_VIEW + 500;
+// If a script will not let go -- a guard wedged behind rock, say -- it is overruled
+// eventually. A group that cannot finish tidying up is not a reason to hold a nest
+// resident for the life of the process.
+const ENC_PATIENCE = 25;
 
 // Every hook is optional; this is what an encounter does if its script says nothing.
 const ENCOUNTER = {
   spawn() {},                         // build your members
   pack() {},                          // remember what survived, before they are removed
   think() {},                         // group rules, once a tick -- and where orders are given
+  ready: () => true,                  // may we pack up? nobody is watching, but you decide
 };
 
 function addEncounter(kind, x, y, r) {
   encounters.push({ ...ENCOUNTER, ...SCRIPTS[kind], kind, x, y, r,
-                    members: new Set(), aggro: new Set(), live: false, state: {} });
+                    members: new Set(), aggro: new Set(), live: false, alone: 0, state: {} });
 }
 
 // An encounter joins a member to itself, so a ship always knows which group it belongs to
@@ -408,17 +418,31 @@ function encShip(e, at, hull) {
   return s;
 }
 
+// How near the closest pair of eyes is: a crewed hull, or a camera looking.
+function watched(e) {
+  let d = Infinity;
+  for (const s of ships) if (crewed(s)) d = Math.min(d, Math.hypot(s.x - e.x, s.y - e.y));
+  for (const p of players.values())
+    if (p.view && p.ws && p.ws.readyState === 1) d = Math.min(d, Math.hypot(p.view.x - e.x, p.view.y - e.y));
+  return d;
+}
+
 function manageEncounters(dt) {
   for (const e of encounters) {
-    let near = Infinity;
-    for (const s of ships) if (crewed(s)) near = Math.min(near, Math.hypot(s.x - e.x, s.y - e.y));
-    if (!e.live && near <= e.r) { e.spawn(e); e.live = true; }
-    else if (e.live && near > e.r * ENC_HYSTERESIS) {
+    if (!e.live) {
+      let near = Infinity;
+      for (const s of ships) if (crewed(s)) near = Math.min(near, Math.hypot(s.x - e.x, s.y - e.y));
+      if (near <= e.r) { e.spawn(e); e.live = true; e.alone = 0; }
+      continue;
+    }
+    e.think(e, dt);
+    // Out of sight, and the group says it is done -- or has had long enough to say so.
+    e.alone = watched(e) > ENC_KEEP ? e.alone + dt : 0;
+    if (e.alone > 0 && (e.ready(e) || e.alone > ENC_PATIENCE)) {
       e.pack(e);
       for (const s of e.members) ships.delete(s);
-      e.members.clear(); e.aggro.clear(); e.live = false;
+      e.members.clear(); e.aggro.clear(); e.live = false; e.alone = 0;
     }
-    if (e.live) e.think(e, dt);
   }
 }
 
@@ -456,6 +480,17 @@ const SCRIPTS = {
       e.state.cache = [...e.members].some(s => s.hull === CACHE);
       e.state.guards = [...e.members].filter(s => s.hull === FIGHTER).length;
       e.state.cacheShip = null;
+    },
+
+    // Not while the guard is still out. A nest that vanishes mid-chase is a nest that
+    // was never really there; letting it finish standing down costs a few seconds of
+    // nobody watching, which is exactly what we have.
+    ready(e) {
+      if (e.aggro.size) return false;
+      const home = e.state.cacheShip;
+      const hx = home ? home.x : e.x, hy = home ? home.y : e.y;
+      return [...e.members].every(s => s.hull.ai !== 'fighter'
+        || Math.hypot(s.x - hx, s.y - hy) < GUARD_ORBIT * 3);
     },
 
     think(e) {
