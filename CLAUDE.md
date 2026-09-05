@@ -316,9 +316,18 @@ destination is a carrier shoving at rock forever. It only counts as stuck while 
 burning — a carrier spends its first several seconds turning, motionless and healthy, and
 an earlier version of this rule cancelled every order before the ship had moved.
 
+**Anything moving in a straight line is described, not reported.** A rock, a loose grain
+and a shell in flight are each told to a client once — where it was, when, and how fast —
+and the client works out the rest. Nothing about one crosses the wire again unless the line
+it is travelling on changes, which for a rock or a shell is never and for a grain is only
+while a beam has hold of it. Ships are the exception and are still sent every tick, because
+they accelerate and steer. Measured: 12.75 KB/s to 0.90 KB/s with a fight going on.
+
 **Bandwidth is compression-bound, not field-bound.** Snapshots are deflated with a
 shared context. Removing redundant fields buys almost nothing; digits do, because
-entropy is what survives. Measure before restructuring the protocol.
+entropy is what survives. Measure before restructuring the protocol: trimming the three
+fields of a rock that never change saved 3% of the wire, and not sending its position at
+all saved 93%.
 
 **Test servers leak, and this box has no RAM to spare.** Every throwaway server holds
 60-140MB, and any run that dies before its cleanup line leaves one behind. Thirty-eight

@@ -1201,6 +1201,9 @@ function rebuildWalls() {
   }
 }
 
+// What a socket has been told about each kind of drifting thing, and at which stamp.
+const newDrift = () => Object.fromEntries(DRIFTERS.map(([k]) => [k, new Map()]));
+
 const pendingNests = [];
 
 // A ship sent to a marker carries the arming with it, and keeps it until it arrives or is
@@ -1221,6 +1224,57 @@ function armedArrivals() {
     s.arm = null;
     p.ws.send(JSON.stringify({ t: 'interact', kind: m.kind, ship: s.id, mark: m.key }));
   }
+}
+
+// ---- drifting things ----
+//
+// A rock is set moving once and never touched again: nothing accelerates it, nothing
+// steers it, and the two things that could -- a shell and blocking stone -- destroy it
+// instead. So its whole future is one line, and saying it thirty times a second says the
+// same thing thirty times.
+//
+// It is sent once, as where it was and how fast, and the client works out the rest. It is
+// heard from again only when it stops existing. Measured before doing this: rocks were 68%
+// of the wire, and trimming the fields that never change saved 3% of it, because deflate
+// had already eaten the repetition -- the coordinates were the whole cost, and the only way
+// to stop paying for coordinates is to stop sending them.
+// Three lists, one rule. A thing is described once and heard from again only if the line
+// it is travelling on changes -- which for a rock or a shell is never, and for a grain is
+// only while a beam has hold of it. `stamp` counts the times its line changed, so a client
+// knows whether what it was told is still true.
+const DRIFTERS = [
+  ['rock', () => rocks, r => [r.id, Math.round(r.x), Math.round(r.y), Math.round(r.vx),
+                              Math.round(r.vy), +r.a.toFixed(2), +r.spin.toFixed(2),
+                              r.size, r.seed, r.rich | 0]],
+  ['ore', () => ore, o => [o.id, Math.round(o.x), Math.round(o.y), Math.round(o.vx),
+                           Math.round(o.vy), +o.a.toFixed(2), +o.spin.toFixed(2), o.mod || 0]],
+  ['shot', () => bullets, b => [b.id, Math.round(b.x), Math.round(b.y),
+                                Math.round(b.vx), Math.round(b.vy)]],
+];
+
+function syncDrift(p) {
+  const v = p.view, R2 = STREAM_R * STREAM_R;
+  const near = o => { const dx = o.x - v.x, dy = o.y - v.y; return dx * dx + dy * dy < R2; };
+  const now = +performance.now().toFixed(1);
+  const add = {}, del = {};
+  for (const [kind, list, pack] of DRIFTERS) {
+    const known = p.drift[kind];
+    const adds = [], dels = [];
+    const seen = new Set();
+    for (const e of list()) {
+      if (!near(e)) continue;
+      seen.add(e.id);
+      const stamp = e.stamp | 0;
+      if (known.get(e.id) === stamp) continue;      // still on the line we described
+      known.set(e.id, stamp);
+      adds.push([...pack(e), now]);
+    }
+    for (const id of known.keys()) if (!seen.has(id)) { known.delete(id); dels.push(id); }
+    if (adds.length) add[kind] = adds;
+    if (dels.length) del[kind] = dels;
+  }
+  if (Object.keys(add).length || Object.keys(del).length)
+    p.ws.send(JSON.stringify({ t: 'drift', add, del }));
 }
 
 // ---- refit ----
@@ -2495,7 +2549,7 @@ function tractor(s, dt) {
     for (const id of had) {
       if (keep.includes(id)) continue;
       const prev = ore.find(o => o.id === id);
-      if (prev && prev.held === s.id) prev.held = null;
+      if (prev && prev.held === s.id) { prev.held = null; prev.stamp = (prev.stamp | 0) + 1; }
     }
   };
   if (!crewed(s) || !beams) return drop([]);
@@ -2531,8 +2585,12 @@ function tractor(s, dt) {
     s.beams.push(best.id);
     // Straight at the ship, overriding whatever drift it had: a beam that merely nudged
     // would lose grains to their own momentum and look broken doing it.
+    const wasx = best.vx, wasy = best.vy;
     best.vx = (s.x - best.x) / bestD * TRACTOR_PULL;
     best.vy = (s.y - best.y) / bestD * TRACTOR_PULL;
+    // A beam is the only thing that bends a grain off its line, so it is the only thing
+    // that has to be described again.
+    if (Math.abs(best.vx - wasx) > 1 || Math.abs(best.vy - wasy) > 1) best.stamp = (best.stamp | 0) + 1;
   }
   drop(s.beams);
 }
@@ -2704,11 +2762,6 @@ function snapshotFor(p) {
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
-    bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
-    rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y),
-      a: +r.a.toFixed(2), size: r.size, seed: r.seed, ...(r.rich ? { rich: r.rich } : {}) })),
-    ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y),
-                                      a: +o.a.toFixed(2), ...(o.mod ? { m: o.mod } : {}) })),
     ...(kills.length ? { kills: kills.filter(near) } : {}),
   });
 }
@@ -2776,13 +2829,14 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), busy: null, view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), drift: newDrift(), busy: null, view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
     p.walls = new Map();                      // a new socket has been sent no terrain yet
     p.art = new Set();
     p.marks = new Set();
+    p.drift = newDrift();
     p.busy = null;                            // the interaction this session has open
 
     // Returning players keep the fleet they left; a new commander is issued one. No ship
@@ -2905,6 +2959,7 @@ setInterval(() => {
   for (const p of players.values()) {
     if (!p.ws || p.ws.readyState !== 1) continue;
     if (streamChunks) syncWalls(p);
+    syncDrift(p);
     p.ws.send(snapshotFor(p));
   }
   kills.length = 0;                 // said once, to whoever was near enough to see it

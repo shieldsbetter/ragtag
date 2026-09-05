@@ -115,6 +115,26 @@ const scenery = new Map();
 // Somewhere you can do something, offered by a set piece. It carries its own icon, so the
 // client draws a thing it cannot name and does not need to.
 const marks = new Map();
+// Things that drift: rocks, loose ore, shells in flight. Each was described to us once --
+// where it was, when, and how fast -- and we work out the rest, so nothing about one
+// crosses the wire again unless the line it is travelling on changes.
+const drift = { rock: new Map(), ore: new Map(), shot: new Map() };
+
+// Where one is at a moment on the render clock. Server time is mapped onto this client's
+// timeline by the same offset the snapshots use, so a description and a snapshot agree
+// about when "now" is.
+const driftAt = (d, clock) => {
+  const dt = (clock - (d.t0 + clockOffset)) / 1000;
+  return { ...d, x: d.x0 + d.vx * dt, y: d.y0 + d.vy * dt, a: d.a0 + d.spin * dt };
+};
+const driftList = (kind, clock) => [...drift[kind].values()].map(d => driftAt(d, clock));
+
+// What each kind's description is made of, in the order the server packs it.
+const DRIFT_SHAPE = {
+  rock: ['id', 'x0', 'y0', 'vx', 'vy', 'a0', 'spin', 'size', 'seed', 'rich', 't0'],
+  ore: ['id', 'x0', 'y0', 'vx', 'vy', 'a0', 'spin', 'm', 't0'],
+  shot: ['id', 'x0', 'y0', 'vx', 'vy', 't0'],
+};
 
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
@@ -189,6 +209,19 @@ ws.onmessage = e => {
       scenery.set(k, { path, x0, y0, x1, y1 });
     }
     for (const k of m.del) scenery.delete(k);
+    return;
+  }
+  if (m.t === 'drift') {
+    for (const [kind, ids] of Object.entries(m.del || {}))
+      for (const id of ids) drift[kind].delete(id);
+    for (const [kind, rows] of Object.entries(m.add || {})) {
+      const shape = DRIFT_SHAPE[kind];
+      for (const row of rows) {
+        const d = { a0: 0, spin: 0 };
+        shape.forEach((f, i) => d[f] = row[i]);
+        drift[kind].set(d.id, d);
+      }
+    }
     return;
   }
   if (m.t === 'marks') {
@@ -273,9 +306,6 @@ function blend(older, newer, t) {
       a: lerpAngle(p.a, e.a, t),
       tu: e.tu.map((v, i) => p.tu?.[i] === undefined ? v : lerpAngle(p.tu[i], v, t)),
     })),
-    rocks: pair(newer.rocks, byId(older.rocks), (p, e) => ({ a: lerpAngle(p.a, e.a, t) })),
-    ore: pair(newer.ore || [], byId(older.ore || []), (p, e) => ({ a: lerpAngle(p.a, e.a, t) })),
-    bullets: pair(newer.bullets, byId(older.bullets), () => ({})),
   };
 }
 
@@ -2187,8 +2217,8 @@ function draw() {
   if (dev) window.__cam = cam;
   if (dev) window.__sel = [...selection];
   if (dev) window.__ws = ws;      // so a test can send an order the way the page would
-  if (dev) window.__ore = state.ore || [];
-  if (dev) window.__rocks = state.rocks;
+  if (dev) window.__ore = driftList('ore', performance.now() - RENDER_DELAY);
+  if (dev) window.__rocks = driftList('rock', performance.now() - RENDER_DELAY);
   if (dev) window.__walls = walls;
   if (dev) window.__scenery = scenery;
   if (dev) window.__marks = marks;
@@ -2252,7 +2282,11 @@ function draw() {
 
   const at = o => [o.x - cam.x, o.y - cam.y];
 
-  for (const r of state.rocks) {
+  // Worked out from their keyframes rather than read off a snapshot: a rock's position is
+  // not something the server has an opinion about between the moment it appears and the
+  // moment it stops existing.
+  const clock = now - RENDER_DELAY;
+  for (const r of driftList('rock', clock)) {
     if (!onScreen(r.x, r.y, r.size * 26)) continue;
     const [x, y] = at(r);
     poly(getRock(r.seed, r.size), x, y, r.a, '#8fa6c8');
@@ -2267,7 +2301,7 @@ function draw() {
 
   const bs = 3 / cam.zoom;
   ctx.fillStyle = '#ffd76a';
-  for (const b of state.bullets) {
+  for (const b of driftList('shot', clock)) {
     if (!onScreen(b.x, b.y, 4)) continue;
     const [x, y] = at(b);
     ctx.fillRect(x - bs / 2, y - bs / 2, bs, bs);
@@ -2287,7 +2321,7 @@ function draw() {
     poly(MARKER.map(([x, y]) => [x * pulse, y * pulse]), mx, my, now / 1400, '#5ff0b0', true, 1.2);
   }
 
-  for (const o of state.ore || []) {
+  for (const o of driftList('ore', clock)) {
     if (!onScreen(o.x, o.y, 20)) continue;
     if (!o.m) { poly(ORE, o.x - cam.x, o.y - cam.y, o.a, ORE_COLOR, true, 1.2); continue; }
     // Salvage, drawn as a marker rather than as an object: a coloured tile with the
@@ -2316,7 +2350,7 @@ function draw() {
   for (const s of state.ships) {
     // A hull may be running more than one, so this is a list of grains rather than one.
     for (const held of s.bm || []) {
-    const grain = (state.ore || []).find(o => o.id === held);
+    const grain = drift.ore.has(held) ? driftAt(drift.ore.get(held), now - RENDER_DELAY) : null;
     if (!grain) continue;
     const dx = grain.x - s.x, dy = grain.y - s.y, d = Math.hypot(dx, dy) || 1;
     const px = -dy / d, py = dx / d;                   // across the beam
