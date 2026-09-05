@@ -1110,10 +1110,14 @@ function armedArrivals() {
 // A ship may be reconfigured while it is inside the settlement's cavern. There is no
 // station object yet; being in the one place in the world that is enclosed and safe stands
 // in for docking, and swapping it for a real station later changes only this function.
+// Where a hull may be worked on: inside the reach of something offering to work on it.
+// Not "somewhere in the cavern" any more -- the yard is the place, the marker is the way
+// in, and the rule the order is checked against is the same one that opened the sheet.
 function canRefit(s) {
   if (s.hull !== CARRIER || !crewed(s)) return false;
-  const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
-  return Math.hypot(s.x - cx, s.y - cy) < TOWN_CAVE;
+  for (const m of marks.values())
+    if (m.kind === 'refit' && Math.hypot(s.x - m.x, s.y - m.y) <= m.r) return true;
+  return false;
 }
 
 // What a layout costs, recovered from the difference between what the ship has and what it
@@ -2529,7 +2533,7 @@ function snapshotFor(p) {
         ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
             ...(s.repairing !== null ? { rp: s.repairing } : {}),
             ...(s.repairFocus.length ? { rf: s.repairFocus } : {}), or: s.ore,
-            hold: s.hold, ...(canRefit(s) ? { dock: 1 } : {}) }
+            hold: s.hold }
         : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of

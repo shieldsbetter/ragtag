@@ -112,6 +112,10 @@ and leave when you go. The client draws lines and has no idea what any of it dep
 matching artwork has to be shipped for a new set piece to look like something, and nothing
 about it collides, merges or is matter.
 
+**The yard is where a hull is worked on, and the marker is the only way in.** Refitting is
+checked against the reach of something offering to do it, not against being somewhere in
+the cavern, so the rule the order is validated by is the same one that opened the sheet.
+
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit *interaction markers*: a point, a reach, a kind, and
 an icon the marker carries itself. Tapping one sends the selection there *armed*; arriving

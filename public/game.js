@@ -756,17 +756,6 @@ function buildDetails(ships) {
         }
       }
       if (PANELS[openTab].guns && (s.ft || []).length) body.append(gunGrid(s));
-      // Offered only where it can be done. The server decides that -- it sends `dock` when
-      // the ship is somewhere a refit is allowed -- so the button cannot appear anywhere
-      // the order would be refused.
-      if (PANELS[openTab].guns && s.dock) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'refitbtn';
-        b.textContent = 'REFIT';
-        b.addEventListener('click', () => openRefit(s.id));
-        body.append(b);
-      }
       for (const [kind, label] of PANELS[openTab].rows) {
         const only = kind.startsWith('repair:') && kind.slice(7);
         if (only && !(s.ft || []).some(f => f[1] === only)) continue;
