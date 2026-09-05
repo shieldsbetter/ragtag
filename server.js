@@ -369,10 +369,15 @@ function seedTown() {
   if (sites.length) return;
   const home = addSite(0, 0);
   home.kind = 'town';                 // loaded from the first instant, so nothing may crowd it
+  // The six reflections that make the cell a hexagon are also the town's neighbours, and
+  // they are decreed open. A dense biome's blobs reach nearly 400 units past their own
+  // cell, which is further than the asteroid stands back from the border -- one of them
+  // landing across the tunnel mouth would seal the starting town for everybody, for good.
+  // An open biome's reach about 175, which the standoff clears.
   const reach = 2 * TOWN_SIDE * APOTHEM;
   for (let k = 0; k < 6; k++) {
     const a = Math.PI / 6 + k * Math.PI / 3;
-    addSite(Math.cos(a) * reach, Math.sin(a) * reach);
+    addSite(Math.cos(a) * reach, Math.sin(a) * reach, 'open');
   }
   meshDirty = true;
 }
@@ -402,8 +407,13 @@ function saveSites() {
   } catch { /* unwritable store: the world runs, it just will not survive a restart */ }
 }
 
-function addSite(x, y) {
-  const s = { x: +x.toFixed(1), y: +y.toFixed(1), kind: null };
+// `want` is a biome the site will take when it loads, rather than one it has: a set piece
+// says what it wants around it, but the cell still has to be bound and loaded like any
+// other. Assigning `kind` up front would mark an unbounded cell as loaded, and the
+// admissibility test would then read its phantom corners as ground worth protecting and
+// refuse every site near it -- sterilising the whole neighbourhood for good.
+function addSite(x, y, want = null) {
+  const s = { x: +x.toFixed(1), y: +y.toFixed(1), kind: null, want };
   sites.push(s);
   meshVersion++; meshDirty = true;
   return s;
@@ -524,7 +534,7 @@ function loadCell(s) {
   // any further is still fit to load, so long as it closes.
   bindCell(s);
   if (!cellBounded(s)) return null;
-  s.kind = BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
+  s.kind = s.want || BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
   meshDirty = true;
   return s;
 }

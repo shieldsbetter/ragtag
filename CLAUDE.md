@@ -138,6 +138,14 @@ chunk left the client's window, while its far end was still in plain sight. A wa
 is its lowest-ordered member unit, which holds still while its membership does, so a
 rebuild does not make every wall look new and get sent again.
 
+**A set piece asks for its neighbours' biomes, it does not assign them.** A site carries
+`want`: a biome it will take when it loads. Writing `kind` up front instead would mark a
+cell as loaded while its shape is still unbounded, and the admissibility test would read
+its phantom corners as ground worth protecting and refuse every site near it. The town
+decrees all six of its neighbours `open`, because a dense biome's blobs reach nearly 400
+units past their own cell — further than the asteroid stands back from the border — and
+one landing across the tunnel mouth would seal the starting town for everybody, for good.
+
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off
 a convex cell always takes a corner with it. Cull that check by the cell's own reach
