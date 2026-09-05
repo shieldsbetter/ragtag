@@ -116,6 +116,17 @@ about it collides, merges or is matter.
 checked against the reach of something offering to do it, not against being somewhere in
 the cavern, so the rule the order is validated by is the same one that opened the sheet.
 
+**A set piece is versioned and lays itself out again in place.** Its claim is permanent, its
+contents are not: bump `SET_VERSION` and every cell of that kind rebuilds what is inside it
+on worlds that already exist. Everything deposited carries the cell that put it there, which
+is the only way to tell one cell's rock from a neighbour's after both have overhung the same
+chunk — and the only way to take back what the previous version left.
+
+**Adding a field to a chunk file must not bump `WALL_FORMAT`.** Only set-piece cells ever
+lay themselves out again, so discarding chunk files takes a biome's rock away for good on
+ground somebody has already explored. `WALL_OLDEST` is the oldest still read, and fields
+added since default to empty.
+
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit *interaction markers*: a point, a reach, a kind, and
 an icon the marker carries itself. Tapping one sends the selection there *armed*; arriving

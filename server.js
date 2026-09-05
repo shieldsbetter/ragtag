@@ -322,7 +322,12 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 7;                // chunks store units, art, and interaction markers
+// The oldest chunk file still worth reading. Fields added since are optional and default
+// to empty, so adding one does not throw away a world: bumping this discards every chunk
+// on disk, and only set-piece cells ever lay themselves out again -- a biome's rock would
+// be gone for good, on ground somebody has already explored.
+const WALL_FORMAT = 7;                // what is written
+const WALL_OLDEST = 5;                // ...and the oldest that can still be read
 const MAX_BLOBS = 6;                  // per chunk, at density 1
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
 
@@ -448,6 +453,11 @@ function wallFrame(A, back = 20) {
   return { at, line: (...pts) => pts.map(([u, v]) => at(u, v)),
            inward: (u, v) => [ox + px * u - nx * v, oy + py * u - ny * v] };
 }
+
+// A set piece may change what is inside its claim, but never the claim itself. Bump this
+// when its contents change and the cell lays itself out again in place, on a world that
+// already exists: the hexagon it took is permanent, everything within it is not.
+const SET_VERSION = { town: 3 };
 
 const YARD_A = -Math.PI * 3 / 4;                    // the yard, up and to the left
 const MARKET_A = -Math.PI / 2;                      // the market, on the north wall
@@ -928,20 +938,57 @@ function generateCell(s) {
 // Run a cell's generator and file what comes out. Each unit goes to the chunk holding its
 // centre, and that chunk is written straight back: the deposit is the only record of it,
 // so it has to survive the chunk being dropped a moment later.
+// A site never moves once placed, so where it is names it.
+const siteKey = s => `${s.x},${s.y}`;
+
+// Take back everything this cell put down, so a set piece can be laid out again without
+// its old walls standing next to its new ones. Everything deposited carries the cell it
+// came from, which is the only way to tell one cell's rock from a neighbour's after both
+// have overhung the same chunk.
+function clearCell(s) {
+  const src = siteKey(s);
+  const poly = cellOf(s);
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of poly) {
+    if (x < x0) x0 = x; if (x > x1) x1 = x;
+    if (y < y0) y0 = y; if (y > y1) y1 = y;
+  }
+  const pad = UNIT_MAX;                             // matter is allowed to hang over the rim
+  for (let cx = chunkOf(x0 - pad); cx <= chunkOf(x1 + pad); cx++)
+    for (let cy = chunkOf(y0 - pad); cy <= chunkOf(y1 + pad); cy++) {
+      const c = loadChunk(cx, cy);
+      const had = c.units.length + c.art.length + c.marks.length;
+      // Anything this cell put down, and anything inside its claim that predates cells
+      // saying where their content came from. Without the second clause a set piece laid
+      // out on a world older than that stands next to its own previous self forever.
+      const ours = (o, x, y) => o.src === src || (!o.src && pointInWall([poly], x, y));
+      c.units = c.units.filter(u => {
+        const b = unitBox(u);
+        return !ours(u, b.cx, b.cy);
+      });
+      c.art = c.art.filter(a => !ours(a, a.lines[0][0][0], a.lines[0][0][1]));
+      c.marks = c.marks.filter(m => !ours(m, m.x, m.y));
+      if (c.units.length + c.art.length + c.marks.length !== had) saveChunk(c);
+    }
+  wallsDirty = true;
+}
+
 function depositCell(s) {
   const touched = new Set();
+  const src = siteKey(s);
+  if (s.gen) clearCell(s);                          // laying it out again, not for the first time
   const made = generateCell(s);
   // Art is filed by where it starts and never split: a set piece draws pieces small enough
   // to belong somewhere, the way it emits walls small enough to belong to a chunk.
   for (const piece of made.art || []) {
     const [x, y] = piece.lines[0][0];
     const c = loadChunk(chunkOf(x), chunkOf(y));
-    c.art.push(piece);
+    c.art.push({ ...piece, src });
     touched.add(c);
   }
   for (const mark of made.marks || []) {
     const c = loadChunk(chunkOf(mark.x), chunkOf(mark.y));
-    c.marks.push(mark);
+    c.marks.push({ ...mark, src });
     touched.add(c);
   }
   for (const m of made.matter)
@@ -949,11 +996,11 @@ function depositCell(s) {
       let sx = 0, sy = 0;
       for (const [x, y] of u.ring) { sx += x; sy += y; }
       const c = loadChunk(chunkOf(sx / u.ring.length), chunkOf(sy / u.ring.length));
-      c.units.push(u);
+      c.units.push({ ...u, src });
       touched.add(c);
     }
   for (const c of touched) saveChunk(c);
-  s.gen = true;
+  s.gen = SET_VERSION[s.kind] || 1;
   meshDirty = true;
   wallsDirty = true;
 }
@@ -975,9 +1022,11 @@ function loadChunk(cx, cy) {
   let units = [], art = [], marks = [];
   try {
     const saved = JSON.parse(fs.readFileSync(path.join(WORLD_DIR, `${cx}_${cy}.json`), 'utf8'));
-    if (saved.v === WALL_FORMAT && Array.isArray(saved.units)) units = saved.units;
-    if (saved.v === WALL_FORMAT && Array.isArray(saved.art)) art = saved.art;
-    if (saved.v === WALL_FORMAT && Array.isArray(saved.marks)) marks = saved.marks;
+    if (saved.v >= WALL_OLDEST && saved.v <= WALL_FORMAT) {
+      if (Array.isArray(saved.units)) units = saved.units;
+      if (Array.isArray(saved.art)) art = saved.art;
+      if (Array.isArray(saved.marks)) marks = saved.marks;
+    }
   } catch { /* nothing filed here, which is the normal case for open space */ }
   const c = { cx, cy, key, units, art, marks };
   chunks.set(key, c);
@@ -1569,7 +1618,10 @@ function manageCells() {
     // and the queue filled with work that could never be done while real cells starved
     // behind it at one a tick. Flying out far enough, terrain simply stopped arriving.
     for (const s of sites) {
-      if (!s.kind || s.gen || queuedCells.has(s)) continue;
+      // A set piece whose version has moved past what generated it is laid out again. An
+      // older world recorded `true` rather than a number, which is behind every version.
+      const stale = s.kind in SET_VERSION && s.gen !== SET_VERSION[s.kind];
+      if (!s.kind || (s.gen && !stale) || queuedCells.has(s)) continue;
       // Still only ground somebody is near: reach is measured from the cell, not the site,
       // because a sprawling one is a long way across.
       if (!anchors.some(a => Math.hypot(a.x - s.x, a.y - s.y) < AOI_R + cellRadius(s))) continue;
