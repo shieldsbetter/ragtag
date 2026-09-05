@@ -1130,6 +1130,11 @@ let cellTick = 0;
 // cells inside it are already surrounded by the time they load. Spacing is one cell, and a
 // site is dropped only where there is actually room -- so this settles down to nothing
 // once an area is sown, and re-sowing costs the checks and no more.
+// Two rings past the area of interest. Every site sown is partition committed in advance,
+// which is ground a set piece can no longer claim, so this wants to be as small as it can
+// be -- but one ring measurably is not enough: cells load with their sites out at the edge
+// of the sown ring and are never fully surrounded, and the median radius goes from 2,701
+// to 3,531 with the worst at 6,868.
 const SOW_R = AOI_R + CELL_R * 2;
 function sowSites(ax, ay) {
   for (let x = ax - SOW_R; x <= ax + SOW_R; x += CELL_R)
