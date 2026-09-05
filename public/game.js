@@ -573,9 +573,14 @@ const PANELS = [
 let openTab = 0;
 let prioMax = 8, wreckDepth = 150;
 
-const statusOf = s =>
-  `${s.hp.filter(h => h > 0).length}/${s.hp.length} guns  ${s.th ? 'burn' : 'coast'}`
-  + `  ${s.dx !== undefined ? 'move' : 'hold'}`;
+// Guns, and only guns: a hull's modules are no longer all weapons, and counting a tractor
+// among them said a ship had seven guns when it had six and a winch.
+const statusOf = s => {
+  const guns = (s.ft || []).map((f, i) => [f[1], s.hp[i]]).filter(([type]) => aims(type));
+  const alive = guns.filter(([, hp]) => hp > 0).length;
+  return `${alive}/${guns.length} guns  ${s.th ? 'burn' : 'coast'}`
+    + `  ${s.dx !== undefined ? 'move' : 'hold'}`;
+};
 
 let builtKey = '';
 const statusEls = new Map();
@@ -2121,7 +2126,21 @@ function draw() {
         ctx.stroke(arc);
         ctx.restore();
       }
-      if (art.guns) poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
+      // A gun is a barrel that points; anything else is drawn as what it is. The tractor
+      // is a blue eye in a metal collar -- the same blue its beam is drawn in, so the beam
+      // and the thing that makes it read as one piece of equipment.
+      if (art.guns && aims(type)) poly(TURRET, gx, gy, s.tu[i], '#cfe6ff', true, 1.2);
+      else if (art.guns) {
+        ctx.save();
+        ctx.lineWidth = 1.4 / cam.zoom;
+        ctx.strokeStyle = '#8fa6c8';
+        const collar = new Path2D(); collar.arc(gx, gy, 6, 0, Math.PI * 2);
+        ctx.stroke(collar);
+        ctx.fillStyle = 'rgba(106,184,255,.9)';
+        const eye = new Path2D(); eye.arc(gx, gy, 3.4, 0, Math.PI * 2);
+        ctx.fill(eye);
+        ctx.restore();
+      }
       if (hp < full && !OFF.has('bars')) healthBar(gx, gy, hp / full);
     });
     // Only somebody's ship gets a name. Raiders and caches belong to nobody, and the
