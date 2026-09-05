@@ -221,10 +221,10 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 2;                // stored geometry is merged; older files regenerate
+const WALL_FORMAT = 3;                // walls come from a biome now; older files regenerate
 const BLOB_MAX_R = 280;               // the generator's widest blob, used to bound merging
 const MAX_BLOBS = 6;                  // per chunk, at density 1
-const WALL_DENSITY = 0.5;             // deliberately mid-scale: neither extreme is the design target
+const WALL_DENSITY = 0.5;             // the fallback when no biome has an opinion
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
@@ -258,6 +258,211 @@ const chunks = new Map();             // "cx,cy" -> { cx, cy, key, walls: [[[x,y
 const chunkKey = (cx, cy) => `${cx},${cy}`;
 const chunkOf = v => Math.floor(v / CHUNK);
 
+// ---- the cell mesh ----
+//
+// The world is partitioned by a Voronoi diagram over a set of sites: every point belongs
+// to its nearest site, so the partition is total by construction. There are no gaps to
+// heal and no regions to reconcile, and a cell's shape is simply a consequence of where
+// its neighbours sit.
+//
+// A site is *potential* until it is loaded. Its position is already fixed -- a loaded
+// neighbour is shaped by it, so moving it would reshape ground that is on disk -- but
+// nothing has been decided about what it is. That is the seam where new content enters:
+// a biome added to the registry later can be assigned to any site not yet loaded,
+// without touching anything already generated.
+//
+// A cell loads only once it is bounded, which means a ring of sites exists around it.
+// Loading is therefore local: place the next ring outward, assign a biome, done. None of
+// this touches terrain, so unlike chunk loading it cannot start a cascade.
+const CELL_R = 2400;                  // roughly how far apart sites sit: a cell is a few chunks
+const CELL_JITTER = 0.38;             // how irregular the mesh is, as a fraction of CELL_R
+const CELL_RING = 6;                  // sites placed around a cell to bound it
+const CELL_FAR = CELL_R * 8;          // the box a cell is clipped out of; touching it means unbounded
+// A cell is closed once nothing of it reaches further than this. Merely *bounded* is not
+// enough: three neighbours can close a cell while leaving it sprawling, and its far
+// corners then legitimately forbid every site the frontier wants to place next -- the
+// mesh strangles itself a few cells out. Compact cells leave room for their successors.
+const CELL_MAX = CELL_R * 1.35;
+
+// The registry a `/biomes` folder will eventually populate. What a biome is, is the
+// handful of numbers terrain generation asks it for.
+const BIOMES = {
+  open:  { density: 0.22, base: 50, spread: 90 },
+  dense: { density: 0.95, base: 90, spread: 220 },
+};
+const BIOME_NAMES = Object.keys(BIOMES);
+
+let sites = [];
+let meshVersion = 0;                  // bumped whenever a site is added, to drop cached cells
+let meshDirty = false;
+
+const siteFile = () => path.join(WORLD_DIR, 'sites.json');
+
+function loadSites() {
+  try {
+    const d = JSON.parse(fs.readFileSync(siteFile(), 'utf8'));
+    if (Array.isArray(d.sites)) sites = d.sites;
+  } catch { /* no mesh yet: the first demand seeds one */ }
+}
+
+// The mesh is the world's own state rather than a cache of the seed, so losing it loses
+// the map. Written on a timer rather than per site: a burst of exploration places a
+// dozen at once and they are worth nothing individually.
+function saveSites() {
+  if (!meshDirty) return;
+  meshDirty = false;
+  try {
+    fs.mkdirSync(WORLD_DIR, { recursive: true });
+    fs.writeFileSync(siteFile(), JSON.stringify({ v: 1, sites }));
+  } catch { /* unwritable store: the world runs, it just will not survive a restart */ }
+}
+
+function addSite(x, y) {
+  const s = { x: +x.toFixed(1), y: +y.toFixed(1), kind: null };
+  sites.push(s);
+  meshVersion++; meshDirty = true;
+  return s;
+}
+
+function nearestSite(x, y) {
+  let best = null, bd = Infinity;
+  for (const s of sites) {
+    const d = (s.x - x) ** 2 + (s.y - y) ** 2;
+    if (d < bd) { bd = d; best = s; }
+  }
+  return best;
+}
+
+// Sutherland-Hodgman against the bisector of p and q, keeping the side nearer p.
+function clipToBisector(poly, p, q) {
+  const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2, dx = q.x - p.x, dy = q.y - p.y;
+  const side = v => dx * (v[0] - mx) + dy * (v[1] - my);      // <= 0 is nearer p
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const sa = side(a), sb = side(b);
+    if (sa <= 0) out.push(a);
+    if ((sa > 0) !== (sb > 0)) {
+      const t = sa / (sa - sb);
+      out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+    }
+  }
+  return out;
+}
+
+// A cell is the box around its site, cut back by the bisector with every neighbour. If
+// the result still touches the box, no neighbour bounds it in that direction and the
+// cell runs off to infinity -- which is what "beyond the frontier" is.
+const cellCache = new Map();
+function cellOf(s) {
+  const hit = cellCache.get(s);
+  if (hit && hit.v === meshVersion) return hit.poly;
+  let poly = [[s.x - CELL_FAR, s.y - CELL_FAR], [s.x + CELL_FAR, s.y - CELL_FAR],
+              [s.x + CELL_FAR, s.y + CELL_FAR], [s.x - CELL_FAR, s.y + CELL_FAR]];
+  for (const q of sites) {
+    if (q === s || Math.abs(q.x - s.x) > CELL_FAR * 2 || Math.abs(q.y - s.y) > CELL_FAR * 2) continue;
+    poly = clipToBisector(poly, s, q);
+    if (poly.length < 3) break;
+  }
+  cellCache.set(s, { v: meshVersion, poly });
+  return poly;
+}
+
+const cellBounded = s => cellOf(s).every(v =>
+  Math.abs(v[0] - s.x) < CELL_FAR - 1 && Math.abs(v[1] - s.y) < CELL_FAR - 1);
+
+// How far a cell reaches from its own site. Cached with the cell, and the only safe basis
+// for deciding a distant site cannot possibly affect it.
+function cellRadius(s) {
+  let r = 0;
+  for (const v of cellOf(s)) r = Math.max(r, Math.hypot(v[0] - s.x, v[1] - s.y));
+  return r;
+}
+
+// A new site may not take ground from a cell that is already loaded. Cells are convex, so
+// it is enough to check the vertices: cutting any area off a convex polygon with a
+// half-plane removes at least one corner with it.
+//
+// The cull is by the cell's own reach, not by a fixed distance. A site q can only take a
+// corner v if |v-q| < |v-p|, and |v-q| >= |q-p| - |v-p|, so once q is twice the cell's
+// radius away it cannot reach any corner. Culling on a fixed radius instead was a quiet
+// hole: a sprawling cell's corners run further than its site suggests, and a site 25,000
+// units away was found taking one while the test said it was fine.
+function admissible(x, y) {
+  for (const s of sites) {
+    if (!s.kind) continue;                          // only a loaded cell is protected
+    if (Math.hypot(s.x - x, s.y - y) >= 2 * cellRadius(s)) continue;
+    for (const v of cellOf(s)) {
+      const keep = (v[0] - s.x) ** 2 + (v[1] - s.y) ** 2;
+      if ((v[0] - x) ** 2 + (v[1] - y) ** 2 < keep - 1) return false;
+    }
+  }
+  return true;
+}
+
+// Close a cell by placing sites where it is actually open, rather than scattering a ring
+// and hoping. A vertex still out on the far box means nothing bounds the cell in that
+// direction, so that is exactly where the next site goes. Directed placement terminates;
+// a blind ring leaves gaps that another blind ring is no more likely to fill.
+function bindCell(s) {
+  for (let pass = 0; pass < 40; pass++) {
+    const poly = cellOf(s);
+    const open = poly.filter(v => Math.hypot(v[0] - s.x, v[1] - s.y) > CELL_MAX);
+    if (!open.length) return true;
+    // Work on the worst corner first, so a long spur is closed before a marginal one.
+    let v = open[0];
+    for (const q of open)
+      if (Math.hypot(q[0] - s.x, q[1] - s.y) > Math.hypot(v[0] - s.x, v[1] - s.y)) v = q;
+    const a = Math.atan2(v[1] - s.y, v[0] - s.x) + rand(-0.35, 0.35);
+    const d = CELL_R * (1 + rand(-CELL_JITTER, CELL_JITTER));
+    const x = s.x + Math.cos(a) * d, y = s.y + Math.sin(a) * d;
+    // Crowding is relaxed as the attempts wear on: a cell that will not close is worse
+    // than a mesh with one short edge in it.
+    const room = CELL_R * (0.5 - 0.4 * pass / 40);
+    const near = nearestSite(x, y);
+    if (near && Math.hypot(near.x - x, near.y - y) < room) continue;
+    if (!admissible(x, y)) continue;
+    addSite(x, y);
+  }
+  return cellBounded(s);
+}
+
+// Give it a shape, then give it a kind. The kind is chosen from whatever the registry
+// holds at this moment, which is the whole of the evolving-world requirement.
+//
+// An unbounded cell must never be loaded. Its outline runs to the far box, so the
+// admissibility test would then read those phantom corners as ground worth protecting and
+// refuse every site placed anywhere near it -- one cell loaded early and open would
+// sterilise its whole neighbourhood, and nothing could ever close it again.
+function loadCell(s) {
+  // Compactness is the goal; boundedness is the requirement. A cell that will not tidy up
+  // any further is still fit to load, so long as it closes.
+  bindCell(s);
+  if (!cellBounded(s)) return null;
+  s.kind = BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
+  meshDirty = true;
+  return s;
+}
+
+// Which cell owns this point, loading whatever is needed to answer. Growing the mesh can
+// put a new site nearer than the one just loaded, so this walks outward until the nearest
+// site is a loaded one.
+function siteFor(x, y) {
+  for (let i = 0; i < 16; i++) {
+    let s = nearestSite(x, y);
+    if (!s) s = addSite(x + rand(-CELL_R / 3, CELL_R / 3), y + rand(-CELL_R / 3, CELL_R / 3));
+    if (s.kind) return s;
+    if (!loadCell(s)) break;                      // could not close it: leave it potential
+  }
+  const s = nearestSite(x, y);
+  return s && s.kind ? s : { kind: 'open' };      // rather than stall terrain over a stubborn cell
+}
+
+const biomeAt = (x, y) => BIOMES[siteFor(x, y).kind] || BIOMES.open;
+
+loadSites();
+setInterval(saveSites, 5000);
+
 function chunkRng(cx, cy) {
   let v = (WORLD_SEED ^ Math.imul(cx, 73856093) ^ Math.imul(cy, 19349663)) >>> 0;
   return () => { v = (Math.imul(v, 1664525) + 1013904223) >>> 0; return v / 4294967296; };
@@ -268,13 +473,18 @@ function chunkRng(cx, cy) {
 function rawBlobs(cx, cy) {
   const rnd = chunkRng(cx, cy);
   rnd(); rnd();                                       // shake off the seed
-  const expected = WALL_DENSITY * MAX_BLOBS;
+  // A chunk can straddle several cells, so the biome is asked for per blob rather than
+  // per chunk. Density is sampled at the chunk's middle, since how *many* blobs there are
+  // is not a per-blob question.
+  const here = biomeAt(cx * CHUNK + CHUNK / 2, cy * CHUNK + CHUNK / 2);
+  const expected = here.density * MAX_BLOBS;
   let n = Math.floor(expected);
   if (rnd() < expected - n) n++;
   const out = [];
   for (let i = 0; i < n; i++) {
     const ox = cx * CHUNK + rnd() * CHUNK, oy = cy * CHUNK + rnd() * CHUNK;
-    const base = 60 + rnd() * 160, sides = 6 + Math.floor(rnd() * 5);
+    const b = biomeAt(ox, oy);
+    const base = b.base + rnd() * b.spread, sides = 6 + Math.floor(rnd() * 5);
     const ring = [];
     let far = 0;
     for (let k = 0; k < sides; k++) {

@@ -87,10 +87,25 @@ constant, which is why a hull with different stats needs no retuning.
 **Hulls are data.** `CARRIER` holds accel, turn rate, mounts, turret stats, collider
 discs. A new class of ship is a new object here.
 
-**The world is unbounded and deterministic.** Terrain is chunked; each chunk's walls
-are a pure function of `(WORLD_SEED, cx, cy)`, written to `world/` on first visit and
-read back after. Overlapping blobs are merged with `polygon-clipping` into single
-walls, so a wall is a list of rings — outline first, then holes.
+**The world is unbounded, and chunks are a cache of the mesh.** Terrain is chunked;
+each chunk's walls are a pure function of `(WORLD_SEED, cx, cy)` *and the biome of the
+cells it falls in*, written to `world/` on first visit and read back after. Overlapping
+blobs are merged with `polygon-clipping` into single walls, so a wall is a list of rings
+— outline first, then holes.
+
+**The mesh is world state, not a cache.** Space is partitioned by a Voronoi diagram over
+persisted sites in `world/sites.json`: every point belongs to its nearest site, so the
+partition is total by construction. A site's position is fixed once placed — a loaded
+neighbour is already shaped by it — but its biome is undecided until the cell loads,
+which is where new content enters: a biome added later is assigned to cells not yet
+loaded, without touching anything already generated. Delete `world/` and the terrain
+comes back; delete `sites.json` and the map does not.
+
+**A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
+site may afterwards take ground from it — checked at every corner, since cutting area off
+a convex cell always takes a corner with it. Cull that check by the cell's own reach
+(`2 × cellRadius`), never by a fixed distance: a sprawling cell's corners run much further
+than its site suggests, and a fixed cull let a site 25,000 units away quietly steal one.
 
 **Clients receive only what they can see.** `MAX_VIEW` bounds the camera, the client
 reports where it is looking, and snapshots carry only nearby entities plus your own
