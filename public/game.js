@@ -1167,14 +1167,15 @@ const getRock = (seed, size) => {
 
 // Where a rich rock's grains sit on it. Off the same seed as its outline, so they are
 // scattered but they are scattered the *same way* every frame -- a seam in the rock, not
-// a sparkle on top of it. Held well inside the hull so they never sit on the edge.
+// a sparkle on top of it. Held well inside the hull so they never sit on the edge. Each
+// carries its own facing, since they are drawn as the same speck a loose grain is.
 function richSpots(seed, size, rich) {
   let s = (seed ^ 0x5bd1e995) & 0x7fffffff;
   const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
   const base = size * 16, out = [];
   for (let i = 0; i < rich; i++) {
-    const a = rnd() * Math.PI * 2, d = base * (0.15 + rnd() * 0.4);
-    out.push([Math.cos(a) * d, Math.sin(a) * d, base * (0.13 + rnd() * 0.07)]);
+    const a = rnd() * Math.PI * 2, d = base * (0.12 + rnd() * 0.36);
+    out.push([Math.cos(a) * d, Math.sin(a) * d, rnd() * Math.PI * 2]);
   }
   return out;
 }
@@ -1524,16 +1525,12 @@ function draw() {
     const [x, y] = at(r);
     poly(getRock(r.seed, r.size), x, y, r.a, '#8fa6c8');
     if (!r.rich) continue;
-    // The grains turn with the rock, because they are part of it.
+    // Exactly the speck a loose grain is drawn as -- same shape, same size, same colour.
+    // What is in the rock and what is floating beside it should not need explaining.
+    // They turn with the rock, because they are part of it.
     const cos = Math.cos(r.a), sin = Math.sin(r.a);
-    ctx.save();
-    ctx.fillStyle = ORE_COLOR;
-    for (const [ox, oy, rad] of getSpots(r.seed, r.size, r.rich)) {
-      const g = new Path2D();
-      g.arc(x + ox * cos - oy * sin, y + ox * sin + oy * cos, rad, 0, Math.PI * 2);
-      ctx.fill(g);
-    }
-    ctx.restore();
+    for (const [ox, oy, spin] of getSpots(r.seed, r.size, r.rich))
+      poly(ORE, x + ox * cos - oy * sin, y + ox * sin + oy * cos, r.a + spin, ORE_COLOR, true, 1.2);
   }
 
   const bs = 3 / cam.zoom;
