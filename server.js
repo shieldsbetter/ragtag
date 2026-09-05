@@ -308,7 +308,8 @@ const BIOME_NAMES = ['open', 'dense'];
 // each edge and the perpendicular bisector of that pair *is* the edge. Six reflections,
 // six edges, and the Voronoi cell comes out as exactly the authored polygon.
 const SCREEN = 1732;                  // the unit content is drawn against; see CLAUDE.md
-const TOWN_SIDE = 3 * SCREEN;         // a regular hexagon, three screens down each side
+const TOWN_SIDE = 2.12 * SCREEN;      // a regular hexagon; area goes as the side squared,
+                                      // so 2.12 screens is half the three-screen one it was
 const TOWN_WALL = 150;                // how thick its curtain wall is
 const TOWN_INSET = 100;               // and how far inside the cell boundary it stands
 const TOWN_SEG = 260;                 // wall is emitted in lengths of about this
