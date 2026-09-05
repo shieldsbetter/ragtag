@@ -374,9 +374,128 @@ function loadChunk(cx, cy) {
 
 const pendingNests = [];
 
-// Somewhere clear inside the chunk, and never on top of anyone: a cache with its guard
-// ringed round it. Deferred like everything else that runs off a chunk load, because
-// placing anything needs blockedAt, which loads terrain.
+// ---- encounters ----
+// A hull says how a thing flies and what it will shoot. An encounter says what a group of
+// them is doing here: where they stand, what they are guarding, and who they have decided
+// to fight. Splitting the two means a fighter's steering knows nothing about nests, and a
+// nest knows nothing about how to fly -- the encounter names a point to circle and how
+// closely, and the hull works out the rest.
+//
+// The world only decides "there is a nest at X,Y". The encounter builds itself when
+// somebody comes near and packs itself away when they leave, so an unvisited corner of
+// the map costs one record and no ships.
+const encounters = [];
+const ENC_HYSTERESIS = 1.5;           // leave wider than you arrive, or it thrashes on the edge
+
+// Every hook is optional; this is what an encounter does if its script says nothing.
+const ENCOUNTER = {
+  spawn() {},                         // build your members
+  pack() {},                          // remember what survived, before they are removed
+  think() {},                         // group rules, once a tick -- and where orders are given
+};
+
+function addEncounter(kind, x, y, r) {
+  encounters.push({ ...ENCOUNTER, ...SCRIPTS[kind], kind, x, y, r,
+                    members: new Set(), aggro: new Set(), live: false, state: {} });
+}
+
+// An encounter joins a member to itself, so a ship always knows which group it belongs to
+// and a group can be taken apart in one place.
+function encShip(e, at, hull) {
+  const s = newShip(null, 'raiders', at, hull);
+  s.enc = e;
+  e.members.add(s);
+  return s;
+}
+
+function manageEncounters(dt) {
+  for (const e of encounters) {
+    let near = Infinity;
+    for (const s of ships) if (crewed(s)) near = Math.min(near, Math.hypot(s.x - e.x, s.y - e.y));
+    if (!e.live && near <= e.r) { e.spawn(e); e.live = true; }
+    else if (e.live && near > e.r * ENC_HYSTERESIS) {
+      e.pack(e);
+      for (const s of e.members) ships.delete(s);
+      e.members.clear(); e.aggro.clear(); e.live = false;
+    }
+    if (e.live) e.think(e, dt);
+  }
+}
+
+// A nest: a cache with a guard standing over it.
+//   * unbothered, the guard circles what it is guarding
+//   * what one of them notices, all of them notice
+//   * and anything that gets far enough from the nest is forgotten again
+// The pool belongs to the encounter rather than to any fighter, which is the whole of
+// rule two: there is nowhere for one fighter to hold a private opinion about who it is
+// fighting.
+const NEST_R = 1200;                  // how close you have to be for it to exist at all
+const NEST_NOTICE = 900, NEST_FORGET = 1700;
+const GUARD_ORBIT = 120;              // how tightly the guard circles its cache
+
+const SCRIPTS = {
+  nest: {
+    spawn(e) {
+      if (e.state.guards === undefined) { e.state.guards = NEST_GUARDS; e.state.cache = true; }
+      if (e.state.cache) e.state.cacheShip = encShip(e, { x: e.x, y: e.y, a: 0 }, CACHE);
+      // The guard stands off at even bearings from a random start. A berth in rock is
+      // skipped rather than shuffled: two fighters is a thinner guard, not a broken nest.
+      const phase = rand(0, Math.PI * 2);
+      for (let k = 0; k < e.state.guards; k++) {
+        const a = phase + k * Math.PI * 2 / NEST_GUARDS;
+        const gx = e.x + Math.cos(a) * NEST_RING, gy = e.y + Math.sin(a) * NEST_RING;
+        if (blockedAt(gx, gy, 24, false)) continue;
+        encShip(e, { x: gx, y: gy, a }, FIGHTER);
+      }
+    },
+
+    // What is carried across an unload is what is left, not what state it was in: a
+    // fighter that comes back has its dents back too, and would have repaired them in
+    // the time you were away anyway.
+    pack(e) {
+      e.state.cache = [...e.members].some(s => s.hull === CACHE);
+      e.state.guards = [...e.members].filter(s => s.hull === FIGHTER).length;
+      e.state.cacheShip = null;
+    },
+
+    think(e) {
+      // Rule two lives here: the pool belongs to the encounter, so there is nowhere for
+      // one fighter to hold a private opinion about who it is fighting. What one of them
+      // notices, all of them are already fighting.
+      for (const s of e.members) {
+        for (const o of ships) {
+          if (!crewed(o) || o.team === s.team) continue;
+          if (Math.hypot(o.x - s.x, o.y - s.y) < NEST_NOTICE) e.aggro.add(o.id);
+        }
+      }
+      // Rule three, measured from the nest rather than from whoever is chasing, so a
+      // pursuit has a leash: run far enough from what they are guarding and they let go.
+      for (const id of [...e.aggro]) {
+        const o = [...ships].find(q => q.id === id);
+        if (!o || Math.hypot(o.x - e.x, o.y - e.y) > NEST_FORGET) e.aggro.delete(id);
+      }
+
+      // ...and then it gives orders, the same way a player would.
+      const home = e.state.cacheShip;
+      for (const s of e.members) {
+        if (s.hull.ai !== 'fighter') continue;
+        let prey = null, best = Infinity;
+        for (const id of e.aggro) {
+          const o = [...ships].find(q => q.id === id);
+          if (!o) continue;
+          const d = Math.hypot(o.x - s.x, o.y - s.y);
+          if (d < best) { best = d; prey = o; }
+        }
+        // Rule one: with nobody to fight, the guard circles what it is guarding.
+        s.order = prey ? { kind: 'engage', id: prey.id }
+                       : { kind: 'guard', x: home ? home.x : e.x, y: home ? home.y : e.y, r: GUARD_ORBIT };
+      }
+    },
+  },
+};
+
+// Somewhere clear inside the chunk, and never on top of anyone. The world places the
+// nest and stops there -- what a nest is made of is the encounter's business.
 function trySpawnNest(cx, cy) {
   for (let i = 0; i < 10; i++) {
     const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
@@ -384,16 +503,7 @@ function trySpawnNest(cx, cy) {
     let clear = true;
     for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
     if (!clear) continue;
-    newShip(null, 'raiders', { x, y, a: 0 }, CACHE);   // owner null: nobody's, and nobody may order it
-    // The guard stands off it at even bearings from a random start. A berth in rock is
-    // skipped rather than shuffled: two fighters is a thinner guard, not a broken nest.
-    const phase = rand(0, Math.PI * 2);
-    for (let k = 0; k < NEST_GUARDS; k++) {
-      const a = phase + k * Math.PI * 2 / NEST_GUARDS;
-      const gx = x + Math.cos(a) * NEST_RING, gy = y + Math.sin(a) * NEST_RING;
-      if (blockedAt(gx, gy, 24, false)) continue;
-      newShip(null, 'raiders', { x: gx, y: gy, a }, FIGHTER);
-    }
+    addEncounter('nest', x, y, NEST_R);
     return;
   }
 }
@@ -621,6 +731,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     side: Math.random() < 0.5 ? 1 : -1,   // which way this one likes to break
     sideFor: rand(1.2, 3.5),
     wander: 0,
+    order: null,          // what it has been told to do, by whoever is in charge of it
     ore: 0,               // what its hold has picked up
     beam: null,           // the grain its tractor has hold of, for anyone watching
     prio: defaultPrio(),
@@ -806,6 +917,7 @@ function wound(s, t, amount) {
   t.hp = t.hp - amount <= 0 ? -WRECK_DEPTH : t.hp - amount;
   if (t.hp <= 0 && s.hull.frail) {
     ships.delete(s);
+    if (s.enc) s.enc.members.delete(s);
     // A broken cache does not vanish: it lets its ore go over the same ten seconds the
     // client spends drawing it coming apart, so what you see and what you can collect
     // are the same event.
@@ -832,13 +944,32 @@ function targetsFor(team) {
   return list;
 }
 
+// ---- orders ----
+// What a ship has been told to do, as data. An encounter writes this; a player will
+// write the same field when fighters become something you can own, and the flying code
+// will not be able to tell the difference -- which is the point. A carrier's dest and
+// heading are the same idea under older names, and want folding in here when that day
+// comes.
+//
+//   { kind: 'engage', id }        fly at that ship and cut past it
+//   { kind: 'guard', x, y, r }    circle that point at that radius
+//
+// Engage keeps the id rather than a position, so the order stays good while the thing it
+// names moves; a target that is gone is an order that has quietly expired.
+function orderMark(s) {
+  const o = s.order;
+  if (!o) return null;
+  if (o.kind === 'guard') return { x: o.x, y: o.y, orbit: o.r };
+  const target = [...ships].find(q => q.id === o.id);
+  return target ? { x: target.x, y: target.y, orbit: ORBIT_R } : null;
+}
+
 // A fighter picks the nearest crewed ship it can see and works it: it aims off to one
 // side of its quarry by an angle that opens up as it closes, which is a straight run at
 // long range and a turn across the bows at short, so it makes passes rather than sitting
 // still to be shot. The side it favours flips at odd intervals and its aim wanders, so a
 // gun leading it has to lead something that is not on rails.
-const FIGHT_R = 900;                  // how far off it will notice you
-const ORBIT_R = 200;                  // how close it tries to cut past
+const ORBIT_R = 200;                  // how close it tries to cut past what it is fighting
 const WANDER = 0.9, SIDE_MIN = 1.2, SIDE_MAX = 3.5;
 // How far ahead it looks, and a feeler either side of the nose to say which way is open.
 // The horizon has to beat the turn: flat out it needs about maxSpeed/turn = 100 units to
@@ -847,13 +978,10 @@ const WANDER = 0.9, SIDE_MIN = 1.2, SIDE_MAX = 3.5;
 const FEEL_MIN = 110, FEEL_TIME = 0.9, FEEL_SPREAD = 0.6;
 
 function fighterCmd(s, dt) {
-  let prey = null, best = FIGHT_R;
-  for (const o of ships) {
-    if (o.team === s.team || !crewed(o)) continue;
-    const d = Math.hypot(o.x - s.x, o.y - s.y);
-    if (d < best) { best = d; prey = o; }
-  }
-  if (!prey) return { turn: 0, thrust: 0 };            // nothing about: drift
+  // Somebody else decided what to fly at; this only knows how to fly at something.
+  const mark = orderMark(s);
+  if (!mark) return { turn: 0, thrust: 0 };            // nothing to do: drift
+  const best = Math.hypot(mark.x - s.x, mark.y - s.y);
 
   s.sideFor -= dt;
   if (s.sideFor <= 0) { s.side = -s.side; s.sideFor = rand(SIDE_MIN, SIDE_MAX); }
@@ -861,15 +989,15 @@ function fighterCmd(s, dt) {
   s.wander = clamp(s.wander + rand(-WANDER, WANDER) * dt, 0.5);
 
   const polys = nearbyWalls(s.x, s.y);
-  const bearing = Math.atan2(prey.y - s.y, prey.x - s.x);
+  const bearing = Math.atan2(mark.y - s.y, mark.x - s.x);
   // With rock in between there is nothing to circle: come straight on and let the
   // feelers below work out how to get round. Circling something you cannot see is how a
   // fighter ends up grinding along the far side of a wall.
-  const sighted = !polys.length || !segmentBlocked(s.x, s.y, prey.x, prey.y, polys);
+  const sighted = !polys.length || !segmentBlocked(s.x, s.y, mark.x, mark.y, polys);
   // Tangent to a circle of ORBIT_R about the quarry: zero far out, a quarter turn at the
   // circle itself. Newton does the rest -- it overshoots, and coming back round is the
   // orbit.
-  const lead = sighted ? Math.asin(Math.min(1, ORBIT_R / Math.max(best, ORBIT_R))) : 0;
+  const lead = sighted ? Math.asin(Math.min(1, mark.orbit / Math.max(best, mark.orbit))) : 0;
   let want = bearing + s.side * lead + s.wander;
   let hold = false;                                    // cut thrust rather than pile in
 
@@ -1145,6 +1273,7 @@ function step(dt) {
   // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
   // the next tick rather than extending this one.
   for (const [cx, cy] of pendingNests.splice(0)) trySpawnNest(cx, cy);
+  manageEncounters(dt);
   bleed(dt);
   for (const s of ships) {
     const cmd = s.hull.ai === 'static' ? { turn: 0, thrust: 0 }
