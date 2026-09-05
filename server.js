@@ -144,6 +144,12 @@ const MODULES = {
 // so relocating is still the cheap way to rearrange.
 const REFIT_REMOVE = 0.5, REFIT_ROTATE = 0.25;
 
+// A module points at one of 32 stops around the circle, 11.25 degrees apart. Fine enough
+// to aim an arc where you want it, coarse enough that two guns set the same way are
+// actually the same way, and it makes a rotation something you can land on with a thumb.
+const ROT_STOPS = 32;
+const snapRot = r => Math.round(r / (Math.PI * 2 / ROT_STOPS)) * (Math.PI * 2 / ROT_STOPS);
+
 // ---- target priority ----
 // A turret used to shoot whatever was nearest. Instead each ship carries, per kind of
 // target, a curve from "how far out is it, as a fraction of gun range" to "how much do
@@ -1011,7 +1017,7 @@ function refit(s, want) {
   if (!canRefit(s)) return 'not docked';
   if (!Array.isArray(want) || want.length > s.hull.installs.length) return 'bad fit';
   const fit = want.map(f => ({ install: String(f.install), type: String(f.type),
-                               rot: Number(f.rot) || 0 }));
+                               rot: snapRot(Number(f.rot) || 0) }));
   if (fit.some(f => !Number.isFinite(f.rot))) return 'bad fit';
   if (!refitFits(s.hull, fit)) return 'will not fit';
 
@@ -2414,7 +2420,7 @@ wss.on('connection', ws => {
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
       maxView: MAX_VIEW,
       hulls: Object.fromEntries(Object.entries(HULLS).map(([k, h]) => [k, { installs: h.installs }])),
-      modules: MODULES, refit: { remove: REFIT_REMOVE, rotate: REFIT_ROTATE },
+      modules: MODULES, refit: { remove: REFIT_REMOVE, rotate: REFIT_ROTATE, stops: ROT_STOPS },
       prioMax: PRIO_MAX, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 

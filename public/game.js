@@ -19,7 +19,13 @@ const ctx = back.getContext('2d', { alpha: false, willReadFrequently: CPU });
 const hud = document.getElementById('hud');
 
 let myId = null, maxView = 2200, clientVersion = '???????';
-let modules = {}, refitRates = { remove: 0.5, rotate: 0.25 };
+let modules = {}, refitRates = { remove: 0.5, rotate: 0.25, stops: 32 };
+// Rotation lands on stops rather than anywhere the thumb happens to be. The server snaps
+// what it is sent to the same grid, so this is a preview of that and not a second opinion.
+const snapRot = r => {
+  const step = Math.PI * 2 / (refitRates.stops || 32);
+  return Math.round(r / step) * step;
+};
 // Install points by id, per hull class: the positions are the hull's, what sits in them is
 // the ship's.
 const installsOf = h => Object.fromEntries(((hulls[h] || {}).installs || []).map(p => [p.id, p.at]));
@@ -892,7 +898,7 @@ refitBoard.addEventListener('pointermove', e => {
   const p = svgPoint(e);
   const held = refitting.fit.find(f => f.install === refitDrag.install);
   if (!p || !held || !where) return;
-  held.rot = Math.atan2(p.y - where[1], p.x - where[0]);
+  held.rot = snapRot(Math.atan2(p.y - where[1], p.x - where[0]));
   drawRefit();
 });
 refitBoard.addEventListener('pointerup', e => {
