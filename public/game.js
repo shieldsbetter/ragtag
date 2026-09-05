@@ -943,7 +943,7 @@ function drawRefit() {
       // A dot rather than a ring: sixteen rings is a diagram of nothing. The circle under
       // it is the part a thumb has to find, and is invisible.
       g.append(svgEl('circle', { r: 10, fill: 'transparent' }));
-      g.append(svgEl('circle', { r: 3.5,
+      g.append(svgEl('circle', { r: 1.75,
         fill: target ? (onto.ok ? '#5ff0b0' : '#ff6b8a')
             : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#3f6b9c' }));
       if (target) g.append(svgEl('circle', { r: 9, fill: 'none',
