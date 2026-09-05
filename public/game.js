@@ -588,12 +588,13 @@ let cargoEl = null;                   // the cargo tab's running total
 function gunRows(ship) {
   const where = installsOf(ship.h);
   const at = i => where[(ship.ft[i] || [])[0]] || [0, 0];
-  const sides = [[], []];
-  (ship.ft || []).forEach((f, i) => sides[at(i)[1] < 0 ? 0 : 1].push(i));
+  const sides = [[], [], []];                       // port, centreline, starboard
+  (ship.ft || []).forEach((f, i) => sides[at(i)[1] < 0 ? 0 : at(i)[1] > 0 ? 2 : 1].push(i));
   for (const s of sides) s.sort((a, b) => at(b)[0] - at(a)[0]);
   const list = [];
-  sides.forEach((side, c) => side.forEach((i, r) => list.push({ i, label: (c ? 'S' : 'P') + (r + 1) })));
-  return { cols: Math.max(sides[0].length, sides[1].length, 1), list };
+  const name = ['P', 'C', 'S'];
+  sides.forEach((side, c) => side.forEach((i, r) => list.push({ i, label: name[c] + (r + 1) })));
+  return { cols: Math.max(...sides.map(s => s.length), 1), list };
 }
 
 // A wreck is drawn in the ring's colours rather than the health ramp, and says so: a bar
@@ -939,10 +940,14 @@ function drawRefit() {
     if (!held) {
       const free = !refitting.pick || !refitClash(refitting.fit, where, p.id, refitting.pick);
       const target = onto && onto.id === p.id;
-      g.append(svgEl('circle', { r: target ? 9 : 7, fill: 'transparent',
-        stroke: target ? (onto.ok ? '#5ff0b0' : '#ff6b8a')
-              : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
-        'stroke-width': target ? 1.6 : 1, 'stroke-dasharray': '3 3' }));
+      // A dot rather than a ring: sixteen rings is a diagram of nothing. The circle under
+      // it is the part a thumb has to find, and is invisible.
+      g.append(svgEl('circle', { r: 10, fill: 'transparent' }));
+      g.append(svgEl('circle', { r: 3.5,
+        fill: target ? (onto.ok ? '#5ff0b0' : '#ff6b8a')
+            : refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#3f6b9c' }));
+      if (target) g.append(svgEl('circle', { r: 9, fill: 'none',
+        stroke: onto.ok ? '#5ff0b0' : '#ff6b8a', 'stroke-width': 1.4, 'stroke-dasharray': '3 3' }));
     } else {
       const mod = modules[held.type] || {};
       if (onto && onto.id === p.id)

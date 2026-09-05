@@ -103,11 +103,18 @@ const CARRIER = {
   // Five down each side, 16 apart. A gun has a radius of 10, so two of them will not go in
   // neighbouring points -- the extra points buy where a battery sits rather than how many
   // guns it has, and a smaller module could use them all.
+  // Five down each side 16 apart, and six on the centreline: one in the bows, one aft, and
+  // four interleaved between the side pairs. A gun has a radius of 10, so it will not go
+  // beside another gun on its own row, and one amidships blocks the four side points
+  // nearest it -- a centreline battery is paid for in broadside. Smaller modules fit where
+  // guns cannot.
   installs: [
     { id: 'p1', at: [32, -11] }, { id: 'p2', at: [16, -11] }, { id: 'p3', at: [0, -11] },
     { id: 'p4', at: [-16, -11] }, { id: 'p5', at: [-32, -11] },
     { id: 's1', at: [32, 11] }, { id: 's2', at: [16, 11] }, { id: 's3', at: [0, 11] },
     { id: 's4', at: [-16, 11] }, { id: 's5', at: [-32, 11] },
+    { id: 'cf', at: [44, 0] }, { id: 'c1', at: [24, 0] }, { id: 'c2', at: [8, 0] },
+    { id: 'c3', at: [-8, 0] }, { id: 'c4', at: [-24, 0] }, { id: 'ca', at: [-44, 0] },
   ],
   // What a hull comes out of the yard carrying: every point filled, guns pointing outboard
   // so none of them has to traverse across its own deck.
