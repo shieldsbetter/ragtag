@@ -101,6 +101,20 @@ which is where new content enters: a biome added later is assigned to cells not 
 loaded, without touching anything already generated. Delete `world/` and the terrain
 comes back; delete `sites.json` and the map does not.
 
+**A set piece claims a cell by placing its neighbours.** For any convex polygon and any
+site inside it, reflecting the site across each edge gives the neighbour that produces
+that edge — the perpendicular bisector of the pair *is* the edge line. Six reflections,
+six edges, and the Voronoi cell comes out as exactly the authored shape. The claim is
+permanent and cannot grow; the contents inside it are free to change with later versions.
+
+**Set-piece walls are emitted pre-split, never as blobs.** Blobs get unioned with the
+terrain around them, and a wall as long as a town's perimeter merges into one polygon
+whose centroid lands in a single chunk — the wall would then exist only while that chunk
+was loaded, and be missing everywhere anyone actually stands. So a set piece emits
+finished wall polygons small enough to belong to one chunk, built to abut exactly rather
+than overlap, and unioned only *within* a chunk so a run reads as one wall instead of a
+ladder of quads.
+
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off
 a convex cell always takes a corner with it. Cull that check by the cell's own reach

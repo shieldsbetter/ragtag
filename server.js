@@ -294,8 +294,94 @@ const CELL_MAX = CELL_R * 1.35;
 const BIOMES = {
   open:  { density: 0.22, base: 50, spread: 90 },
   dense: { density: 0.95, base: 90, spread: 220 },
+  town:  { density: 0 },              // a set piece owns this ground; generate nothing in it
 };
-const BIOME_NAMES = Object.keys(BIOMES);
+// What the roll may choose. A set piece's biome is claimed, never rolled.
+const BIOME_NAMES = ['open', 'dense'];
+
+// ---- set pieces ----
+//
+// A set piece claims a convex cell and draws what is inside it. The claim is permanent
+// and cannot grow; the contents are free to change with later versions.
+//
+// A cell is made to be a given shape by placing its neighbours: reflect the site across
+// each edge and the perpendicular bisector of that pair *is* the edge. Six reflections,
+// six edges, and the Voronoi cell comes out as exactly the authored polygon.
+const SCREEN = 1732;                  // the unit content is drawn against; see CLAUDE.md
+const TOWN_SIDE = 3 * SCREEN;         // a regular hexagon, three screens down each side
+const TOWN_WALL = 150;                // how thick its curtain wall is
+const TOWN_INSET = 100;               // and how far inside the cell boundary it stands
+const TOWN_SEG = 260;                 // wall is emitted in lengths of about this
+
+// A regular hexagon of circumradius R, vertices at 0, 60, 120 ... so its edge normals --
+// where the neighbouring sites go -- fall at 30, 90, 150 ...
+const hexPoint = (R, k) => [Math.cos(k * Math.PI / 3) * R, Math.sin(k * Math.PI / 3) * R];
+const APOTHEM = Math.cos(Math.PI / 6);          // of a regular hexagon, as a fraction of R
+
+// The curtain wall, as quads that abut exactly rather than overlap: consecutive pieces
+// share an edge, so there is no gap and nothing needs unioning. Each is small enough to
+// belong wholly to one chunk, which is the point -- a single ring polygon around the whole
+// town would have its centroid at the origin and would exist only while that one chunk
+// was loaded, leaving the wall missing everywhere anyone actually stands.
+let townPieces = null;
+function townWall() {
+  if (townPieces) return townPieces;
+  const aOut = TOWN_SIDE * APOTHEM - TOWN_INSET;
+  const rOut = aOut / APOTHEM, rIn = (aOut - TOWN_WALL) / APOTHEM;
+  const per = Math.max(2, Math.round(rOut / TOWN_SEG));     // segments along each edge
+  townPieces = [];
+  for (let k = 0; k < 6; k++) {
+    const [ax, ay] = hexPoint(rOut, k), [bx, by] = hexPoint(rOut, k + 1);
+    const [cx, cy] = hexPoint(rIn, k), [dx, dy] = hexPoint(rIn, k + 1);
+    for (let i = 0; i < per; i++) {
+      const t0 = i / per, t1 = (i + 1) / per;
+      const p = (x0, y0, x1, y1, t) => [+(x0 + (x1 - x0) * t).toFixed(1), +(y0 + (y1 - y0) * t).toFixed(1)];
+      const ring = [p(ax, ay, bx, by, t0), p(ax, ay, bx, by, t1),
+                    p(cx, cy, dx, dy, t1), p(cx, cy, dx, dy, t0)];
+      let mx = 0, my = 0;
+      for (const [x, y] of ring) { mx += x / 4; my += y / 4; }
+      townPieces.push({ ring, mx, my });
+    }
+  }
+  return townPieces;
+}
+
+// What a set piece contributes to a chunk: finished walls, not blobs. Blobs would be
+// merged with the terrain around them, and a wall this long merges into one shape whose
+// centroid sits in a single chunk -- the wall would then exist only while that one chunk
+// was loaded, and be missing everywhere anyone stands.
+//
+// The pieces belonging to a chunk are unioned with each other, though, so a run of wall
+// reads as one wall rather than as a ladder of abutting quads. That keeps the merge
+// local: chunk-sized, never town-sized.
+function setPieceWalls(cx, cy) {
+  const mine = [];
+  for (const q of townWall())
+    if (chunkOf(q.mx) === cx && chunkOf(q.my) === cy) mine.push([q.ring]);
+  if (mine.length < 2) return mine;
+  try {
+    return polygonClipping.union(...mine).map(poly =>
+      poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])));
+  } catch {
+    return mine;                      // degenerate input: leave the pieces as they are
+  }
+}
+
+// The town is placed once, when the world is new, and holds the origin. Its six
+// neighbours are the reflections of its site across its own edges, which is what makes
+// its cell come out hexagonal; they are ordinary sites otherwise, and get biomes when
+// somebody comes near them.
+function seedTown() {
+  if (sites.length) return;
+  const home = addSite(0, 0);
+  home.kind = 'town';                 // loaded from the first instant, so nothing may crowd it
+  const reach = 2 * TOWN_SIDE * APOTHEM;
+  for (let k = 0; k < 6; k++) {
+    const a = Math.PI / 6 + k * Math.PI / 3;
+    addSite(Math.cos(a) * reach, Math.sin(a) * reach);
+  }
+  meshDirty = true;
+}
 
 let sites = [];
 let meshVersion = 0;                  // bumped whenever a site is added, to drop cached cells
@@ -466,6 +552,7 @@ function siteFor(x, y) {
 const biomeAt = (x, y) => BIOMES[siteFor(x, y).kind] || BIOMES.open;
 
 loadSites();
+seedTown();
 setInterval(saveSites, 5000);
 
 function chunkRng(cx, cy) {
@@ -542,7 +629,7 @@ function componentsAround(cx, cy) {
 // centroid falls in this chunk. Every chunk computes the same components from the same
 // blobs, so exactly one of them claims each shape however the world is explored.
 function generateChunk(cx, cy) {
-  const walls = [];
+  const walls = setPieceWalls(cx, cy);
   for (const comp of componentsAround(cx, cy)) {
     let merged;
     try {

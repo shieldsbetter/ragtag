@@ -1473,6 +1473,7 @@ function draw() {
   if (dev) window.__ws = ws;      // so a test can send an order the way the page would
   if (dev) window.__ore = state.ore || [];
   if (dev) window.__rocks = state.rocks;
+  if (dev) window.__wallChunks = wallChunks;
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
