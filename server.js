@@ -369,15 +369,22 @@ function seedTown() {
   if (sites.length) return;
   const home = addSite(0, 0);
   home.kind = 'town';                 // loaded from the first instant, so nothing may crowd it
-  // The six reflections that make the cell a hexagon are also the town's neighbours, and
-  // they are decreed open. A dense biome's blobs reach nearly 400 units past their own
-  // cell, which is further than the asteroid stands back from the border -- one of them
-  // landing across the tunnel mouth would seal the starting town for everybody, for good.
-  // An open biome's reach about 175, which the standoff clears.
+  // The six reflections that make the cell a hexagon are also the town's neighbours. Only
+  // the one the tunnel points at is decreed, and only because of the tunnel: a dense
+  // biome's blobs reach nearly 400 units past their own cell, further than the asteroid
+  // stands back from the border, and one landing across the mouth would seal the starting
+  // town for everybody, for good. An open biome's reach about 175, which the standoff
+  // clears. The other five are ordinary ground and get whatever they get -- a settlement
+  // with dense rock at its back is a better place than one in a clearing.
   const reach = 2 * TOWN_SIDE * APOTHEM;
+  let door = 0, near = Infinity;
+  for (let k = 0; k < 6; k++) {
+    const off = Math.abs(angleDiff(Math.PI / 6 + k * Math.PI / 3, TOWN_OUT));
+    if (off < near) { near = off; door = k; }
+  }
   for (let k = 0; k < 6; k++) {
     const a = Math.PI / 6 + k * Math.PI / 3;
-    addSite(Math.cos(a) * reach, Math.sin(a) * reach, 'open');
+    addSite(Math.cos(a) * reach, Math.sin(a) * reach, k === door ? 'open' : null);
   }
   meshDirty = true;
 }

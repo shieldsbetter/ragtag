@@ -142,9 +142,11 @@ rebuild does not make every wall look new and get sent again.
 `want`: a biome it will take when it loads. Writing `kind` up front instead would mark a
 cell as loaded while its shape is still unbounded, and the admissibility test would read
 its phantom corners as ground worth protecting and refuse every site near it. The town
-decrees all six of its neighbours `open`, because a dense biome's blobs reach nearly 400
-units past their own cell — further than the asteroid stands back from the border — and
-one landing across the tunnel mouth would seal the starting town for everybody, for good.
+decrees exactly one neighbour — the one its tunnel points at — `open`, because a dense
+biome's blobs reach nearly 400 units past their own cell, further than the asteroid stands
+back from the border, and one landing across the mouth would seal the starting town for
+everybody, for good. The other five get whatever they get: a decree is for what a set
+piece actually needs, not for tidiness.
 
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off
