@@ -66,6 +66,15 @@ only ever be a bonus on top of something that works everywhere.
   teams would make it PvP, and the machinery already supports it.
 - Whether ships ever retire. The world outlives its players and nothing removes ships.
 
+**Not requirements** — do not reason from these, and do not reintroduce them as
+justifications:
+- *That `world/` can be deleted and the same world come back.* It cannot, and that is
+  fine. The world is state, not a cache of a seed: the mesh is grown as it is explored,
+  cells are decided from whatever content exists at that moment, and generation is
+  allowed to depend on what was generated before it. Reproducibility from the seed was
+  never asked for and has been explicitly ruled out. Weighing a design against it costs
+  real time and has done so more than once.
+
 ---
 
 ## Shape of the thing
