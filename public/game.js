@@ -842,14 +842,28 @@ const svgPath = pts => pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(
 // Drawn at half the module's own size. The circle is no longer the footprint the validity
 // test uses -- that is still the module's size radius -- but at full size six of them cover
 // the deck and there is nothing left to aim at.
-function moduleIcon(held, lit) {
+// Which installed modules are the reason a point will not take this one. Distance against
+// the sum of the radii, the same test that refused it, so what is highlighted is exactly
+// what did the refusing.
+function refitBlockers(fit, where, held, id, type) {
+  const a = where[id];
+  if (!a) return [];
+  return fit.filter(f => f !== held && f.install !== id && where[f.install]
+    && Math.hypot(a[0] - where[f.install][0], a[1] - where[f.install][1])
+       < (modules[type] || {}).size + (modules[f.type] || {}).size);
+}
+
+function moduleIcon(held, lit, blocking) {
   const mod = modules[held.type] || {};
   const g = svgEl('g', {});
   // The icon is drawn at half size so the hull reads under it, which hides the one thing
-  // that decides whether a layout is legal. While a module is picked up or selected, its
-  // real footprint is shown around it -- that circle is exactly what the validity test uses.
-  if (lit) g.append(svgEl('circle', { r: mod.size || 8, fill: 'rgba(108,168,255,.16)',
-                                      stroke: 'rgba(108,168,255,.5)', 'stroke-width': .7 }));
+  // that decides whether a layout is legal. A module picked up or selected shows its real
+  // footprint; one that is the reason a point is refused shows its own, in the colour of
+  // the refusal, so "will not fit" names what it will not fit past.
+  if (lit || blocking)
+    g.append(svgEl('circle', { r: mod.size || 8,
+      fill: blocking ? 'rgba(255,107,138,.16)' : 'rgba(108,168,255,.16)',
+      stroke: blocking ? 'rgba(255,107,138,.6)' : 'rgba(108,168,255,.5)', 'stroke-width': .7 }));
   g.append(svgEl('circle', { r: (mod.size || 8) / 2, fill: '#16283a',
                              stroke: lit ? '#5ff0b0' : '#cfe6ff', 'stroke-width': .8 }));
   g.append(svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
@@ -903,6 +917,11 @@ function drawRefit() {
     : lift.type !== undefined ? { install: null, type: lift.type, rot: 0 }
     : refitting.fit.find(f => f.install === lift.install);
   const onto = carried ? refitTargetAt(refitting.fit, where, carried, lift.at) : null;
+  // A point refused because something is in the way -- rather than because it is taken --
+  // says what is in the way.
+  const blocked = new Set(onto && !onto.ok && !refitting.fit.some(f => f.install === onto.id)
+    ? refitBlockers(refitting.fit, where, carried, onto.id, carried.type).map(f => f.install)
+    : []);
 
   for (const p of (hulls[s.h] || {}).installs || []) {
     const held = carried && carried.install === p.id ? null
@@ -933,7 +952,7 @@ function drawRefit() {
              + `${Math.cos(held.rot + mod.arcHalf) * 26} ${Math.sin(held.rot + mod.arcHalf) * 26}` });
         g.append(arc);
       }
-      g.append(moduleIcon(held, refitting.sel === p.id));
+      g.append(moduleIcon(held, refitting.sel === p.id, blocked.has(p.id)));
     }
     svg.append(g);
   }
