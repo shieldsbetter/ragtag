@@ -610,7 +610,10 @@ function paintGuns(s) {
   for (const g of gunEls) {
     const hp = s.hp[g.i], wreck = hp <= 0;
     g.cell.classList.toggle('named', named.includes(g.i));
-    const frac = wreck ? (hp + wreckDepth) / wreckDepth : hp / TURRET_HP;
+    // Against the module's own full health, not a gun's. A tractor is built to 60 and was
+    // reading as a gun at 60 percent -- damaged, and yellow about it, while whole.
+    const full = (modules[(s.ft[g.i] || [])[1]] || {}).hp || TURRET_HP;
+    const frac = wreck ? (hp + wreckDepth) / wreckDepth : hp / full;
     g.cell.classList.toggle('wrecked', wreck);
     g.fill.style.width = `${Math.max(0, Math.min(1, frac)) * 100}%`;
     g.fill.style.background = wreck ? (s.rp === g.i ? '#ffd76a' : '#ff9a6a')
