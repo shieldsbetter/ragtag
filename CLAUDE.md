@@ -170,23 +170,28 @@ back from the border, and one landing across the mouth would seal the starting t
 everybody, for good. The other five get whatever they get: a decree is for what a set
 piece actually needs, not for tidiness.
 
-**A cell must finish binding before it loads, or it sterilises its neighbourhood.** No
-cell has to be any particular size — too big and we subdivide, too small is fine — but
-subdividing only works while a cell is still potential. A loaded cell's corners are
-protected, and admissibility refuses any site nearer a corner than the cell's own site is,
-so one cell loaded at 21,000 across forbids new sites for 21,000 units around every corner
-it has. Nothing near it can be subdivided again, so its neighbours load oversized too, and
-it spreads. Letting one through cost 27,577 refused placements against 27 accepted, and 3
-cells in 463 that could be tidied at all. `loadCell` therefore refuses a cell `bindCell`
-could not bring under `CELL_MAX`; it stays potential and is tried again next sweep. Ground
-with nothing on it for a second is recoverable, a sterilised neighbourhood is not.
+**Bind a cell, then load whatever it came out as.** The order is: decide to bind a cell
+off the side of a loaded one, add sites until it is bounded, subdivide it while it is still
+potential, then generate. Size is steered, not required — too big and we subdivide, too
+small is fine and left alone — so nothing refuses to load on account of its shape. Being
+finite is the one hard rule, because an unbounded cell's outline runs to the far box and
+loading it makes the admissibility test protect phantom corners.
 
 **Closing a cell and subdividing it are the same move.** `bindCell` goes at whichever
-corner is furthest from the site, over and over. A corner still out on the far clipping box
+corner reaches further than a cell ought to. A corner still out on the far clipping box
 means nothing bounds the cell that way; a corner at 9,000 means the cell is merely too big;
-both are answered by a site between here and there. Sowing sites over the area of interest
-in advance also produces compact cells, and was tried, but it commits partition for ground
-nobody has reached — which is ground a set piece can no longer claim.
+both are answered by a site between here and there. A site placed inside a cell that is
+merely too big takes ground from that cell alone, which is why subdividing is always
+available where closing may not be.
+
+**Subdivision is refused where it would reshape a loaded cell, and that is what makes big
+cells.** A site is inadmissible if it lands nearer a corner of a loaded cell than that
+cell's own site is — so a cell loaded at 20,000 across blocks new sites for 20,000 units
+around each of its corners, and its neighbours cannot then be subdivided either. Cells
+therefore run over target, with a tail that grows as you travel: measured over a 20,000
+unit flight, a median of 3,672 against a 3,240 target but a worst of 16,841. The town's own
+six neighbours are permanently 3,672, since each has a corner on a vertex of the authored
+hexagon that may never be cut.
 
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off

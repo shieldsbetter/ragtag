@@ -552,38 +552,45 @@ function admissible(x, y) {
   return true;
 }
 
-// Bind a cell by going at whichever corner is furthest out, over and over, until none of
-// them reaches further than a cell ought to. Closing and subdividing are the same move: a
-// corner still out on the far box means nothing bounds the cell that way, a corner at 9,000
-// means the cell is simply too big, and either way the answer is a site between here and
-// there. A placement at CELL_R cuts that direction to about half, so every accepted site is
-// real progress and the loop ends.
+// Bind a cell by going at whichever corner reaches further than a cell ought to, over and
+// over. Closing and subdividing are the same move: a corner still out on the far clipping
+// box means nothing bounds the cell that way, a corner at 9,000 means the cell is merely
+// too big, and either way the answer is a site between here and there. A placement at
+// CELL_R cuts that direction to about half, so every accepted site is real progress.
 //
 // No cell has to be any particular size. This is about what they average: too big and we
-// subdivide, too small is fine and left alone.
+// subdivide, too small is fine and left alone. So this stops when there is nothing further
+// it is *allowed* to do, not when the cell is a particular shape -- some corners cannot be
+// cut at all. The town's six neighbours each have one sitting on a vertex of the town's
+// authored hexagon, 3,672 from their own site: cutting it would take ground from a cell
+// already loaded, so it stands, and holding out for a tidier cell than that means the ring
+// around the town never loads and a new player looks out at nothing.
 function bindCell(s) {
   for (let pass = 0; pass < 60; pass++) {
-    const poly = cellOf(s);
-    let v = null, far = 0;
-    for (const q of poly) {
-      const d = Math.hypot(q[0] - s.x, q[1] - s.y);
-      if (d > far) { far = d; v = q; }
+    const over = cellOf(s)
+      .map(q => ({ q, d: Math.hypot(q[0] - s.x, q[1] - s.y) }))
+      .filter(c => c.d > CELL_MAX)
+      .sort((a, b) => b.d - a.d);
+    if (!over.length) return true;
+    // Worst corner first, but every one of them is tried: being unable to cut the worst
+    // says nothing about the rest.
+    for (const c of over) {
+      const a = Math.atan2(c.q[1] - s.y, c.q[0] - s.x) + rand(-0.35, 0.35);
+      // Never past the corner being cut: for a cell that is merely too big the site belongs
+      // inside it, where the only ground it takes is that cell's own.
+      const d = Math.min(c.d * 0.9, CELL_R * (1 + rand(-CELL_JITTER, CELL_JITTER)));
+      const x = s.x + Math.cos(a) * d, y = s.y + Math.sin(a) * d;
+      // Crowding is relaxed as the attempts wear on: a cell that will not close is worse
+      // than a mesh with one short edge in it.
+      const room = CELL_R * (0.5 - 0.4 * pass / 60);
+      const near = nearestSite(x, y);
+      if (near && Math.hypot(near.x - x, near.y - y) < room) continue;
+      if (!admissible(x, y)) continue;
+      addSite(x, y);
+      break;
     }
-    if (far <= CELL_MAX) return true;
-    const a = Math.atan2(v[1] - s.y, v[0] - s.x) + rand(-0.35, 0.35);
-    // Never past the corner being cut: for a cell that is merely too big the site belongs
-    // inside it, where the only ground it takes is that cell's own.
-    const d = Math.min(far * 0.9, CELL_R * (1 + rand(-CELL_JITTER, CELL_JITTER)));
-    const x = s.x + Math.cos(a) * d, y = s.y + Math.sin(a) * d;
-    // Crowding is relaxed as the attempts wear on: a cell that will not close is worse
-    // than a mesh with one short edge in it.
-    const room = CELL_R * (0.5 - 0.4 * pass / 60);
-    const near = nearestSite(x, y);
-    if (near && Math.hypot(near.x - x, near.y - y) < room) continue;
-    if (!admissible(x, y)) continue;
-    addSite(x, y);
   }
-  return cellRadius(s) <= CELL_MAX;
+  return true;
 }
 
 // Give it a shape, then give it a kind. The kind is chosen from whatever the registry
@@ -594,15 +601,12 @@ function bindCell(s) {
 // refuse every site placed anywhere near it -- one cell loaded early and open would
 // sterilise its whole neighbourhood, and nothing could ever close it again.
 function loadCell(s) {
-  // Binding has to succeed before the cell loads, and this is not fussiness. A loaded
-  // cell's corners are protected, and admissibility refuses any site nearer a corner than
-  // its own site is -- so a cell loaded at 21,000 across forbids new sites for 21,000
-  // units around every corner it has, and nothing near it can be subdivided ever again.
-  // Letting one through cost 27,577 refused placements against 27 accepted, and three
-  // cells in 463 that could be tidied at all. A cell that will not bind is left potential
-  // and tried again next sweep; ground with nothing on it for a second is recoverable,
-  // and a sterilised neighbourhood is not.
-  if (!bindCell(s)) return null;
+  // Add sites until it is bounded, subdividing it as far as we are allowed to, and then
+  // load whatever that came out as. Size is something we steer, not something a cell has
+  // to satisfy. Being finite is the one hard requirement: an unbounded cell's outline runs
+  // to the far box, and loading it would have the admissibility test read those phantom
+  // corners as ground worth protecting.
+  bindCell(s);
   if (!cellBounded(s)) return null;
   s.kind = s.want || BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
   meshDirty = true;
