@@ -123,6 +123,19 @@ without bound. Ore is exempt on purpose: it comes and goes near the ship, becaus
 is meant to be noticed. Nests are placed past `AOI_R * NEST_EDGE` for the same reason a
 rock is — found at the rim, a nest was always there and you sailed up to it.
 
+**A "screen" is 1732 world units, and it is the unit to design against.** At full
+zoom-out the visible rectangle's half-diagonal is always `MAX_VIEW` (2200) on every
+device — `minZoom` solves for it, so the zoom *factor* changes with pixel size but the
+world distance does not. What changes is the aspect, since a fixed diagonal splits
+differently: 16:9 sees 1917 × 1078 from the centre, a phone upright sees 1078 × 1917,
+21:9 sees 2022 × 866. So the disc that is visible on *every* device has a radius of 866,
+the short half-side of the widest aspect, and one screen is twice that. Content within
+half a screen of a point is on screen everywhere. 2200 is the corner reach and nothing
+beyond it is ever visible. Width and height individually are not stable — a layout that
+fills a 16:9 screen is cropped on a phone held upright, and the reverse.
+
+For scale: a cell is roughly 3.5 screens across, and the area of interest is 7.6.
+
 **Clients receive only what they can see.** `MAX_VIEW` bounds the camera, the client
 reports where it is looking, and snapshots carry only nearby entities plus your own
 ships. World *simulation* stays anchored to ships; only delivery follows the camera.
