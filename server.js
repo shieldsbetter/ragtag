@@ -226,10 +226,8 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 4;                // chunks store units now; walls are derived from them
-const BLOB_MAX_R = 280;               // the generator's widest blob, used to bound merging
+const WALL_FORMAT = 5;                // chunks store units and nothing else
 const MAX_BLOBS = 6;                  // per chunk, at density 1
-const WALL_DENSITY = 0.5;             // the fallback when no biome has an opinion
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
 
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
@@ -259,7 +257,7 @@ const angleDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const clamp = (v, m) => Math.max(-m, Math.min(m, v));
 
 // ---- terrain ----
-const chunks = new Map();             // "cx,cy" -> { cx, cy, key, walls: [[[x,y],...], ...] }
+const chunks = new Map();             // "cx,cy" -> { cx, cy, key, units: [{ ring, mat }, ...] }
 const chunkKey = (cx, cy) => `${cx},${cy}`;
 const chunkOf = v => Math.floor(v / CHUNK);
 
@@ -312,60 +310,29 @@ const TOWN_SIDE = 2.12 * SCREEN;      // a regular hexagon; area goes as the sid
                                       // so 2.12 screens is half the three-screen one it was
 const TOWN_WALL = 150;                // how thick its curtain wall is
 const TOWN_INSET = 100;               // and how far inside the cell boundary it stands
-const TOWN_SEG = 260;                 // wall is emitted in lengths of about this
 
 // A regular hexagon of circumradius R, vertices at 0, 60, 120 ... so its edge normals --
 // where the neighbouring sites go -- fall at 30, 90, 150 ...
 const hexPoint = (R, k) => [Math.cos(k * Math.PI / 3) * R, Math.sin(k * Math.PI / 3) * R];
 const APOTHEM = Math.cos(Math.PI / 6);          // of a regular hexagon, as a fraction of R
 
-// The curtain wall, as quads that abut exactly rather than overlap: consecutive pieces
-// share an edge, so there is no gap and nothing needs unioning. Each is small enough to
-// belong wholly to one chunk, which is the point -- a single ring polygon around the whole
-// town would have its centroid at the origin and would exist only while that one chunk
-// was loaded, leaving the wall missing everywhere anyone actually stands.
-let townPieces = null;
-function townWall() {
-  if (townPieces) return townPieces;
+// The curtain wall, as six long slabs -- one per edge, consecutive ones sharing a corner
+// edge so there is no gap. Nothing here worries about how big a slab is or which chunk it
+// lands in: a generator emits matter, and cutting it to storable size is done for it.
+//
+// It is made of rock rather than a material of its own, because materials are what decide
+// whether two lumps merge, and a curtain wall that met a boulder and refused to join it
+// would leave two outlines crossing in mid-air.
+function townMatter() {
   const aOut = TOWN_SIDE * APOTHEM - TOWN_INSET;
   const rOut = aOut / APOTHEM, rIn = (aOut - TOWN_WALL) / APOTHEM;
-  const per = Math.max(2, Math.round(rOut / TOWN_SEG));     // segments along each edge
-  townPieces = [];
+  const out = [];
   for (let k = 0; k < 6; k++) {
     const [ax, ay] = hexPoint(rOut, k), [bx, by] = hexPoint(rOut, k + 1);
     const [cx, cy] = hexPoint(rIn, k), [dx, dy] = hexPoint(rIn, k + 1);
-    for (let i = 0; i < per; i++) {
-      const t0 = i / per, t1 = (i + 1) / per;
-      const p = (x0, y0, x1, y1, t) => [+(x0 + (x1 - x0) * t).toFixed(1), +(y0 + (y1 - y0) * t).toFixed(1)];
-      const ring = [p(ax, ay, bx, by, t0), p(ax, ay, bx, by, t1),
-                    p(cx, cy, dx, dy, t1), p(cx, cy, dx, dy, t0)];
-      let mx = 0, my = 0;
-      for (const [x, y] of ring) { mx += x / 4; my += y / 4; }
-      townPieces.push({ ring, mx, my });
-    }
+    out.push({ ring: [[ax, ay], [bx, by], [dx, dy], [cx, cy]], mat: 'rock' });
   }
-  return townPieces;
-}
-
-// What a set piece contributes to a chunk: finished walls, not blobs. Blobs would be
-// merged with the terrain around them, and a wall this long merges into one shape whose
-// centroid sits in a single chunk -- the wall would then exist only while that one chunk
-// was loaded, and be missing everywhere anyone stands.
-//
-// The pieces belonging to a chunk are unioned with each other, though, so a run of wall
-// reads as one wall rather than as a ladder of abutting quads. That keeps the merge
-// local: chunk-sized, never town-sized.
-function setPieceWalls(cx, cy) {
-  const mine = [];
-  for (const q of townWall())
-    if (chunkOf(q.mx) === cx && chunkOf(q.my) === cy) mine.push([q.ring]);
-  if (mine.length < 2) return mine;
-  try {
-    return polygonClipping.union(...mine).map(poly =>
-      poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)])));
-  } catch {
-    return mine;                      // degenerate input: leave the pieces as they are
-  }
+  return out;
 }
 
 // The town is placed once, when the world is new, and holds the origin. Its six
@@ -550,172 +517,249 @@ function siteFor(x, y) {
   return s && s.kind ? s : { kind: 'open' };      // rather than stall terrain over a stubborn cell
 }
 
-const biomeAt = (x, y) => BIOMES[siteFor(x, y).kind] || BIOMES.open;
-
 loadSites();
 seedTown();
 setInterval(saveSites, 5000);
 
-function chunkRng(cx, cy) {
-  let v = (WORLD_SEED ^ Math.imul(cx, 73856093) ^ Math.imul(cy, 19349663)) >>> 0;
+
+// ---- material units ----
+//
+// A unit is one lump of matter: a polygon and what it is made of. Units are the only thing
+// the world stores. A chunk owns the units whose centre falls inside it, and a unit is
+// free to hang over the seam -- which is what lets matter run continuously across one
+// without anybody having to record that it does.
+//
+// "Wall" is not something the world holds. It is the answer to "what does the loaded
+// matter look like from outside": touching units of the same material are unioned, and
+// that union is what the client draws and what a hull collides against. It is rebuilt from
+// whatever is loaded and never persisted -- so laying material down, cutting a vein out of
+// rock, and blasting a hole in it are all only ever edits to units.
+const UNIT_MAX = CHUNK;               // widest a unit may be, which is what makes touching
+                                      // units always neighbours and never further apart
+
+function siteRng(s) {
+  let v = (WORLD_SEED ^ Math.imul(Math.round(s.x), 73856093) ^ Math.imul(Math.round(s.y), 19349663)) >>> 0;
   return () => { v = (Math.imul(v, 1664525) + 1013904223) >>> 0; return v / 4294967296; };
 }
 
-// The seed layer: irregular blobs, a pure function of the chunk's coordinates. These are
-// never stored -- they are the input to merging, and merging is what gets kept.
-// ---- units ----
-//
-// A unit is one lump of matter as generated: a small polygon and what it is made of.
-// Units are the stored truth. What everything else deals in -- the walls the client
-// draws, the walls a hull collides against -- is merged out of them, and is a cache.
-//
-// The split is for what comes next. A vein of ore is units of another material sitting
-// among the rock. Laying material down is adding units. Destruction is a boolean against
-// the units it touches. None of that needs to know what a wall is, because a wall is only
-// ever the answer to "what does this look like from outside".
-function rawUnits(cx, cy) {
-  const rnd = chunkRng(cx, cy);
-  rnd(); rnd();                                       // shake off the seed
-  // A chunk can straddle several cells, so the biome is asked for per blob rather than
-  // per chunk. Density is sampled at the chunk's middle, since how *many* blobs there are
-  // is not a per-blob question.
-  const here = biomeAt(cx * CHUNK + CHUNK / 2, cy * CHUNK + CHUNK / 2);
-  const expected = here.density * MAX_BLOBS;
-  let n = Math.floor(expected);
-  if (rnd() < expected - n) n++;
+// Cut a generator's polygon down to units. Anything already small enough is left exactly
+// as it is; anything larger is sliced on a fixed grid, so a town's curtain wall arrives as
+// six slabs thousands of units long and leaves as a row of pieces that abut precisely.
+// Holes are dropped: no generator makes one, and a lump of matter with a hole in it is
+// something destruction produces rather than something anybody lays down.
+function toUnits(ring, mat) {
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+  for (const [x, y] of ring) {
+    if (x < minx) minx = x; if (x > maxx) maxx = x;
+    if (y < miny) miny = y; if (y > maxy) maxy = y;
+  }
+  const round = r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]);
+  if (maxx - minx <= UNIT_MAX && maxy - miny <= UNIT_MAX) return [{ ring: round(ring), mat }];
+  const out = [];
+  for (let gx = Math.floor(minx / UNIT_MAX); gx <= Math.floor(maxx / UNIT_MAX); gx++)
+    for (let gy = Math.floor(miny / UNIT_MAX); gy <= Math.floor(maxy / UNIT_MAX); gy++) {
+      const x0 = gx * UNIT_MAX, y0 = gy * UNIT_MAX, x1 = x0 + UNIT_MAX, y1 = y0 + UNIT_MAX;
+      let bits;
+      try { bits = polygonClipping.intersection([ring], [[[x0, y0], [x1, y0], [x1, y1], [x0, y1]]]); }
+      catch { continue; }
+      for (const poly of bits) if (poly[0] && poly[0].length >= 3) out.push({ ring: round(poly[0]), mat });
+    }
+  return out;
+}
+
+// A generator is handed a cell and returns matter anywhere inside it. It never sees a
+// chunk or a unit, which is the point: a set piece draws its walls, a biome scatters its
+// rock, and neither has to know how the world files things.
+function generateCell(s) {
+  if (s.kind === 'town') return townMatter();
+  const b = BIOMES[s.kind] || BIOMES.open;
+  if (!b.density) return [];
+  const poly = cellOf(s);
+  const rnd = siteRng(s);
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, area = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x, y] = poly[i], [nx, ny] = poly[(i + 1) % poly.length];
+    if (x < minx) minx = x; if (x > maxx) maxx = x;
+    if (y < miny) miny = y; if (y > maxy) maxy = y;
+    area += x * ny - nx * y;
+  }
+  area = Math.abs(area) / 2;
+  // Density is per chunk-sized patch of ground, which is how it was tuned; a cell simply
+  // has however many of those it happens to cover.
+  const n = Math.round(b.density * MAX_BLOBS * area / (CHUNK * CHUNK));
   const out = [];
   for (let i = 0; i < n; i++) {
-    const ox = cx * CHUNK + rnd() * CHUNK, oy = cy * CHUNK + rnd() * CHUNK;
-    const b = biomeAt(ox, oy);
+    let ox = 0, oy = 0, tries = 0;
+    do { ox = minx + rnd() * (maxx - minx); oy = miny + rnd() * (maxy - miny); }
+    while (!pointInWall([poly], ox, oy) && ++tries < 24);
+    if (tries >= 24) continue;
+    // Blobs near the rim hang over into the neighbouring cell on purpose: that overlap is
+    // what makes rock read as one field across a cell seam once the neighbour generates.
     const base = b.base + rnd() * b.spread, sides = 6 + Math.floor(rnd() * 5);
     const ring = [];
-    let far = 0;
     for (let k = 0; k < sides; k++) {
       const a = (k / sides) * Math.PI * 2 + rnd() * 0.25;
       const r = base * (0.6 + rnd() * 0.65);
-      if (r > far) far = r;
-      ring.push([+(ox + Math.cos(a) * r).toFixed(1), +(oy + Math.sin(a) * r).toFixed(1)]);
+      ring.push([ox + Math.cos(a) * r, oy + Math.sin(a) * r]);
     }
-    out.push({ ring, x: ox, y: oy, r: far, cx, cy, mat: 'rock' });
+    out.push({ ring, mat: 'rock' });
   }
   return out;
 }
 
-// The units of a chunk. A resident chunk's are its stored ones, which is what makes them
-// the truth once anything has changed them; anywhere else they are generated fresh, the
-// way they always were, so asking a neighbour costs no file read and creates no chunk.
-function chunkUnits(cx, cy) {
-  const had = chunks.get(chunkKey(cx, cy));
-  return had ? had.units : rawUnits(cx, cy);
-}
-
-// Blobs that touch each other have to become one wall, or destroying part of one would
-// leave the other's edge hanging inside solid rock. Connectivity is by overlapping
-// bounding circles -- conservative, and a false positive merely unions two shapes that
-// turn out to be disjoint, which polygon-clipping returns unchanged.
-function componentsAround(cx, cy) {
-  for (let ring = 1; ; ring++) {
-    const blobs = [];
-    for (let x = cx - ring; x <= cx + ring; x++)
-      for (let y = cy - ring; y <= cy + ring; y++)
-        blobs.push(...chunkUnits(x, y));
-
-    const parent = blobs.map((_, i) => i);
-    const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
-    for (let i = 0; i < blobs.length; i++)
-      for (let j = i + 1; j < blobs.length; j++) {
-        const a = blobs[i], b = blobs[j];
-        // Units of different stuff never merge into one shape: a vein is not the rock
-        // around it, however tightly it sits in it.
-        if (a.mat !== b.mat) continue;
-        if (Math.hypot(a.x - b.x, a.y - b.y) <= a.r + b.r) parent[find(i)] = find(j);
-      }
-    const groups = new Map();
-    blobs.forEach((b, i) => {
-      const k = find(i);
-      if (!groups.has(k)) groups.set(k, []);
-      groups.get(k).push(b);
-    });
-
-    // A component that reaches the edge of what we generated might continue past it, so
-    // widen and start again -- but only if it could plausibly own geometry near us.
-    const comps = [...groups.values()];
-    const near = c => c.some(b => Math.abs(b.cx - cx) <= 1 && Math.abs(b.cy - cy) <= 1);
-    const openEnded = comps.some(c => near(c) &&
-      c.some(b => Math.abs(b.cx - cx) === ring || Math.abs(b.cy - cy) === ring));
-    if (!openEnded || ring >= 4) return comps.filter(near);
-  }
-}
-
-// Vertices that carry no shape are worth nothing and cost forever: a boolean leaves
-// duplicates and near-collinear runs behind, and a unit cut into a hundred times would
-// otherwise get steadily more expensive with nothing to show for it.
-const SIMPLIFY = 0.05;                // how far off the line a corner may sit and still go
-function simplify(ring) {
-  if (ring.length < 4) return ring;
-  const out = [];
-  for (let i = 0; i < ring.length; i++) {
-    const a = ring[(i - 1 + ring.length) % ring.length], b = ring[i], c = ring[(i + 1) % ring.length];
-    if (Math.hypot(b[0] - a[0], b[1] - a[1]) < SIMPLIFY) continue;      // a duplicate corner
-    const dx = c[0] - a[0], dy = c[1] - a[1], L = Math.hypot(dx, dy);
-    if (L > 0 && Math.abs(dx * (a[1] - b[1]) - dy * (a[0] - b[0])) / L < SIMPLIFY) continue;
-    out.push(b);
-  }
-  return out.length >= 3 ? out : ring;
-}
-
-// Walls for one chunk: merge each connected component of units, then keep the merged
-// shapes whose centroid falls in this chunk. Every chunk computes the same components
-// from the same units, so exactly one of them claims each shape however the world is
-// explored.
-function deriveWalls(cx, cy) {
-  const walls = setPieceWalls(cx, cy);
-  for (const comp of componentsAround(cx, cy)) {
-    let merged;
-    try {
-      merged = polygonClipping.union(...comp.map(b => [b.ring]));
-    } catch {
-      merged = comp.map(b => [b.ring]);               // degenerate input: leave it unmerged
-    }
-    for (const poly of merged) {
-      const outer = poly[0];
+// Run a cell's generator and file what comes out. Each unit goes to the chunk holding its
+// centre, and that chunk is written straight back: the deposit is the only record of it,
+// so it has to survive the chunk being dropped a moment later.
+function depositCell(s) {
+  const touched = new Set();
+  for (const m of generateCell(s))
+    for (const u of toUnits(m.ring, m.mat)) {
       let sx = 0, sy = 0;
-      for (const [x, y] of outer) { sx += x; sy += y; }
-      const mx = sx / outer.length, my = sy / outer.length;
-      if (chunkOf(mx) !== cx || chunkOf(my) !== cy) continue;
-      walls.push(poly.map(r => simplify(r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]))));
+      for (const [x, y] of u.ring) { sx += x; sy += y; }
+      const c = loadChunk(chunkOf(sx / u.ring.length), chunkOf(sy / u.ring.length));
+      c.units.push(u);
+      touched.add(c);
     }
-  }
-  return walls;
+  for (const c of touched) saveChunk(c);
+  s.gen = true;
+  meshDirty = true;
+  wallsDirty = true;
+}
+
+function saveChunk(c) {
+  try {
+    fs.mkdirSync(WORLD_DIR, { recursive: true });
+    fs.writeFileSync(path.join(WORLD_DIR, `${c.cx}_${c.cy}.json`),
+                     JSON.stringify({ v: WALL_FORMAT, cx: c.cx, cy: c.cy, units: c.units }));
+  } catch { /* unwritable store: the world runs, it just will not survive a restart */ }
 }
 
 function loadChunk(cx, cy) {
   const key = chunkKey(cx, cy);
   const had = chunks.get(key);
   if (had) return had;
-  const file = path.join(WORLD_DIR, `${cx}_${cy}.json`);
-  let units = null, walls = null;
+  let units = [];
   try {
-    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (saved.v !== WALL_FORMAT) throw new Error('old format');
-    units = saved.units; walls = saved.walls;
-  } catch { /* new ground, or a format we no longer read */ }
-  const c = { cx, cy, key, units: units || rawUnits(cx, cy), walls: [] };
-  // In the map before deriving, because deriving asks the neighbours for their units and
-  // a neighbour asking back must find this chunk's stored ones rather than making a
-  // second set that nothing has happened to.
+    const saved = JSON.parse(fs.readFileSync(path.join(WORLD_DIR, `${cx}_${cy}.json`), 'utf8'));
+    if (saved.v === WALL_FORMAT && Array.isArray(saved.units)) units = saved.units;
+  } catch { /* nothing filed here, which is the normal case for open space */ }
+  const c = { cx, cy, key, units };
   chunks.set(key, c);
-  c.walls = walls || deriveWalls(cx, cy);
-  if (!units || !walls) {
-    try {
-      fs.mkdirSync(WORLD_DIR, { recursive: true });
-      fs.writeFileSync(file, JSON.stringify({ v: WALL_FORMAT, cx, cy, units: c.units, walls: c.walls }));
-    } catch { /* unwritable store: the world is still consistent, just not persisted */ }
-  }
-  // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which
-  // would land back in here. The queue is drained once loading has settled.
+  wallsDirty = true;
+  // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which would
+  // land back in here. The queue is drained once loading has settled.
   if (Math.random() < NEST_CHANCE) pendingNests.push([cx, cy]);
   return c;
+}
+
+// ---- walls, which are a view of the units and nothing more ----
+let wallsDirty = true;
+let wallsByKey = new Map();           // stable key -> { key, rings, js, x0, y0, x1, y1 }
+let wallBins = new Map();             // chunk key -> the walls whose box touches that chunk
+let mergedCache = new Map();          // which units were merged -> what they merged into
+
+// A unit's bounds, worked out once. Kept beside the unit rather than on it, because a
+// unit is written back to disk verbatim and a cached fact about it is not world state.
+const unitBoxes = new WeakMap();
+function unitBox(u) {
+  const hit = unitBoxes.get(u);
+  if (hit) return hit;
+  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, sx = 0, sy = 0;
+  for (const [x, y] of u.ring) {
+    if (x < minx) minx = x; if (x > maxx) maxx = x;
+    if (y < miny) miny = y; if (y > maxy) maxy = y;
+    sx += x; sy += y;
+  }
+  const cx = sx / u.ring.length, cy = sy / u.ring.length;
+  let r = 0;
+  for (const [x, y] of u.ring) r = Math.max(r, Math.hypot(x - cx, y - cy));
+  const box = { minx, miny, maxx, maxy, cx, cy, r };
+  unitBoxes.set(u, box);
+  return box;
+}
+
+// Merge everything loaded, once, and bin the results by chunk so a lookup near a point is
+// still cheap. Connectivity only ever needs the eight neighbouring chunks, because a unit
+// is at most one chunk wide and sits in the chunk holding its centre.
+//
+// A wall's key is its lowest-ordered member, which keeps it stable while its membership
+// is -- so a rebuild set off by a chunk loading three screens away does not make every
+// wall on the client look new and get sent again.
+function rebuildWalls() {
+  wallsDirty = false;
+  const ent = [];
+  const byChunk = new Map();
+  for (const c of chunks.values()) {
+    const list = [];
+    c.units.forEach((u, i) => {
+      const e = { u, key: `${c.key}:${i}`, i: ent.length };
+      ent.push(e); list.push(e);
+    });
+    byChunk.set(c.key, list);
+  }
+  const parent = ent.map((_, i) => i);
+  const find = i => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (const c of chunks.values())
+    for (const e of byChunk.get(c.key)) {
+      const a = unitBox(e.u);
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++)
+        for (const f of byChunk.get(chunkKey(c.cx + dx, c.cy + dy)) || []) {
+          if (f.i <= e.i) continue;
+          // Matter of different kinds never merges into one shape: a vein is not the rock
+          // around it, however tightly it sits in it.
+          if (f.u.mat !== e.u.mat) continue;
+          const b = unitBox(f.u);
+          if (Math.hypot(a.cx - b.cx, a.cy - b.cy) <= a.r + b.r) parent[find(e.i)] = find(f.i);
+        }
+    }
+  const groups = new Map();
+  for (const e of ent) {
+    const k = find(e.i);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(e);
+  }
+  const prev = wallsByKey, prevMerged = mergedCache;
+  wallsByKey = new Map();
+  wallBins = new Map();
+  mergedCache = new Map();
+  for (const comp of groups.values()) {
+    // Working out the components again is linear and cheap; the booleans are not. A
+    // component whose membership has not changed merged to the same thing it did last
+    // time, and most of them have not: a chunk loading at the rim of the area of interest
+    // says nothing about rock three screens the other way. Without this the whole area
+    // was re-merged on every chunk load -- 85ms, against a 33ms tick.
+    const sig = comp.map(e => e.key).sort().join('|');
+    let merged = prevMerged.get(sig);
+    if (!merged) {
+      try { merged = polygonClipping.union(...comp.map(e => [e.u.ring])); }
+      catch { merged = comp.map(e => [e.u.ring]); }   // degenerate input: leave it unmerged
+    }
+    mergedCache.set(sig, merged);
+    let base = comp[0].key;
+    for (const e of comp) if (e.key < base) base = e.key;
+    merged.forEach((poly, n) => {
+      const rings = poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]));
+      const key = merged.length > 1 ? `${base}/${n}` : base;
+      const js = JSON.stringify(rings);
+      const old = prev.get(key);
+      let w = old && old.js === js ? old : null;
+      if (!w) {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const [x, y] of rings[0]) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+        w = { key, rings, js, x0, y0, x1, y1 };
+      }
+      wallsByKey.set(key, w);
+      for (let cx = chunkOf(w.x0); cx <= chunkOf(w.x1); cx++)
+        for (let cy = chunkOf(w.y0); cy <= chunkOf(w.y1); cy++) {
+          const k = chunkKey(cx, cy);
+          if (!wallBins.has(k)) wallBins.set(k, []);
+          wallBins.get(k).push(w);
+        }
+    });
+  }
 }
 
 const pendingNests = [];
@@ -941,7 +985,30 @@ function watchAnchors() {
   return out;
 }
 
+// Cells are what generate; chunks only hold what cells have already put there. So the
+// mesh has to be walked out ahead of the ships deliberately, rather than as a side effect
+// of somebody asking what is at a point. Once a second is plenty: a cell is three and a
+// half screens across and the area of interest is seven, so there is a long way to go
+// before anybody reaches ground that has not been asked about.
+const pendingCells = [];
+const queuedCells = new Set();        // in memory only: a restart before generating must requeue
+let cellTick = 0;
+function manageCells() {
+  if (cellTick++ % 30 === 0)
+    for (const a of shipAnchors())
+      for (let x = a.x - AOI_R; x <= a.x + AOI_R; x += CELL_R / 2)
+        for (let y = a.y - AOI_R; y <= a.y + AOI_R; y += CELL_R / 2) {
+          const s = siteFor(x, y);
+          if (s.kind && !s.gen && !queuedCells.has(s)) { queuedCells.add(s); pendingCells.push(s); }
+        }
+  // One cell per tick. Generating is a boolean over a few hundred polygons and has no
+  // business in the same frame as the physics; the queue is what keeps it out.
+  const s = pendingCells.shift();
+  if (s) depositCell(s);
+}
+
 function manageChunks() {
+  manageCells();
   for (const a of shipAnchors())
     for (let cx = chunkOf(a.x - AOI_R); cx <= chunkOf(a.x + AOI_R); cx++)
       for (let cy = chunkOf(a.y - AOI_R); cy <= chunkOf(a.y + AOI_R); cy++)
@@ -955,19 +1022,24 @@ function manageChunks() {
   };
   for (const a of shipAnchors()) hold(a, AOI_KEEP);
   for (const a of watchAnchors()) hold(a, STREAM_R + 400);
-  for (const key of [...chunks.keys()]) if (!keep.has(key)) chunks.delete(key);
+  for (const key of [...chunks.keys()]) if (!keep.has(key)) { chunks.delete(key); wallsDirty = true; }
+  if (wallsDirty) rebuildWalls();
 }
 
-// Walls in the 3x3 block of chunks around a point. `ensure` pulls them off disk, which
-// only spawn checks want -- the tick loop works from what is already resident.
+// Walls in the 3x3 block of chunks around a point. `ensure` pulls the chunks off disk,
+// which only spawn checks want -- the tick loop works from what is already resident. A
+// wall wider than a chunk sits in several bins, so the same one can come back twice.
 function nearbyWalls(x, y, ensure = false) {
-  const out = [];
   const cx0 = chunkOf(x), cy0 = chunkOf(y);
+  if (ensure)
+    for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
+      for (let cy = cy0 - 1; cy <= cy0 + 1; cy++) loadChunk(cx, cy);
+  if (wallsDirty) rebuildWalls();
+  const out = [], seen = new Set();
   for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
-    for (let cy = cy0 - 1; cy <= cy0 + 1; cy++) {
-      const c = ensure ? loadChunk(cx, cy) : chunks.get(chunkKey(cx, cy));
-      if (c) for (const wall of c.walls) out.push(wall);
-    }
+    for (let cy = cy0 - 1; cy <= cy0 + 1; cy++)
+      for (const w of wallBins.get(chunkKey(cx, cy)) || [])
+        if (!seen.has(w.key)) { seen.add(w.key); out.push(w.rings); }
   return out;
 }
 
@@ -1897,27 +1969,22 @@ function snapshotFor(p) {
   });
 }
 
-// Walls are static, so they are pushed once per player when a ship comes near and
-// dropped when it leaves, rather than riding in every snapshot -- a dense biome would
-// otherwise dominate the wire.
-function syncChunks(p) {
-  const need = new Set();
+// Walls are static, so they are pushed once per player when a ship comes near and dropped
+// when it leaves, rather than riding in every snapshot -- a dense biome would otherwise
+// dominate the wire. They go by their own key rather than by chunk: a wall is merged out
+// of whatever is loaded and can be far larger than any chunk, and keying delivery by the
+// chunk holding its centre meant a long one vanished as soon as that chunk left the
+// window, while its far end was still in plain sight.
+function syncWalls(p) {
   const v = p.view;
+  const need = new Map();
   for (let cx = chunkOf(v.x - STREAM_R); cx <= chunkOf(v.x + STREAM_R); cx++)
     for (let cy = chunkOf(v.y - STREAM_R); cy <= chunkOf(v.y + STREAM_R); cy++)
-      need.add(chunkKey(cx, cy));
-  const drop = [];
-  for (const key of p.chunks) if (!need.has(key)) drop.push(key);
-  for (const key of drop) p.chunks.delete(key);
-  if (drop.length) p.ws.send(JSON.stringify({ t: 'drop', keys: drop }));
-
-  for (const key of need) {
-    if (p.chunks.has(key)) continue;
-    const c = chunks.get(key);
-    if (!c) continue;
-    p.chunks.add(key);
-    p.ws.send(JSON.stringify({ t: 'chunk', key, walls: c.walls }));
-  }
+      for (const w of wallBins.get(chunkKey(cx, cy)) || []) need.set(w.key, w);
+  const add = [], del = [];
+  for (const [k, w] of need) if (p.walls.get(k) !== w) { p.walls.set(k, w); add.push([k, w.rings]); }
+  for (const k of [...p.walls.keys()]) if (!need.has(k)) { p.walls.delete(k); del.push(k); }
+  if (add.length || del.length) p.ws.send(JSON.stringify({ t: 'walls', add, del }));
 }
 
 // Snapshots are repetitive JSON, which deflate eats: measured 5.7KB -> 0.9KB per
@@ -1944,11 +2011,11 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, chunks: new Set(), view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
-    p.chunks = new Set();                     // a new socket has been sent no terrain yet
+    p.walls = new Map();                      // a new socket has been sent no terrain yet
 
     // Returning players keep the fleet they left; a new commander is issued one. No ship
     // is special -- they are simply the ships this player owns.
@@ -2034,7 +2101,7 @@ setInterval(() => {
   const streamChunks = ++frame % 10 === 0;
   for (const p of players.values()) {
     if (!p.ws || p.ws.readyState !== 1) continue;
-    if (streamChunks) syncChunks(p);
+    if (streamChunks) syncWalls(p);
     p.ws.send(snapshotFor(p));
   }
   kills.length = 0;                 // said once, to whoever was near enough to see it

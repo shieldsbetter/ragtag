@@ -96,11 +96,26 @@ constant, which is why a hull with different stats needs no retuning.
 **Hulls are data.** `CARRIER` holds accel, turn rate, mounts, turret stats, collider
 discs. A new class of ship is a new object here.
 
-**The world is unbounded, and chunks are a cache of the mesh.** Terrain is chunked;
-each chunk's walls are a pure function of `(WORLD_SEED, cx, cy)` *and the biome of the
-cells it falls in*, written to `world/` on first visit and read back after. Overlapping
-blobs are merged with `polygon-clipping` into single walls, so a wall is a list of rings
-— outline first, then holes.
+**Matter is units; a wall is a view of them.** A unit is one lump: a polygon and what it
+is made of. Units are the only thing stored. A chunk owns the units whose centre falls
+inside it and is free to have them hang over its seams. A *wall* is not held anywhere —
+it is the answer to "what does the loaded matter look like from outside", built by
+unioning touching units of the same material with `polygon-clipping`, so a wall is a list
+of rings (outline first, then holes). Nothing about it is persisted, which is what makes
+laying material down, cutting a vein out of rock and blasting a hole in it all the same
+kind of operation: an edit to units.
+
+**The cell generates; the chunk only files.** A generator is handed a cell and returns
+polygons of material of any size, anywhere in it — a set piece draws its walls, a biome
+scatters its rock — and never sees a chunk or a unit. Anything too big is cut on a fixed
+grid, and each piece goes to the chunk holding its centre. Cells generate one per tick
+off a queue, driven by a sweep of the area of interest once a second, so ground is made
+long before anyone reaches it.
+
+**Re-merging everything on every chunk load costs 85ms.** Working the components out
+again is linear and cheap; the booleans are not. The merge is cached by which units went
+into it, so a chunk loading at the rim of the area of interest does not re-merge rock
+three screens the other way. Steady state is 14-18ms against a 33ms tick.
 
 **The mesh is world state, not a cache.** Space is partitioned by a Voronoi diagram over
 persisted sites in `world/sites.json`: every point belongs to its nearest site, so the
@@ -116,13 +131,12 @@ that edge — the perpendicular bisector of the pair *is* the edge line. Six ref
 six edges, and the Voronoi cell comes out as exactly the authored shape. The claim is
 permanent and cannot grow; the contents inside it are free to change with later versions.
 
-**Set-piece walls are emitted pre-split, never as blobs.** Blobs get unioned with the
-terrain around them, and a wall as long as a town's perimeter merges into one polygon
-whose centroid lands in a single chunk — the wall would then exist only while that chunk
-was loaded, and be missing everywhere anyone actually stands. So a set piece emits
-finished wall polygons small enough to belong to one chunk, built to abut exactly rather
-than overlap, and unioned only *within* a chunk so a run reads as one wall instead of a
-ladder of quads.
+**Walls are delivered by their own key, never by chunk.** A wall is merged out of
+whatever is loaded and can be far larger than any chunk, so there is no chunk that owns
+it; keying delivery by the one holding its centre made a long wall vanish as soon as that
+chunk left the client's window, while its far end was still in plain sight. A wall's key
+is its lowest-ordered member unit, which holds still while its membership does, so a
+rebuild does not make every wall look new and get sent again.
 
 **A loaded cell can never be reshaped.** A cell loads only once it is bounded, and no
 site may afterwards take ground from it — checked at every corner, since cutting area off

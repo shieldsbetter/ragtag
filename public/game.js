@@ -98,7 +98,7 @@ function renderStamp(serverTime, arrival) {
 }
 
 let dev = false;
-const wallChunks = new Map();   // chunk key -> polygons, pushed by the server as the camera moves
+const walls = new Map();        // wall key -> polygon, pushed by the server as the camera moves
 
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
@@ -159,8 +159,13 @@ ws.onmessage = e => {
     return;
   }
   if (m.t === 'reload') { location.reload(); return; }
-  if (m.t === 'chunk') { wallChunks.set(m.key, m.walls.map(withBox)); return; }
-  if (m.t === 'drop') { for (const k of m.keys) wallChunks.delete(k); return; }
+  // Walls arrive keyed by themselves rather than by chunk: one can be far larger than a
+  // chunk, so there is no chunk that owns it.
+  if (m.t === 'walls') {
+    for (const [k, rings] of m.add) walls.set(k, withBox(rings));
+    for (const k of m.del) walls.delete(k);
+    return;
+  }
   if (m.t !== 's') return;
   const rt = m.st === undefined ? performance.now() : renderStamp(m.st, performance.now());
   // A death is a one-shot: the server says it once and forgets, so it is caught here on
@@ -1392,11 +1397,10 @@ const WALL_FILL = '#171f2b', WALL_EDGE = 'rgba(132,156,190,.85)';
 
 function drawWalls(vis) {
   const visible = [];
-  for (const walls of wallChunks.values())
-    for (const w of walls) {
-      if (w.x1 < vis.x0 || w.x0 > vis.x1 || w.y1 < vis.y0 || w.y0 > vis.y1) continue;
-      visible.push(w);
-    }
+  for (const w of walls.values()) {
+    if (w.x1 < vis.x0 || w.x0 > vis.x1 || w.y1 < vis.y0 || w.y0 > vis.y1) continue;
+    visible.push(w);
+  }
   if (!visible.length) return;
 
   ctx.save();
@@ -1473,7 +1477,7 @@ function draw() {
   if (dev) window.__ws = ws;      // so a test can send an order the way the page would
   if (dev) window.__ore = state.ore || [];
   if (dev) window.__rocks = state.rocks;
-  if (dev) window.__wallChunks = wallChunks;
+  if (dev) window.__walls = walls;
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
@@ -1665,7 +1669,7 @@ function draw() {
   hud.textContent = `TAP select  HOLD add/clear  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
     + `  c${clientVersion}`
-    + (dev ? `  buf=${buffer.length} stalls=${stalls} chunks=${wallChunks.size}` : '')
+    + (dev ? `  buf=${buffer.length} stalls=${stalls} walls=${walls.size}` : '')
     + (OFF.size ? `  off:${[...OFF].join(',')}` : '')
     + `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps`
     + (dev ? `  vib:${vib.ok ? 'api' : 'none'}/${vib.calls}/${vib.last}` : '') + `\n`
