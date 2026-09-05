@@ -684,13 +684,37 @@ function blockedAt(x, y, r, ensure = true) {
   return false;
 }
 
-function spawnRock(size, x, y, grace = 0) {
+// Some rock is worth breaking for its own sake. A rich asteroid wears its grains where
+// you can see them and hands them over every time it comes apart, children included, so
+// finding one is worth crossing the map for and worth working all the way down.
+//
+// The odds are pinned to what a screenful of rock actually is rather than picked. At full
+// zoom-out the camera reaches MAX_VIEW from its centre, which at 16:9 is
+// MAX_VIEW^2 * 576/337 of area; rock sits at ROCK_TARGET per ACTIVE_R disc. Multiply and
+// a screen holds about two dozen rocks -- so "one +1 per screen" is one in two dozen,
+// "one +2 per 5x5 screens" is one in twenty-five of those, and +3 one in a hundred.
+const ROCKS_PER_SCREEN = (MAX_VIEW * MAX_VIEW * 576 / 337)
+  * ROCK_TARGET / (Math.PI * ACTIVE_R * ACTIVE_R);
+const RICH_SCREENS = [1, 25, 100];    // screens you cross, on average, per +1, +2, +3
+
+function rollRich() {
+  const r = Math.random();
+  let edge = 0;
+  for (let i = RICH_SCREENS.length - 1; i >= 0; i--) {
+    edge += 1 / (RICH_SCREENS[i] * ROCKS_PER_SCREEN);
+    if (r < edge) return i + 1;
+  }
+  return 0;
+}
+
+function spawnRock(size, x, y, grace = 0, rich = rollRich()) {
   rocks.push({
     id: nextId++, size, x, y,
     vx: rand(-70, 70), vy: rand(-70, 70),
     a: rand(0, Math.PI * 2), spin: rand(-1.2, 1.2),
     r: size * 16, seed: Math.floor(Math.random() * 1e6),
     grace,                    // seconds before this rock can hurt anything
+    rich,                     // 0-3 grains showing, and that many handed over per break
   });
 }
 
@@ -710,9 +734,13 @@ function shed(x, y) {
 
 function shatter(r) {
   shed(r.x, r.y);
+  // What it was showing, it hands over -- on top of the roll, and on every break rather
+  // than only the last one. Its children carry the same seam, so a rich rock pays out
+  // again for each piece you take the trouble to finish.
+  for (let i = 0; i < r.rich; i++) spawnOre(r.x, r.y);
   if (r.size <= 1) return;
-  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
-  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE);
+  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE, r.rich);
+  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE, r.rich);
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
@@ -1461,7 +1489,8 @@ function snapshotFor(p) {
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
     bullets: bullets.filter(near).map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y) })),
-    rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y), a: +r.a.toFixed(2), size: r.size, seed: r.seed })),
+    rocks: rocks.filter(near).map(r => ({ id: r.id, x: Math.round(r.x), y: Math.round(r.y),
+      a: +r.a.toFixed(2), size: r.size, seed: r.seed, ...(r.rich ? { rich: r.rich } : {}) })),
     ore: ore.filter(near).map(o => ({ id: o.id, x: Math.round(o.x), y: Math.round(o.y), a: +o.a.toFixed(2) })),
     ...(kills.length ? { kills: kills.filter(near) } : {}),
   });

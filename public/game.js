@@ -1165,6 +1165,26 @@ const getRock = (seed, size) => {
   return rockCache.get(k);
 };
 
+// Where a rich rock's grains sit on it. Off the same seed as its outline, so they are
+// scattered but they are scattered the *same way* every frame -- a seam in the rock, not
+// a sparkle on top of it. Held well inside the hull so they never sit on the edge.
+function richSpots(seed, size, rich) {
+  let s = (seed ^ 0x5bd1e995) & 0x7fffffff;
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const base = size * 16, out = [];
+  for (let i = 0; i < rich; i++) {
+    const a = rnd() * Math.PI * 2, d = base * (0.15 + rnd() * 0.4);
+    out.push([Math.cos(a) * d, Math.sin(a) * d, base * (0.13 + rnd() * 0.07)]);
+  }
+  return out;
+}
+const spotCache = new Map();
+const getSpots = (seed, size, rich) => {
+  const k = seed + ':' + size + ':' + rich;
+  if (!spotCache.has(k)) spotCache.set(k, richSpots(seed, size, rich));
+  return spotCache.get(k);
+};
+
 // ---- starfield ----
 // Space has no edges to wrap, so stars are generated per tile from the tile's own
 // coordinates: pan anywhere and the same patch of sky comes back identical, without
@@ -1451,6 +1471,7 @@ function draw() {
   if (dev) window.__sel = [...selection];
   if (dev) window.__ws = ws;      // so a test can send an order the way the page would
   if (dev) window.__ore = state.ore || [];
+  if (dev) window.__rocks = state.rocks;
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone
@@ -1502,6 +1523,17 @@ function draw() {
     if (!onScreen(r.x, r.y, r.size * 26)) continue;
     const [x, y] = at(r);
     poly(getRock(r.seed, r.size), x, y, r.a, '#8fa6c8');
+    if (!r.rich) continue;
+    // The grains turn with the rock, because they are part of it.
+    const cos = Math.cos(r.a), sin = Math.sin(r.a);
+    ctx.save();
+    ctx.fillStyle = ORE_COLOR;
+    for (const [ox, oy, rad] of getSpots(r.seed, r.size, r.rich)) {
+      const g = new Path2D();
+      g.arc(x + ox * cos - oy * sin, y + ox * sin + oy * cos, rad, 0, Math.PI * 2);
+      ctx.fill(g);
+    }
+    ctx.restore();
   }
 
   const bs = 3 / cam.zoom;
