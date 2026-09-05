@@ -842,6 +842,11 @@ const svgPath = pts => pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(
 function moduleIcon(held, lit) {
   const mod = modules[held.type] || {};
   const g = svgEl('g', {});
+  // The icon is drawn at half size so the hull reads under it, which hides the one thing
+  // that decides whether a layout is legal. While a module is picked up or selected, its
+  // real footprint is shown around it -- that circle is exactly what the validity test uses.
+  if (lit) g.append(svgEl('circle', { r: mod.size || 8, fill: 'rgba(108,168,255,.16)',
+                                      stroke: 'rgba(108,168,255,.5)', 'stroke-width': .7 }));
   g.append(svgEl('circle', { r: (mod.size || 8) / 2, fill: '#16283a',
                              stroke: lit ? '#5ff0b0' : '#cfe6ff', 'stroke-width': .8 }));
   g.append(svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',

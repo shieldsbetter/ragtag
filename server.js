@@ -100,16 +100,21 @@ const CARRIER = {
   // two of them have to be at least the sum of their radii apart. The closest pair of
   // points here is 22 apart, across the beam, which is what decides how big a module can be
   // before it starts blocking its opposite number.
+  // Five down each side, 16 apart. A gun has a radius of 10, so two of them will not go in
+  // neighbouring points -- the extra points buy where a battery sits rather than how many
+  // guns it has, and a smaller module could use them all.
   installs: [
-    { id: 'fp', at: [32, -11] }, { id: 'mp', at: [0, -11] }, { id: 'ap', at: [-32, -11] },
-    { id: 'fs', at: [32, 11] }, { id: 'ms', at: [0, 11] }, { id: 'as', at: [-32, 11] },
+    { id: 'p1', at: [32, -11] }, { id: 'p2', at: [16, -11] }, { id: 'p3', at: [0, -11] },
+    { id: 'p4', at: [-16, -11] }, { id: 'p5', at: [-32, -11] },
+    { id: 's1', at: [32, 11] }, { id: 's2', at: [16, 11] }, { id: 's3', at: [0, 11] },
+    { id: 's4', at: [-16, 11] }, { id: 's5', at: [-32, 11] },
   ],
   // What a hull comes out of the yard carrying: every point filled, guns pointing outboard
   // so none of them has to traverse across its own deck.
   fit: [
-    { install: 'fp', type: 'gun', rot: -Math.PI / 2 }, { install: 'mp', type: 'gun', rot: -Math.PI / 2 },
-    { install: 'ap', type: 'gun', rot: -Math.PI / 2 }, { install: 'fs', type: 'gun', rot: Math.PI / 2 },
-    { install: 'ms', type: 'gun', rot: Math.PI / 2 }, { install: 'as', type: 'gun', rot: Math.PI / 2 },
+    { install: 'p1', type: 'gun', rot: -Math.PI / 2 }, { install: 'p3', type: 'gun', rot: -Math.PI / 2 },
+    { install: 'p5', type: 'gun', rot: -Math.PI / 2 }, { install: 's1', type: 'gun', rot: Math.PI / 2 },
+    { install: 's3', type: 'gun', rot: Math.PI / 2 }, { install: 's5', type: 'gun', rot: Math.PI / 2 },
   ],
   // Four discs down the spine rather than one circle around the whole hull: a bloated
   // collider is what would jam in a narrow fissure.
