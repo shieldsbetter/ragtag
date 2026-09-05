@@ -18,7 +18,11 @@ const back = document.createElement('canvas');
 const ctx = back.getContext('2d', { alpha: false, willReadFrequently: CPU });
 const hud = document.getElementById('hud');
 
-let myId = null, mounts = [], arcHalf = 0, maxView = 2200, clientVersion = '???????';
+let myId = null, maxView = 2200, clientVersion = '???????';
+let modules = {}, refitRates = { remove: 0.5, rotate: 0.25 };
+// Install points by id, per hull class: the positions are the hull's, what sits in them is
+// the ship's.
+const installsOf = h => Object.fromEntries(((hulls[h] || {}).installs || []).map(p => [p.id, p.at]));
 let hulls = {};   // per hull: where its guns sit and how far they traverse
 
 // Diagnostic switches, set in the URL: ?off=labels,wallfill,walls,bars,arcs
@@ -152,7 +156,8 @@ ws.onclose = reloadWhenUp;
 ws.onmessage = e => {
   const m = JSON.parse(e.data);
   if (m.t === 'welcome') {
-    myId = m.id; dev = m.dev; mounts = m.mounts; arcHalf = m.arcHalf; hulls = m.hulls || {};
+    myId = m.id; dev = m.dev; hulls = m.hulls || {};
+    modules = m.modules || {}; refitRates = m.refit || refitRates;
     maxView = m.maxView; clientVersion = m.cv || '???????'; cam.zoom = clampZoom(cam.zoom);
     if (m.prioMax) prioMax = m.prioMax;
     if (m.wreck) wreckDepth = m.wreck;
@@ -569,10 +574,12 @@ let cargoEl = null;                   // the cargo tab's running total
 // A row per side, fore to aft along it: the grid reads like the ship does, so a bar and
 // the gun it stands for are in the same place. The column count follows the hull rather
 // than being fixed, so a broadside of four is two rows of four.
-function gunRows() {
+function gunRows(ship) {
+  const where = installsOf(ship.h);
+  const at = i => where[(ship.ft[i] || [])[0]] || [0, 0];
   const sides = [[], []];
-  mounts.forEach((m, i) => sides[m.facing < 0 ? 0 : 1].push(i));
-  for (const s of sides) s.sort((a, b) => mounts[b].at[0] - mounts[a].at[0]);
+  (ship.ft || []).forEach((f, i) => sides[at(i)[1] < 0 ? 0 : 1].push(i));
+  for (const s of sides) s.sort((a, b) => at(b)[0] - at(a)[0]);
   const list = [];
   sides.forEach((side, c) => side.forEach((i, r) => list.push({ i, label: (c ? 'S' : 'P') + (r + 1) })));
   return { cols: Math.max(sides[0].length, sides[1].length, 1), list };
@@ -668,7 +675,7 @@ function buildDetails(ships) {
         gunShip = s.id;
         body.append(hold);
       }
-      if (PANELS[openTab].guns && mounts.length) body.append(gunGrid(s));
+      if (PANELS[openTab].guns && (s.ft || []).length) body.append(gunGrid(s));
       for (const [kind, label] of PANELS[openTab].rows)
         body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
       row.append(body);
@@ -686,7 +693,7 @@ const WRENCH = '<svg class="wrench" viewBox="0 0 12 12" aria-hidden="true"><path
 function gunGrid(s) {
   const wrap = document.createElement('div');
   wrap.className = 'guns';
-  const { cols, list } = gunRows();
+  const { cols, list } = gunRows(s);
   wrap.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   gunEls = [];
   gunShip = s.id;
@@ -1629,13 +1636,19 @@ function draw() {
       for (const rib of art.ribs || []) poly(rib, x, y, s.a, color, false, 1);
       if (s.th) poly(art.flame, x, y, s.a, '#ffb347', false);
     }
-    // mounts ride the hull; each gun keeps its own world bearing
+    // What is installed rides the hull; each gun keeps its own world bearing. The layout
+    // comes with the ship rather than with its class, because two carriers no longer have
+    // to be carrying the same things in the same places.
     const cos = Math.cos(s.a), sin = Math.sin(s.a);
-    const mts = (hulls[s.h] || {}).mounts || mounts;
-    const full = (hulls[s.h] || {}).hp || TURRET_HP;   // a fighter's one gun is tougher
-    mts.forEach((mt, i) => {
+    const where = installsOf(s.h);
+    (s.ft || []).forEach((f, i) => {
+      const [id, type, rot] = f;
+      const at = where[id];
+      if (!at) return;
+      const mod = modules[type] || {};
+      const full = mod.hp || TURRET_HP;
       const hp = s.hp ? s.hp[i] : full;
-      const gx = x + mt.at[0] * cos - mt.at[1] * sin, gy = y + mt.at[0] * sin + mt.at[1] * cos;
+      const gx = x + at[0] * cos - at[1] * sin, gy = y + at[0] * sin + at[1] * cos;
       if (hp <= 0) {                                      // silenced: a mount, not a gun
         // s.rp only comes with your own ships, so someone else's wrecks show nothing --
         // you cannot see another crew at work, which is the right answer anyway.
@@ -1646,7 +1659,7 @@ function draw() {
         ctx.save();
         ctx.strokeStyle = 'rgba(95,240,176,.10)'; ctx.lineWidth = 1 / cam.zoom;
         const arc = new Path2D();
-        arc.arc(gx, gy, 40, s.a + mt.facing - (hulls[s.h] || {}).arcHalf, s.a + mt.facing + (hulls[s.h] || {}).arcHalf);
+        arc.arc(gx, gy, 40, s.a + rot - mod.arcHalf, s.a + rot + mod.arcHalf);
         ctx.stroke(arc);
         ctx.restore();
       }

@@ -95,17 +95,54 @@ const TURRET_HP = 100, BULLET_DAMAGE = 20;   // five hits to silence a carrier's
 const CARRIER = {
   accel: 70, turn: 0.6, maxSpeed: 150,
   arriveR: 30, arriveV: 10,             // close enough, slow enough
-  // Each mount faces outboard and can only traverse arcHalf either side of that,
-  // so a gun cannot swing inboard and shoot through its own hull.
-  mounts: [
-    { at: [32, -11], facing: -Math.PI / 2 }, { at: [0, -11], facing: -Math.PI / 2 }, { at: [-32, -11], facing: -Math.PI / 2 },
-    { at: [32, 11], facing: Math.PI / 2 }, { at: [0, 11], facing: Math.PI / 2 }, { at: [-32, 11], facing: Math.PI / 2 },
+  // Where things may be installed, and nothing about what is installed there. A fit is a
+  // mapping from these to modules, and not every mapping is valid: modules have a size, and
+  // two of them have to be at least the sum of their radii apart. The closest pair of
+  // points here is 22 apart, across the beam, which is what decides how big a module can be
+  // before it starts blocking its opposite number.
+  installs: [
+    { id: 'fp', at: [32, -11] }, { id: 'mp', at: [0, -11] }, { id: 'ap', at: [-32, -11] },
+    { id: 'fs', at: [32, 11] }, { id: 'ms', at: [0, 11] }, { id: 'as', at: [-32, 11] },
   ],
-  turret: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4, hitR: 9, hp: TURRET_HP },
+  // What a hull comes out of the yard carrying: every point filled, guns pointing outboard
+  // so none of them has to traverse across its own deck.
+  fit: [
+    { install: 'fp', type: 'gun', rot: -Math.PI / 2 }, { install: 'mp', type: 'gun', rot: -Math.PI / 2 },
+    { install: 'ap', type: 'gun', rot: -Math.PI / 2 }, { install: 'fs', type: 'gun', rot: Math.PI / 2 },
+    { install: 'ms', type: 'gun', rot: Math.PI / 2 }, { install: 'as', type: 'gun', rot: Math.PI / 2 },
+  ],
   // Four discs down the spine rather than one circle around the whole hull: a bloated
   // collider is what would jam in a narrow fissure.
   collide: [[-40, 0, 14], [-13, 0, 14], [13, 0, 14], [40, 0, 14]],
 };
+
+// ---- modules ----
+//
+// What can be installed. `size` is the radius it takes up on the hull, which is what makes
+// some fits invalid; `install` is what it costs in ore to put one in. A module has no
+// identity and no state of its own -- a module is a module -- so a hold is a count per
+// type, and the wear on an installed one belongs to the installation rather than travelling
+// with it. Pulling a gun and putting it back does mend it, and is priced so that is a silly
+// way to do repairs rather than an impossible one.
+const MODULES = {
+  gun: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4, hitR: 9, hp: TURRET_HP,
+         size: 10, install: 40 },
+  // Fixed to their hulls and never in anybody's hold, but they are what sits in an install
+  // point, so they are modules like any other.
+  fighterGun: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200,
+                size: 10, install: 0, fixed: true },
+  core: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 26, hp: 600,
+          size: 10, install: 0, fixed: true },
+  emplacement: { turn: 1.8, range: 600, cooldown: 1.3, arcHalf: Math.PI, hitR: 14, hp: 400,
+                 size: 10, install: 0, fixed: true },
+};
+
+// Taking a module out is half of putting one in, and turning one where it stands is a
+// quarter. A module moved is an uninstall and an install, deliberately: pricing a move as
+// its own thing needs a rule for which module became which across the diff, and there is no
+// such rule that is obviously fair. Buying a new module will cost more than 1.5 installs,
+// so relocating is still the cheap way to rearrange.
+const REFIT_REMOVE = 0.5, REFIT_ROTATE = 0.25;
 
 // ---- target priority ----
 // A turret used to shoot whatever was nearest. Instead each ship carries, per kind of
@@ -144,7 +181,7 @@ const defaultPrio = () => {
 // 1 is a gun at full health. The debt is part of the axis, so a half-rebuilt wreck
 // really is further along than an untouched one. Full health is the hull's, not a
 // constant: a fighter's one gun is tougher than a carrier's six.
-const maxHp = s => s.hull.turret.hp ?? TURRET_HP;
+const maxHp = t => MODULES[t.type].hp ?? TURRET_HP;
 const repairFrac = (hp, max) => (hp + WRECK_DEPTH) / (max + WRECK_DEPTH);
 
 // An ordered sequence of points, straight lines between them, x never going backwards.
@@ -170,8 +207,8 @@ function prioAt(pts, f) {
 const FIGHTER = {
   accel: 260, turn: 3.4, maxSpeed: 340,
   arriveR: 30, arriveV: 10,
-  mounts: [{ at: [0, 0], facing: 0 }],
-  turret: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200 },
+  installs: [{ id: 'gun', at: [0, 0] }],
+  fit: [{ install: 'gun', type: 'fighterGun', rot: 0 }],
   collide: [[0, 0, 9]],
   frail: true,
   targetKind: 'fighter',
@@ -188,8 +225,8 @@ const FIGHTER = {
 const CACHE = {
   accel: 0, turn: 0, maxSpeed: 0,
   arriveR: 30, arriveV: 10,
-  mounts: [{ at: [0, 0], facing: 0 }],
-  turret: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 26, hp: 600 },
+  installs: [{ id: 'core', at: [0, 0] }],
+  fit: [{ install: 'core', type: 'core', rot: 0 }],
   collide: [[0, 0, 20]],
   frail: true, rockProof: true, ai: 'static',
   targetKind: 'cache',
@@ -204,10 +241,10 @@ const CACHE = {
 const BASTION = {
   accel: 0, turn: 0, maxSpeed: 0,
   arriveR: 30, arriveV: 10,
-  mounts: [{ at: [0, 0], facing: 0 }],
+  installs: [{ id: 'gun', at: [0, 0] }],
   // Reach is capped by the shell, not by the gun: 560 a second for 1.2 seconds is 672
   // units, and a range past that rejects every target as one the shot cannot reach in time.
-  turret: { turn: 1.8, range: 600, cooldown: 1.3, arcHalf: Math.PI, hitR: 14, hp: 400 },
+  fit: [{ install: 'gun', type: 'emplacement', rot: 0 }],
   collide: [[0, 0, 16]],
   frail: true, rockProof: true, ai: 'static',
   targetKind: 'turret',
@@ -913,6 +950,98 @@ function rebuildWalls() {
 
 const pendingNests = [];
 
+// ---- refit ----
+//
+// A ship may be reconfigured while it is inside the settlement's cavern. There is no
+// station object yet; being in the one place in the world that is enclosed and safe stands
+// in for docking, and swapping it for a real station later changes only this function.
+function canRefit(s) {
+  if (s.hull !== CARRIER || !crewed(s)) return false;
+  const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
+  return Math.hypot(s.x - cx, s.y - cy) < TOWN_CAVE;
+}
+
+// What a layout costs, recovered from the difference between what the ship has and what it
+// asked for. Every install point is priced on its own -- there is no matching of modules
+// across the diff, so moving one is an uninstall and an install, which is deliberate: a
+// move price needs a rule for which module became which, and no such rule is obviously
+// fair. The client is never asked what it thinks the total is.
+function refitPrice(before, after) {
+  let ore = 0;
+  const ids = new Set([...before.keys(), ...after.keys()]);
+  for (const id of ids) {
+    const was = before.get(id), now = after.get(id);
+    if (was) ore += (now && now.type === was.type ? 0 : MODULES[was.type].install * REFIT_REMOVE);
+    if (now && (!was || was.type !== now.type)) ore += MODULES[now.type].install;
+    else if (now && was && was.rot !== now.rot) ore += MODULES[now.type].install * REFIT_ROTATE;
+  }
+  return Math.round(ore);
+}
+
+// Whether a layout physically fits: every point is real, every module is one that may be
+// installed by hand, and no two modules overlap. Size is a radius, so rotation cannot make
+// a fit invalid -- it only decides where the arc points.
+function refitFits(hull, fit) {
+  const where = new Map(hull.installs.map(p => [p.id, p.at]));
+  const seen = new Set();
+  for (const f of fit) {
+    const mod = MODULES[f.type];
+    if (!where.has(f.install) || !mod || mod.fixed) return false;
+    if (seen.has(f.install)) return false;
+    seen.add(f.install);
+  }
+  for (let i = 0; i < fit.length; i++)
+    for (let j = i + 1; j < fit.length; j++) {
+      const a = where.get(fit[i].install), b = where.get(fit[j].install);
+      if (Math.hypot(a[0] - b[0], a[1] - b[1]) < MODULES[fit[i].type].size + MODULES[fit[j].type].size)
+        return false;
+    }
+  return true;
+}
+
+// Apply a layout, or refuse it and say why. An installation's wear belongs to the point
+// rather than to the module, so a gun left alone keeps its damage and one that is put in
+// -- even the same type, moved one point over -- starts whole.
+function refit(s, want) {
+  if (!canRefit(s)) return 'not docked';
+  if (!Array.isArray(want) || want.length > s.hull.installs.length) return 'bad fit';
+  const fit = want.map(f => ({ install: String(f.install), type: String(f.type),
+                               rot: Number(f.rot) || 0 }));
+  if (fit.some(f => !Number.isFinite(f.rot))) return 'bad fit';
+  if (!refitFits(s.hull, fit)) return 'will not fit';
+
+  const before = new Map(s.turrets.map(t => [t.install, t]));
+  const after = new Map(fit.map(f => [f.install, f]));
+
+  // Stock is what is in the hold plus what is coming off the hull in this same refit.
+  const stock = { ...s.hold };
+  for (const t of s.turrets) {
+    const now = after.get(t.install);
+    if (!now || now.type !== t.type) stock[t.type] = (stock[t.type] || 0) + 1;
+  }
+  for (const f of fit) {
+    const was = before.get(f.install);
+    if (was && was.type === f.type) continue;
+    if (!stock[f.type]) return `no ${f.type} in the hold`;
+    stock[f.type]--;
+  }
+
+  const price = refitPrice(before, after);
+  if (s.ore < price) return `needs ${price} ore`;
+
+  s.ore -= price;
+  s.hold = stock;
+  s.turrets = fitTurrets(s.hull, fit);
+  for (const t of s.turrets) {
+    const was = before.get(t.install);
+    if (was && was.type === t.type) { t.hp = was.hp; t.a = was.a; t.cool = was.cool; }
+  }
+  // Indices into the gun list no longer mean what they meant, and the crew's standing
+  // orders were written in them.
+  s.repairing = null; s.repairFocus = [];
+  return null;
+}
+
 // ---- encounters ----
 // A hull says how a thing flies and what it will shoot. An encounter says what a group of
 // them is doing here: where they stand, what they are guarding, and who they have decided
@@ -1475,6 +1604,16 @@ function stock(s, spot) {
 }
 
 const PLAYER_TEAM = 'players';        // every human shares one side, for now
+// Build a ship's installed modules from a fit. This is the only thing that makes turrets,
+// so a refit is the same operation as leaving the yard.
+function fitTurrets(hull, fit) {
+  const where = new Map(hull.installs.map(p => [p.id, p.at]));
+  return fit.filter(f => where.has(f.install) && MODULES[f.type]).map(f => ({
+    install: f.install, type: f.type, at: where.get(f.install), rot: f.rot,
+    a: f.rot, cool: rand(0, MODULES[f.type].cooldown), hp: MODULES[f.type].hp, wx: 0, wy: 0,
+  }));
+}
+
 function newShip(owner, team, at = {}, hull = CARRIER) {
   const facing = at.a ?? rand(0, Math.PI * 2);
   const spot = at.x === undefined ? spawnPoint(at.nearX ?? 0, at.nearY ?? 0, at.reach) : at;
@@ -1483,8 +1622,8 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     x: spot.x, y: spot.y, vx: 0, vy: 0, a: facing,
     heading: facing,                      // where it wants to point once it is done travelling
     th: 0, dest: null, braking: false, detourSide: 0, stuckFor: 0,
-    turrets: hull.mounts.map(() => ({ a: 0, cool: rand(0, hull.turret.cooldown),
-                                      hp: hull.turret.hp ?? TURRET_HP, wx: 0, wy: 0 })),
+    turrets: fitTurrets(hull, hull.fit),
+    hold: {},             // modules pulled off and not yet reinstalled, counted by type
     side: Math.random() < 0.5 ? 1 : -1,   // which way this one likes to break
     sideFor: rand(1.2, 3.5),
     wander: 0,
@@ -1638,9 +1777,9 @@ function placeTurrets() {
   for (const s of ships) {
     const cos = Math.cos(s.a), sin = Math.sin(s.a);
     for (let i = 0; i < s.turrets.length; i++) {
-      const t = s.turrets[i], m = s.hull.mounts[i];
-      t.wx = s.x + m.at[0] * cos - m.at[1] * sin;
-      t.wy = s.y + m.at[0] * sin + m.at[1] * cos;
+      const t = s.turrets[i];
+      t.wx = s.x + t.at[0] * cos - t.at[1] * sin;
+      t.wy = s.y + t.at[0] * sin + t.at[1] * cos;
     }
   }
 }
@@ -1699,7 +1838,7 @@ function targetsFor(team) {
       // mount, and asking a gun to rank it against a carrier's battery is a different
       // question from ranking one battery against another.
       if (t.hp > 0) list.push({ kind: s.hull.targetKind || 'turret', ship: s.id,
-                                x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: s.hull.turret.hitR });
+                                x: t.wx, y: t.wy, vx: s.vx, vy: s.vy, r: MODULES[t.type].hitR });
   }
   return list;
 }
@@ -1812,15 +1951,15 @@ function intercept(dx, dy, ux, uy, B) {
 const LOS_TRIES = 6;      // give up on a turret rather than sight-check a whole battlefield
 
 function aimTurrets(s, targets, dt) {
-  const hull = s.hull, T = hull.turret;
+  const hull = s.hull;
   // An embedded gun answers no line-of-sight question at all: it is standing in a wall, so
   // every shot it could ever take is blocked, and the exemption is the whole point of it.
   const polys = s.hull.embedded ? [] : nearbyWalls(s.x, s.y);   // once per ship, not per gun
   for (let i = 0; i < s.turrets.length; i++) {
     const t = s.turrets[i];
+    const T = MODULES[t.type];
     if (t.hp <= 0) continue;                          // a dead gun neither tracks nor fires
-    const m = hull.mounts[i];
-    const rest = s.a + m.facing;
+    const rest = s.a + t.rot;
 
     // Everything this gun could shoot, best first, then take the best one it can
     // actually see. Picking the best and then rejecting it would leave the gun idle
@@ -1918,9 +2057,9 @@ function resolveWalls(s) {
 // interleave, because that is what "always work on the worst one" means. Zero priority
 // is how you call the crew off a gun entirely.
 function repairShip(s, dt) {
-  const T = s.turrets, full = maxHp(s);
-  const wants = i => i !== null && T[i].hp < full
-    && prioAt(s.prio.repair, repairFrac(T[i].hp, full)) > 0;
+  const T = s.turrets;
+  const wants = i => i !== null && T[i] && T[i].hp < maxHp(T[i])
+    && prioAt(s.prio.repair, repairFrac(T[i].hp, maxHp(T[i]))) > 0;
   s.repairHold -= dt;
 
   // Guns named by hand are not a stronger opinion about priority, they replace it: the
@@ -1928,13 +2067,13 @@ function repairShip(s, dt) {
   // say. Naming a gun the curve refuses is a legitimate order, which is the point of
   // being able to name one. When they are all whole the curve takes over again rather
   // than leaving the crew idle beside a damaged gun.
-  const named = s.repairFocus.filter(i => T[i] && T[i].hp < full);
+  const named = s.repairFocus.filter(i => T[i] && T[i].hp < maxHp(T[i]));
   if (named.length) {
     if (s.repairHold <= 0 || !named.includes(s.repairing)) {
       s.repairing = named[(named.indexOf(s.repairing) + 1) % named.length];
       s.repairHold = REPAIR_DWELL;
     }
-    T[s.repairing].hp = Math.min(full, T[s.repairing].hp + REPAIR_RATE * dt);
+    T[s.repairing].hp = Math.min(maxHp(T[s.repairing]), T[s.repairing].hp + REPAIR_RATE * dt);
     return;
   }
 
@@ -1944,7 +2083,7 @@ function repairShip(s, dt) {
     let best = null, bestScore = 0;
     for (let i = 0; i < T.length; i++) {
       if (!wants(i)) continue;
-      const score = prioAt(s.prio.repair, repairFrac(T[i].hp, full));
+      const score = prioAt(s.prio.repair, repairFrac(T[i].hp, maxHp(T[i])));
       // Ties go to the gun nearest to being finished, so even a flat band completes one
       // before starting the next.
       if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
@@ -1955,7 +2094,7 @@ function repairShip(s, dt) {
     s.repairHold = best === null ? 0 : REPAIR_DWELL;
   }
   if (s.repairing === null) return;
-  T[s.repairing].hp = Math.min(full, T[s.repairing].hp + REPAIR_RATE * dt);
+  T[s.repairing].hp = Math.min(maxHp(T[s.repairing]), T[s.repairing].hp + REPAIR_RATE * dt);
 }
 
 // Rocks exist near ships and nowhere else. New ones arrive in the band just short of
@@ -2097,7 +2236,7 @@ function step(dt) {
       if (s.hull.rockProof) continue;
       for (const t of s.turrets) {
         if (t.hp <= 0) continue;                      // nothing left there to hit
-        const dx = r.x - t.wx, dy = r.y - t.wy, rr = r.r + s.hull.turret.hitR;
+        const dx = r.x - t.wx, dy = r.y - t.wy, rr = r.r + MODULES[t.type].hitR;
         if (dx * dx + dy * dy >= rr * rr) continue;
         wound(s, t, ROCK_DAMAGE);
         struck = true;
@@ -2119,7 +2258,7 @@ function step(dt) {
       if (s.team === o.team) continue;
       for (const t of s.turrets) {
         if (t.hp <= 0) continue;
-        const dx = o.x - t.wx, dy = o.y - t.wy, rr = s.hull.turret.hitR + o.r;
+        const dx = o.x - t.wx, dy = o.y - t.wy, rr = MODULES[t.type].hitR + o.r;
         if (dx * dx + dy * dy >= rr * rr) continue;
         wound(s, t, BULLET_DAMAGE);
         bullets.splice(b, 1); struck = true;
@@ -2168,6 +2307,10 @@ function snapshotFor(p) {
       // not need three decimals: 0.01rad is a pixel at the tip of a hull.
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
       tu: s.turrets.map(t => +t.a.toFixed(2)),
+      // What is installed and where. It is per ship now rather than per hull class, so the
+      // client cannot work it out from the hull any more. It repeats verbatim between
+      // snapshots, which deflate reduces to almost nothing.
+      ft: s.turrets.map(t => [t.install, t.type, +t.rot.toFixed(2)]),
       // Rounded: repair moves in thirtieths of a point and nobody can see that, while
       // the digits would ride in every snapshot.
       //
@@ -2186,7 +2329,8 @@ function snapshotFor(p) {
       ...(s.owner === p.id
         ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
             ...(s.repairing !== null ? { rp: s.repairing } : {}),
-            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}), or: s.ore }
+            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}), or: s.ore,
+            hold: s.hold, ...(canRefit(s) ? { dock: 1 } : {}) }
         : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
@@ -2261,9 +2405,9 @@ wss.on('connection', ws => {
     p.view = { x: fleet[0].x, y: fleet[0].y };  // until the client says where it is looking
 
     ws.send(JSON.stringify({ t: 'welcome', id: p.id, dev: DEV, cv: clientHash(),
-      maxView: MAX_VIEW, mounts: CARRIER.mounts, arcHalf: CARRIER.turret.arcHalf,
-      hulls: Object.fromEntries(Object.entries(HULLS).map(([k, h]) =>
-        [k, { mounts: h.mounts, arcHalf: h.turret.arcHalf, hp: h.turret.hp ?? TURRET_HP }])),
+      maxView: MAX_VIEW,
+      hulls: Object.fromEntries(Object.entries(HULLS).map(([k, h]) => [k, { installs: h.installs }])),
+      modules: MODULES, refit: { remove: REFIT_REMOVE, rotate: REFIT_ROTATE },
       prioMax: PRIO_MAX, turretHp: TURRET_HP, wreck: WRECK_DEPTH }));
   }
 
@@ -2284,6 +2428,17 @@ wss.on('connection', ws => {
         // Face the way you travelled, unless the order was a nudge too small to have a
         // direction worth adopting. Dragging the ring afterwards still overrides it.
         if (Math.hypot(dx, dy) > s.hull.arriveR) s.heading = Math.atan2(dy, dx);
+      }
+    }
+    // The whole intended layout in one order, because a stream of drags and rotations
+    // would leave a rejected one halfway through and unrecoverable over half a second of
+    // latency. The price is worked out here from what the ship already has: the client's
+    // running total is a preview and is never sent.
+    else if (m.t === 'refit' && Array.isArray(m.fit)) {
+      for (const s of ships) {
+        if (s.owner !== p.id || s.id !== m.ship) continue;
+        const why = refit(s, m.fit);
+        ws.send(JSON.stringify({ t: 'refit', ship: s.id, ok: !why, ...(why ? { why } : {}) }));
       }
     }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
