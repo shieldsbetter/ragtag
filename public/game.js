@@ -903,7 +903,13 @@ function drawRefit() {
   refitBoard.append(svg);
 
   refitPalette.textContent = '';
-  const kinds = Object.keys(stock).filter(t => stock[t] > 0 && !(modules[t] || {}).fixed);
+  // A module being carried off the hull shows in the hold before it gets there, so the
+  // gesture reads as putting it somewhere rather than as making it disappear. It is not in
+  // the hold until the pointer comes up, which is what the ghosting says.
+  const pending = carried && !onto ? carried.type : null;
+  const shown = { ...stock };
+  if (pending) shown[pending] = (shown[pending] || 0) + 1;
+  const kinds = Object.keys(shown).filter(t => shown[t] > 0 && !(modules[t] || {}).fixed);
   if (!kinds.length) {
     const e = document.createElement('span');
     e.className = 'empty';
@@ -913,9 +919,13 @@ function drawRefit() {
   for (const t of kinds) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.className = 'mod' + (refitting.pick === t ? ' on' : '');
+    // Wholly ghosted when the only one there is the one under the pointer; otherwise the
+    // entry is real and it is the increment that is provisional.
+    const ghost = t === pending && !stock[t];
+    b.className = 'mod' + (refitting.pick === t ? ' on' : '') + (ghost ? ' ghost' : '');
     b.dataset.type = t;
-    b.innerHTML = `${modName(t)} <span class="n">×${stock[t]}</span>`;
+    b.innerHTML = `${modName(t)} <span class="n">×${ghost ? 1 : stock[t]}</span>`
+      + (t === pending && !ghost ? ' <span class="pending">+1</span>' : '');
     refitPalette.append(b);
   }
 }
