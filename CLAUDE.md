@@ -112,6 +112,14 @@ lower-ranked one is truncated at the boundary instead, so they abut exactly: `bl
 stops where it starts. Only pairs whose boxes meet are cut, which is a handful around the
 town rather than every wall in the area of interest.
 
+**A settlement gun is a hull set inside the rock, and every odd thing follows from that.**
+It is `embedded`: walls do not push it out, walls do not stop its shells, and nothing takes
+aim at it — not by decree but because nothing anybody has can reach a thing inside a rock,
+so a fighter that could target one would only stall at the mouth plinking at it. It is
+unowned, so it never anchors the world, and it traverses all the way round, having no hull
+in its own way. Its reach is capped by the shell rather than the gun: 560 a second for 1.2
+seconds is 672 units, and a range past that silently rejects every target as unreachable.
+
 **Blocking matter stops asteroids; ordinary rock does not.** A drifting rock that reaches
 `block` comes apart exactly as if it had been shot, and its pieces are put down clear of
 the surface and thrown back along its normal — reflecting what the rock arrived with, so a

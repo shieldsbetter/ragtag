@@ -196,8 +196,27 @@ const CACHE = {
   spills: 50,           // grains it lets go of when it breaks
 };
 
-const HULLS = { carrier: CARRIER, fighter: FIGHTER, cache: CACHE };
-const hullKey = h => (h === FIGHTER ? 'fighter' : h === CACHE ? 'cache' : 'carrier');
+// A gun set into the settlement's rock, covering the tunnel. It is `embedded`, and every
+// odd thing about it follows from that one fact: the wall does not push it out, the wall
+// does not stop its shells, and nothing takes aim at it -- not because it is invulnerable
+// by decree but because nothing anybody has can reach a thing inside a rock. It traverses
+// all the way round, having no hull in its own way.
+const BASTION = {
+  accel: 0, turn: 0, maxSpeed: 0,
+  arriveR: 30, arriveV: 10,
+  mounts: [{ at: [0, 0], facing: 0 }],
+  // Reach is capped by the shell, not by the gun: 560 a second for 1.2 seconds is 672
+  // units, and a range past that rejects every target as one the shot cannot reach in time.
+  turret: { turn: 1.8, range: 600, cooldown: 1.3, arcHalf: Math.PI, hitR: 14, hp: 400 },
+  collide: [[0, 0, 16]],
+  frail: true, rockProof: true, ai: 'static',
+  targetKind: 'turret',
+  embedded: true,
+};
+
+const HULLS = { carrier: CARRIER, fighter: FIGHTER, cache: CACHE, bastion: BASTION };
+const hullKey = h => (h === FIGHTER ? 'fighter' : h === CACHE ? 'cache'
+                    : h === BASTION ? 'bastion' : 'carrier');
 
 const PREDICT_DT = 0.1, PREDICT_STEPS = 400;   // the rollout answers a yes/no question;
                                                // it does not need the sim's fidelity
@@ -372,7 +391,11 @@ function townMatter() {
     const a = (k / 40) * Math.PI * 2;
     const off = Math.abs(angleDiff(a, TOWN_OUT));
     const t = Math.min(1, Math.max(0, (off - TOWN_DOOR) / TOWN_DOOR));
-    const r = (TOWN_STAND + (townReach(a) * TOWN_LAP - TOWN_STAND) * t) * (1 + (rnd() - 0.5) * 0.16);
+    // The wobble fades out with the standoff, so the face around the doorway is flat and
+    // exactly TOWN_STAND out. The settlement's guns are set into that face at a known
+    // depth, and a wobbling surface would have them sticking out of it or buried too deep
+    // to reach anything.
+    const r = (TOWN_STAND + (townReach(a) * TOWN_LAP - TOWN_STAND) * t) * (1 + (rnd() - 0.5) * 0.16 * t);
     ring.push([Math.cos(a) * r, Math.sin(a) * r]);
   }
   const rock = [ring];
@@ -589,6 +612,16 @@ function siteFor(x, y) {
 
 loadSites();
 seedTown();
+// The settlement's guns, set into the rock either side of the tunnel. Ships live only in
+// memory, so these go up on every boot rather than being part of what the cell generated
+// once: the set piece's furniture, not its matter.
+function seedBastions() {
+  const ux = Math.cos(TOWN_OUT), uy = Math.sin(TOWN_OUT), px = -uy, py = ux;
+  const d = TOWN_STAND - 180;                   // set into the flat face beside the mouth
+  const off = TOWN_TUNNEL / 2 + 130;            // and clear of the corridor either side
+  for (const sgn of [1, -1])
+    newShip(null, PLAYER_TEAM, { x: ux * d + px * off * sgn, y: uy * d + py * off * sgn, a: TOWN_OUT }, BASTION);
+}
 setInterval(saveSites, 5000);
 
 
@@ -1410,6 +1443,7 @@ function stock(s, spot) {
   }
 }
 
+const PLAYER_TEAM = 'players';        // every human shares one side, for now
 function newShip(owner, team, at = {}, hull = CARRIER) {
   const facing = at.a ?? rand(0, Math.PI * 2);
   const spot = at.x === undefined ? spawnPoint(at.nearX ?? 0, at.nearY ?? 0, at.reach) : at;
@@ -1626,6 +1660,9 @@ function targetsFor(team) {
   const list = rocks.map(r => ({ kind: 'rock', ship: null, x: r.x, y: r.y, vx: r.vx, vy: r.vy, r: r.r }));
   for (const s of ships) {
     if (s.team === team) continue;
+    // Set into rock, so no shell can arrive: aiming at one is a gun wasted and a fighter
+    // stalled at the mouth plinking at something it cannot touch.
+    if (s.hull.embedded) continue;
     for (const t of s.turrets)
       // What kind of thing a mount counts as is the hull's business: a fighter is one
       // mount, and asking a gun to rank it against a carrier's battery is a different
@@ -1745,7 +1782,9 @@ const LOS_TRIES = 6;      // give up on a turret rather than sight-check a whole
 
 function aimTurrets(s, targets, dt) {
   const hull = s.hull, T = hull.turret;
-  const polys = nearbyWalls(s.x, s.y);                // once per ship, not per gun
+  // An embedded gun answers no line-of-sight question at all: it is standing in a wall, so
+  // every shot it could ever take is blocked, and the exemption is the whole point of it.
+  const polys = s.hull.embedded ? [] : nearbyWalls(s.x, s.y);   // once per ship, not per gun
   for (let i = 0; i < s.turrets.length; i++) {
     const t = s.turrets[i];
     if (t.hp <= 0) continue;                          // a dead gun neither tracks nor fires
@@ -1807,6 +1846,7 @@ function aimTurrets(s, targets, dt) {
       t.cool = T.cooldown;
       bullets.push({
         id: nextId++, owner: s.owner, team: s.team, life: BULLET_LIFE, r: 2,
+        ghost: s.hull.embedded,       // fired from inside rock: walls are not in its way
         x: t.wx, y: t.wy,
         vx: s.vx + Math.cos(t.a) * BULLET_SPEED, vy: s.vy + Math.sin(t.a) * BULLET_SPEED,
       });
@@ -1972,7 +2012,7 @@ function step(dt) {
       : s.dest ? autopilot(s, dt) : faceCmd(s, dt);
     s.th = cmd.thrust ? 1 : 0;
     advance(s, cmd, dt, s.hull);
-    resolveWalls(s);
+    if (!s.hull.embedded) resolveWalls(s);   // being in the rock is the point
   }
   for (const s of ships) repairShip(s, dt);
   placeTurrets();
@@ -1990,6 +2030,7 @@ function step(dt) {
     if (o.life <= 0) { bullets.splice(b, 1); continue; }
     // Test the whole step, not just where it landed: a shell covers ~19px a tick and
     // would otherwise skip through a thin corner of rock.
+    if (o.ghost) continue;
     const polys = nearbyWalls(o.x, o.y);
     if (polys.length && segmentBlocked(px, py, o.x, o.y, polys)) bullets.splice(b, 1);
   }
@@ -2088,6 +2129,10 @@ function snapshotFor(p) {
     players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
     ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
       id: s.id, owner: s.owner, h: hullKey(s.hull),
+      // Whose side it is on, which is not the same question as whose it is. Without this
+      // the client can only ask "is it mine", so another player's ships -- and the
+      // settlement's own guns -- were drawn in the colour reserved for the enemy.
+      ...(s.team === PLAYER_TEAM ? { f: 1 } : {}),
       // Ships keep sub-pixel position -- they are what the eye follows -- but angles do
       // not need three decimals: 0.01rad is a pixel at the tip of a hull.
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
@@ -2179,7 +2224,7 @@ wss.on('connection', ws => {
         // The rest of the fleet forms up on the first ship rather than being scattered
         // across the map: a squadron you cannot see together is not a squadron.
         const lead = fleet[0];
-        fleet.push(newShip(p.id, 'players',
+        fleet.push(newShip(p.id, PLAYER_TEAM,
           lead ? { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP } : {}));
       }
     p.view = { x: fleet[0].x, y: fleet[0].y };  // until the client says where it is looking
@@ -2329,6 +2374,11 @@ async function openTunnel(port) {
 const stopTunnel = () => { if (ngrokProc && ngrokProc.exitCode === null) ngrokProc.kill(); };
 process.on('exit', stopTunnel);
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { stopTunnel(); process.exit(0); });
+
+// After the declarations, not beside seedTown: newShip reaches for `crewed`, which is a
+// const further down the file, and calling up into it is a TDZ error that `node --check`
+// passes clean.
+seedBastions();
 
 server.listen(PORT, async () => {
   console.log(`\nships ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`);

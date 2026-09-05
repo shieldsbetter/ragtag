@@ -1094,9 +1094,12 @@ const DART_FLAME = [[-4, 0], [-12, 3], [-17, 0], [-12, -3]];
 // Shapes are art and stay on the client; the server sends only where the guns are.
 // `guns: false` means the hull *is* the gun -- nothing to draw at the mount, and nothing
 // to draw an arc for, because it cannot traverse.
+// A gun in a rock: a squat blockhouse, drawn small because most of it is buried.
+const BASTION = [[22, 0], [11, 19], [-11, 19], [-22, 0], [-11, -19], [11, -19]];
 const HULL_ART = {
   carrier: { body: HULL, deck: DECK, ribs: RIBS, flame: FLAME, guns: true, reach: 90 },
   fighter: { body: DART, flame: DART_FLAME, guns: false, reach: 30 },
+  bastion: { body: BASTION, guns: true, reach: 34 },
   cache: { body: PENT, draw: drawCache, guns: false, reach: 40,
            deathMs: 10000, deathSpin: 0.25, oreSparks: true, debrisRgb: '230,237,246' },
 };
@@ -1615,7 +1618,10 @@ function draw() {
     if (!onScreen(s.x, s.y, art.reach)) continue;     // hull half-length plus turret reach
     const [x, y] = at(s);
     const own = s.owner === myId;
-    const color = own ? '#5ff0b0' : '#ff6b8a';
+    // Three states, not two: yours, your side's, and theirs. A teammate's hull and the
+    // settlement's guns are not enemies, and drawing them in the enemy's colour made the
+    // one place in the world that is defending you look like the thing to shoot.
+    const color = own ? '#5ff0b0' : s.f ? '#4aa88a' : '#ff6b8a';
     if (art.draw) art.draw(x, y, now);
     else {
       poly(art.body, x, y, s.a, color);
