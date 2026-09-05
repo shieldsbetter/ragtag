@@ -639,11 +639,12 @@ function syncDetails() {
   // Rebuilding blows away a half-dragged envelope, so it happens only when the shape of
   // the panel changes -- which ships, which one is open, which one wears the ring. The
   // live numbers are written into kept nodes every frame instead.
-  // The open ship's loadout is part of the shape too: which repair envelopes there are
-  // follows from what is installed, and a refit that changes it has to redraw the panel.
   const open = ships.find(s => s.id === openShip);
+  // The open ship's loadout and hold are part of the shape too: which repair envelopes
+  // there are follows from what is installed, and the cargo tab lists what is carried.
   const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}|${openTab}`
-    + `|${(open?.ft || []).map(f => f[1]).join(',')}`;
+    + `|${(open?.ft || []).map(f => f[1]).join(',')}`
+    + `|${Object.entries(open?.hold || {}).filter(([, n]) => n > 0).join(',')}`;
   if (key !== builtKey) { builtKey = key; buildDetails(ships); }
   for (const s of ships) {
     const el = statusEls.get(s.id);
@@ -701,6 +702,22 @@ function buildDetails(ships) {
         cargoEl = hold.querySelector('b');
         gunShip = s.id;
         body.append(hold);
+        // What the beams have brought in and the yard has not yet fitted. The refit sheet
+        // shows the same stock, but only while it is open and only for one hull -- this is
+        // where you look to find out whether it is worth going home.
+        const carried = Object.entries(s.hold || {}).filter(([, n]) => n > 0);
+        for (const [type, n] of carried) {
+          const row = document.createElement('div');
+          row.className = 'hold mod';
+          row.innerHTML = `<span class="k">${modTitle(type)}</span><b>${n}</b>`;
+          body.append(row);
+        }
+        if (!carried.length) {
+          const row = document.createElement('div');
+          row.className = 'hold empty';
+          row.textContent = 'no modules aboard';
+          body.append(row);
+        }
       }
       if (PANELS[openTab].guns && (s.ft || []).length) body.append(gunGrid(s));
       // Offered only where it can be done. The server decides that -- it sends `dock` when

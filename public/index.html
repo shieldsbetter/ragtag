@@ -104,6 +104,10 @@
   #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
   #details .hold { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 12px; }
   #details .hold b { color: #d8a851; font-weight: normal; font-size: 20px; }
+  /* Modules are not ore and do not get ore's colour. */
+  #details .hold.mod { margin: 0 0 6px; }
+  #details .hold.mod b { color: #9fd4ff; font-size: 16px; }
+  #details .hold.empty { color: #55677d; margin: 0 0 6px; }
   /* A thumb needs a target, so the strip is full width and the buttons split it. */
   #details .tabs { display: flex; gap: 3px; margin: 4px 0 12px; }
   #details .tabs button {
