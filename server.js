@@ -48,7 +48,7 @@ if (DEV) setInterval(() => { stale = sourceHash() !== VERSION; }, 2000);
 // The world is an unbounded plane. What exists is decided by where the ships are:
 // rocks are kept stocked within ACTIVE_R of every ship and culled past KEEP_R, so
 // space is populated where anyone is and empty everywhere else.
-const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
+const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 9;   // rock per active disc
 // Rock is managed over the whole area of interest rather than a small disc around the
 // ship, so it comes and goes only where nobody can see it. What is preserved is the
 // density, not the count -- the same rock per unit of space over an area twenty times
@@ -2729,7 +2729,7 @@ function syncWalls(p) {
       for (const a of artBins.get(k) || []) needArt.set(a.key, a);
     }
   const add = [], del = [];
-  for (const [k, w] of need) if (p.walls.get(k) !== w) { p.walls.set(k, w); add.push([k, w.rings]); }
+  for (const [k, w] of need) if (p.walls.get(k) !== w) { p.walls.set(k, w); add.push([k, w.rings, w.mat]); }
   for (const k of [...p.walls.keys()]) if (!need.has(k)) { p.walls.delete(k); del.push(k); }
   if (add.length || del.length) p.ws.send(JSON.stringify({ t: 'walls', add, del }));
 

@@ -207,7 +207,9 @@ ws.onmessage = e => {
     return;
   }
   if (m.t === 'trade') {
-    if (m.ok) closeMarket();
+    // Done, and still standing at the counter: the basket empties and the sheet stays,
+    // because the reason to come here is rarely one transaction.
+    if (m.ok && trading) { trading.buy = {}; trading.sell = {}; marketWhy.textContent = ''; drawMarket(); }
     else if (trading) marketWhy.textContent = m.why;
     return;
   }
@@ -219,7 +221,7 @@ ws.onmessage = e => {
   // Walls arrive keyed by themselves rather than by chunk: one can be far larger than a
   // chunk, so there is no chunk that owns it.
   if (m.t === 'walls') {
-    for (const [k, rings] of m.add) walls.set(k, withBox(rings));
+    for (const [k, rings, mat] of m.add) walls.set(k, { ...withBox(rings), mat });
     for (const k of m.del) walls.delete(k);
     return;
   }
@@ -2095,6 +2097,9 @@ function drawControl(s) {
 // ordinary GPU path. Each triangle is stroked as well as filled, in the same colour, to
 // close the hairline seams anti-aliasing leaves between adjacent triangles.
 const WALL_FILL = '#171f2b', WALL_EDGE = 'rgba(132,156,190,.85)';
+// Blocking stone is the same rock a shade up: a wall a drifting asteroid cannot cross is
+// worth telling apart from one it can, and the difference has to survive being glanced at.
+const BLOCK_FILL = '#28323f', BLOCK_EDGE = 'rgba(176,196,222,.9)';
 
 function drawWalls(vis) {
   const visible = [];
@@ -2111,13 +2116,19 @@ function drawWalls(vis) {
   // Overlapping walls were merged server-side, so there are no seams to hide any more:
   // one fill, one outline, each wall a single shape. evenodd is what makes the holes in
   // a merged wall read as open space rather than being painted over.
-  if (!OFF.has('wallfill')) {
-    ctx.fillStyle = WALL_FILL;
-    for (const w of visible) ctx.fill(w.path, 'evenodd');
+  // Grouped by material rather than switched per wall: two fills and two strokes for the
+  // whole screen instead of a state change for every shape.
+  for (const [mat, fill, edge] of [[undefined, WALL_FILL, WALL_EDGE], ['block', BLOCK_FILL, BLOCK_EDGE]]) {
+    const of = visible.filter(w => (w.mat === 'block') === (mat === 'block'));
+    if (!of.length) continue;
+    if (!OFF.has('wallfill')) {
+      ctx.fillStyle = fill;
+      for (const w of of) ctx.fill(w.path, 'evenodd');
+    }
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = 1.4 / cam.zoom;
+    for (const w of of) ctx.stroke(w.path);
   }
-  ctx.strokeStyle = WALL_EDGE;
-  ctx.lineWidth = 1.4 / cam.zoom;
-  for (const w of visible) ctx.stroke(w.path);
   ctx.restore();
 }
 
