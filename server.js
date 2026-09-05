@@ -1277,6 +1277,62 @@ function syncDrift(p) {
     p.ws.send(JSON.stringify({ t: 'drift', add, del }));
 }
 
+// Everything about a ship that does not change every tick: what it is, what is bolted to
+// it, how hurt it is, what its crew have been told. Sent when it changes and not otherwise.
+//
+// It was riding in every snapshot, and measuring said it cost more of the wire than the
+// positions did -- 57% of a ship record's bytes, and 38% of the stream -- because deflate
+// does not collapse a kilobyte of repeated envelopes as completely as it looks like it
+// should.
+function shipInfo(s, own) {
+  return {
+    owner: s.owner, h: hullKey(s.hull),
+    // Whose side it is on, which is not the same question as whose it is. Without this the
+    // client can only ask "is it mine", so another player's ships -- and the settlement's
+    // own guns -- were drawn in the colour reserved for the enemy.
+    ...(s.team === PLAYER_TEAM ? { f: 1 } : {}),
+    // What is installed and where. Per ship now rather than per hull class, so the client
+    // cannot work it out from the hull any more.
+    ft: s.turrets.map(t => [t.install, t.type, +t.rot.toFixed(2)]),
+    // Rounded: repair moves in thirtieths of a point and nobody can see that. Kept here
+    // rather than in the per-tick half because it holds still for long stretches, and
+    // measuring both ways said so: 1.61 KB/s against 1.72.
+    //
+    // A wreck on somebody else's ship is only ever a wreck. How deep the debt still is --
+    // and so how close their crew is to standing that gun back up -- is theirs to know.
+    // Zero says it plainly and says nothing more: a gun never sits at zero alive, it goes
+    // straight over the cliff, so nothing is lost by clamping there. Damage above zero
+    // stays public, which is what makes a battered enemy worth reading.
+    hp: s.turrets.map(t => Math.round(own ? t.hp : Math.max(0, t.hp))),
+    ...(own
+      ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
+          ...(s.repairing !== null ? { rp: s.repairing } : {}),
+          ...(s.repairFocus.length ? { rf: s.repairFocus } : {}),
+          hold: s.hold }
+      : {}),
+  };
+}
+
+function syncShips(p) {
+  const v = p.view, R2 = STREAM_R * STREAM_R;
+  const set = [], del = [];
+  const seen = new Set();
+  for (const s of ships) {
+    const own = s.owner === p.id;
+    const dx = s.x - v.x, dy = s.y - v.y;
+    if (!own && dx * dx + dy * dy >= R2) continue;
+    seen.add(s.id);
+    // Compared as text: cheap at this many ships, and it cannot disagree with what was
+    // actually sent the way a hand-kept dirty flag eventually does.
+    const info = JSON.stringify(shipInfo(s, own));
+    if (p.ships.get(s.id) === info) continue;
+    p.ships.set(s.id, info);
+    set.push([s.id, JSON.parse(info)]);
+  }
+  for (const id of p.ships.keys()) if (!seen.has(id)) { p.ships.delete(id); del.push(id); }
+  if (set.length || del.length) p.ws.send(JSON.stringify({ t: 'ships', set, del }));
+}
+
 // ---- refit ----
 //
 // A ship may be reconfigured while it is inside the settlement's cavern. There is no
@@ -2724,41 +2780,21 @@ function snapshotFor(p) {
     // than by when it got round to reading them.
     t: 's', st: +performance.now().toFixed(1), v: VERSION, ...(stale ? { stale: 1 } : {}),
     players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
+    // Only what changes every tick. Everything about a ship that holds still between
+    // frames goes on its own channel, said when it changes -- see syncShips.
     ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
-      id: s.id, owner: s.owner, h: hullKey(s.hull),
-      // Whose side it is on, which is not the same question as whose it is. Without this
-      // the client can only ask "is it mine", so another player's ships -- and the
-      // settlement's own guns -- were drawn in the colour reserved for the enemy.
-      ...(s.team === PLAYER_TEAM ? { f: 1 } : {}),
+      id: s.id,
       // Ships keep sub-pixel position -- they are what the eye follows -- but angles do
       // not need three decimals: 0.01rad is a pixel at the tip of a hull.
       x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
       tu: s.turrets.map(t => +t.a.toFixed(2)),
-      // What is installed and where. It is per ship now rather than per hull class, so the
-      // client cannot work it out from the hull any more. It repeats verbatim between
-      // snapshots, which deflate reduces to almost nothing.
-      ft: s.turrets.map(t => [t.install, t.type, +t.rot.toFixed(2)]),
-      // Rounded: repair moves in thirtieths of a point and nobody can see that, while
-      // the digits would ride in every snapshot.
-      //
-      // A wreck on somebody else's ship is only ever a wreck. How deep the debt still is
-      // -- and so how close their crew is to standing that gun back up -- is theirs to
-      // know. Zero says it plainly and says nothing more: a gun never sits at zero alive,
-      // it goes straight over the cliff, so nothing is lost by clamping there. Damage
-      // above zero stays public, which is what makes a battered enemy worth reading.
-      hp: s.turrets.map(t => Math.round(s.owner === p.id ? t.hp : Math.max(0, t.hp))),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
       // The beam is a thing in the world, so everyone near enough sees it.
       ...(s.beams.length ? { bm: s.beams } : {}),
-      // Only to the ship's owner, and only because it is what the editor reads back on
-      // reconnect. It is identical frame to frame, so the shared deflate context sends
-      // almost nothing for it.
-      ...(s.owner === p.id
-        ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
-            ...(s.repairing !== null ? { rp: s.repairing } : {}),
-            ...(s.repairFocus.length ? { rf: s.repairFocus } : {}), or: s.ore,
-            hold: s.hold }
-        : {}),
+      // Small, and changes every time a grain lands. Bundled with the standing half, one
+      // grain resent the loadout and every envelope with it: what goes together is what
+      // changes together, not what is about the same subject.
+      ...(s.owner === p.id ? { or: s.ore } : {}),
     })),
     // Rocks and shells round to whole units: interpolation smooths the half-unit of
     // error, and nobody is inspecting a shell's sub-pixel position.
@@ -2829,7 +2865,7 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), drift: newDrift(), busy: null, view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), drift: newDrift(), ships: new Map(), busy: null, view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
@@ -2837,6 +2873,7 @@ wss.on('connection', ws => {
     p.art = new Set();
     p.marks = new Set();
     p.drift = newDrift();
+    p.ships = new Map();
     p.busy = null;                            // the interaction this session has open
 
     // Returning players keep the fleet they left; a new commander is issued one. No ship
@@ -2960,6 +2997,7 @@ setInterval(() => {
     if (!p.ws || p.ws.readyState !== 1) continue;
     if (streamChunks) syncWalls(p);
     syncDrift(p);
+    syncShips(p);
     p.ws.send(snapshotFor(p));
   }
   kills.length = 0;                 // said once, to whoever was near enough to see it

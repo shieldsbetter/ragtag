@@ -119,6 +119,9 @@ const marks = new Map();
 // where it was, when, and how fast -- and we work out the rest, so nothing about one
 // crosses the wire again unless the line it is travelling on changes.
 const drift = { rock: new Map(), ore: new Map(), shot: new Map() };
+// What a ship is, as against where it is. Sent when it changes rather than every tick, and
+// folded back into each ship as the frame is built so nothing downstream has to know.
+const shipInfo = new Map();
 
 // Where one is at a moment on the render clock. Server time is mapped onto this client's
 // timeline by the same offset the snapshots use, so a description and a snapshot agree
@@ -209,6 +212,11 @@ ws.onmessage = e => {
       scenery.set(k, { path, x0, y0, x1, y1 });
     }
     for (const k of m.del) scenery.delete(k);
+    return;
+  }
+  if (m.t === 'ships') {
+    for (const id of m.del || []) shipInfo.delete(id);
+    for (const [id, info] of m.set || []) shipInfo.set(id, info);
     return;
   }
   if (m.t === 'drift') {
@@ -302,9 +310,12 @@ function blend(older, newer, t) {
   return {
     v: newer.v, stale: newer.stale,
     players: newer.players,
+    // The per-tick half interpolated, the standing half folded in whole: a ship the
+    // client can draw is both, and every consumer past here wants one object.
     ships: pair(newer.ships, byId(older.ships), (p, e) => ({
       a: lerpAngle(p.a, e.a, t),
       tu: e.tu.map((v, i) => p.tu?.[i] === undefined ? v : lerpAngle(p.tu[i], v, t)),
+      ...(shipInfo.get(e.id) || {}),
     })),
   };
 }
