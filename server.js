@@ -317,7 +317,7 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 6;                // chunks store units, and any art laid over them
+const WALL_FORMAT = 7;                // chunks store units, art, and interaction markers
 const MAX_BLOBS = 6;                  // per chunk, at density 1
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
 
@@ -466,6 +466,22 @@ function townArt() {
   lines.push(line([-60, 200], [-60, 248]), line([10, 200], [10, 248]));
   for (const u of [-70, 40]) lines.push(line([u, 150], [u, 200]));     // props down to the deck
   return [{ key: 'town:yard', lines }];
+}
+
+// Somewhere you can do something. A marker is a point, a reach, and an icon it carries
+// itself -- the client is told what to draw rather than looking it up, the same bargain as
+// the art, so a new set piece can offer a new thing to do without the client learning
+// about it first. What the interaction *is* stays on the server.
+function townMarks() {
+  const A = -Math.PI * 3 / 4;
+  const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
+  const x = cx + Math.cos(A) * (TOWN_CAVE - 300), y = cy + Math.sin(A) * (TOWN_CAVE - 300);
+  return [{
+    key: 'town:yard', kind: 'refit', x: +x.toFixed(1), y: +y.toFixed(1), r: 260,
+    // A spanner, drawn on the same 24-unit grid the module marks use.
+    icon: ['M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94'
+         + 'l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z'],
+  }];
 }
 
 // The starting town: one big asteroid with a cavern hollowed out of it and a tunnel
@@ -804,9 +820,9 @@ function toUnits(ring, mat) {
 // chunk or a unit, which is the point: a set piece draws its walls, a biome scatters its
 // rock, and neither has to know how the world files things.
 function generateCell(s) {
-  if (s.kind === 'town') return { matter: townMatter(), art: townArt() };
+  if (s.kind === 'town') return { matter: townMatter(), art: townArt(), marks: townMarks() };
   const b = BIOMES[s.kind] || BIOMES.open;
-  if (!b.density) return { matter: [], art: [] };
+  if (!b.density) return { matter: [], art: [], marks: [] };
   const poly = cellOf(s);
   const rnd = siteRng(s);
   let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, area = 0;
@@ -837,7 +853,7 @@ function generateCell(s) {
     }
     out.push({ ring, mat: 'rock' });
   }
-  return { matter: out, art: [] };
+  return { matter: out, art: [], marks: [] };
 }
 
 // Run a cell's generator and file what comes out. Each unit goes to the chunk holding its
@@ -852,6 +868,11 @@ function depositCell(s) {
     const [x, y] = piece.lines[0][0];
     const c = loadChunk(chunkOf(x), chunkOf(y));
     c.art.push(piece);
+    touched.add(c);
+  }
+  for (const mark of made.marks || []) {
+    const c = loadChunk(chunkOf(mark.x), chunkOf(mark.y));
+    c.marks.push(mark);
     touched.add(c);
   }
   for (const m of made.matter)
@@ -873,7 +894,8 @@ function saveChunk(c) {
     fs.mkdirSync(WORLD_DIR, { recursive: true });
     fs.writeFileSync(path.join(WORLD_DIR, `${c.cx}_${c.cy}.json`),
                      JSON.stringify({ v: WALL_FORMAT, cx: c.cx, cy: c.cy, units: c.units,
-                                      ...(c.art.length ? { art: c.art } : {}) }));
+                                      ...(c.art.length ? { art: c.art } : {}),
+                                      ...(c.marks.length ? { marks: c.marks } : {}) }));
   } catch { /* unwritable store: the world runs, it just will not survive a restart */ }
 }
 
@@ -881,13 +903,14 @@ function loadChunk(cx, cy) {
   const key = chunkKey(cx, cy);
   const had = chunks.get(key);
   if (had) return had;
-  let units = [], art = [];
+  let units = [], art = [], marks = [];
   try {
     const saved = JSON.parse(fs.readFileSync(path.join(WORLD_DIR, `${cx}_${cy}.json`), 'utf8'));
     if (saved.v === WALL_FORMAT && Array.isArray(saved.units)) units = saved.units;
     if (saved.v === WALL_FORMAT && Array.isArray(saved.art)) art = saved.art;
+    if (saved.v === WALL_FORMAT && Array.isArray(saved.marks)) marks = saved.marks;
   } catch { /* nothing filed here, which is the normal case for open space */ }
-  const c = { cx, cy, key, units, art };
+  const c = { cx, cy, key, units, art, marks };
   chunks.set(key, c);
   wallsDirty = true;
   // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which would
@@ -903,6 +926,7 @@ let wallBins = new Map();             // chunk key -> the walls whose box touche
 let mergedCache = new Map();          // which units were merged -> what they merged into
 let artByKey = new Map();             // set-piece scenery, keyed the way walls are
 let artBins = new Map();              // chunk key -> the art whose box touches that chunk
+let marks = new Map();                // key -> an interaction offered somewhere in the world
 
 // Matter of different kinds never merges, so where two kinds meet something has to give or
 // their outlines cross in mid-air. They are ranked instead, and the higher one keeps the
@@ -944,6 +968,8 @@ function rebuildWalls() {
   // binned exactly as walls are, so it arrives and leaves by the same machinery.
   artByKey = new Map();
   artBins = new Map();
+  marks = new Map();
+  for (const c of chunks.values()) for (const m of c.marks || []) marks.set(m.key, m);
   for (const c of chunks.values())
     for (const piece of c.art || []) {
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -1058,6 +1084,26 @@ function rebuildWalls() {
 }
 
 const pendingNests = [];
+
+// A ship sent to a marker carries the arming with it, and keeps it until it arrives or is
+// told to do something else. Arriving is not enough on its own: a session may have only one
+// interaction open at a time, so a second ship that gets there while the first is still
+// inside stays armed and triggers when the way is clear. Which is how one tap can yield two
+// interactions if you close the first quickly -- an oddity, and a fair one.
+function armedArrivals() {
+  for (const s of ships) {
+    if (!s.arm) continue;
+    const m = marks.get(s.arm);
+    if (!m) { s.arm = null; continue; }
+    if (Math.hypot(s.x - m.x, s.y - m.y) > m.r) continue;
+    const p = players.get(s.owner);
+    if (!p || p.ws.readyState !== 1) { s.arm = null; continue; }
+    if (p.busy) continue;                     // still inside the last one: wait, stay armed
+    p.busy = m.key;
+    s.arm = null;
+    p.ws.send(JSON.stringify({ t: 'interact', kind: m.kind, ship: s.id, mark: m.key }));
+  }
+}
 
 // ---- refit ----
 //
@@ -1754,6 +1800,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     sideFor: rand(1.2, 3.5),
     wander: 0,
     order: null,          // what it has been told to do, by whoever is in charge of it
+    arm: null,            // a marker it is on its way to use
     ore: 0,               // what its hold has picked up
     beams: [],            // the grains its tractors have hold of, for anyone watching
     prio: defaultPrio(),
@@ -2325,6 +2372,7 @@ function step(dt) {
   // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
   // the next tick rather than extending this one.
   for (const [cx, cy] of pendingNests.splice(0)) trySpawnNest(cx, cy);
+  armedArrivals();
   manageEncounters(dt);
   bleed(dt);
   for (const s of ships) {
@@ -2521,6 +2569,17 @@ function syncWalls(p) {
   for (const [k, a] of needArt) if (!p.art.has(k)) { p.art.add(k); aAdd.push([k, a.lines]); }
   for (const k of [...p.art]) if (!needArt.has(k)) { p.art.delete(k); aDel.push(k); }
   if (aAdd.length || aDel.length) p.ws.send(JSON.stringify({ t: 'art', add: aAdd, del: aDel }));
+
+  // Markers go out whole, and by view rather than by chunk: there are a handful in the
+  // world and one you cannot see is one you cannot tap.
+  const mAdd = [], mDel = [];
+  for (const [k, m] of marks) {
+    const near = Math.abs(m.x - v.x) < STREAM_R && Math.abs(m.y - v.y) < STREAM_R;
+    if (near && !p.marks.has(k)) { p.marks.add(k); mAdd.push({ k, x: m.x, y: m.y, r: m.r, icon: m.icon }); }
+    if (!near && p.marks.has(k)) { p.marks.delete(k); mDel.push(k); }
+  }
+  for (const k of [...p.marks]) if (!marks.has(k)) { p.marks.delete(k); mDel.push(k); }
+  if (mAdd.length || mDel.length) p.ws.send(JSON.stringify({ t: 'marks', add: mAdd, del: mDel }));
 }
 
 // Snapshots are repetitive JSON, which deflate eats: measured 5.7KB -> 0.9KB per
@@ -2547,12 +2606,14 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), busy: null, view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
     p.walls = new Map();                      // a new socket has been sent no terrain yet
     p.art = new Set();
+    p.marks = new Set();
+    p.busy = null;                            // the interaction this session has open
 
     // Returning players keep the fleet they left; a new commander is issued one. No ship
     // is special -- they are simply the ships this player owns.
@@ -2588,6 +2649,7 @@ wss.on('connection', ws => {
         const goal = pushOutOfWalls(m.x, m.y, HULL_CLEAR);
         const dx = goal.x - s.x, dy = goal.y - s.y;
         s.dest = goal; s.braking = false; s.detourSide = 0; s.stuckFor = 0;
+        s.arm = null;                     // sent elsewhere is told to stop going there
         // Face the way you travelled, unless the order was a nudge too small to have a
         // direction worth adopting. Dragging the ring afterwards still overrides it.
         if (Math.hypot(dx, dy) > s.hull.arriveR) s.heading = Math.atan2(dy, dx);
@@ -2604,6 +2666,21 @@ wss.on('connection', ws => {
         ws.send(JSON.stringify({ t: 'refit', ship: s.id, ok: !why, ...(why ? { why } : {}) }));
       }
     }
+    // Sent to a marker: fly there, and be ready to use it on arrival. It is the same move
+    // order underneath, so everything about getting there -- avoidance, giving up, being
+    // redirected -- is unchanged.
+    else if (m.t === 'engage-mark' && Array.isArray(m.ships) && marks.has(m.mark)) {
+      const mark = marks.get(m.mark);
+      for (const s of ships) {
+        if (s.owner !== p.id || !m.ships.includes(s.id)) continue;
+        const goal = pushOutOfWalls(mark.x + rand(-60, 60), mark.y + rand(-60, 60), HULL_CLEAR);
+        s.dest = goal; s.braking = false; s.detourSide = 0; s.stuckFor = 0;
+        s.arm = mark.key;
+        const dx = goal.x - s.x, dy = goal.y - s.y;
+        if (Math.hypot(dx, dy) > s.hull.arriveR) s.heading = Math.atan2(dy, dx);
+      }
+    }
+    else if (m.t === 'interact-done') { p.busy = null; }
     else if (m.t === 'face' && Number.isFinite(m.a)) {
       for (const s of ships) if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
     }

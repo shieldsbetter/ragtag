@@ -112,6 +112,14 @@ and leave when you go. The client draws lines and has no idea what any of it dep
 matching artwork has to be shipped for a new set piece to look like something, and nothing
 about it collides, merges or is matter.
 
+**A set piece can offer something to do, and the server decides what that is.** Besides
+matter and art, a generator may emit *interaction markers*: a point, a reach, a kind, and
+an icon the marker carries itself. Tapping one sends the selection there *armed*; arriving
+inside the reach fires the interaction, and the server tells the client what to open. A
+session holds one interaction at a time, so a second ship arriving while the first is still
+inside stays armed and fires when the way clears — which is why one tap can yield two
+interactions if the first is closed quickly. Being ordered anywhere else disarms.
+
 **Materials are ranked, and the higher one keeps the ground.** Matter of different kinds
 never merges, so where two kinds meet their outlines would otherwise cross in mid-air. The
 lower-ranked one is truncated at the boundary instead, so they abut exactly: `block` beats

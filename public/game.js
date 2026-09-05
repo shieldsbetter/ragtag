@@ -112,6 +112,9 @@ const walls = new Map();        // wall key -> polygon, pushed by the server as 
 // Scenery a set piece drew for itself. The client has no idea what any of it depicts and
 // does not need one: it arrives as lines in world coordinates and is drawn as lines.
 const scenery = new Map();
+// Somewhere you can do something, offered by a set piece. It carries its own icon, so the
+// client draws a thing it cannot name and does not need to.
+const marks = new Map();
 
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
@@ -185,6 +188,20 @@ ws.onmessage = e => {
       scenery.set(k, { path, x0, y0, x1, y1 });
     }
     for (const k of m.del) scenery.delete(k);
+    return;
+  }
+  if (m.t === 'marks') {
+    for (const k of m.del || []) marks.delete(k);
+    for (const d of m.add || []) {
+      const path = new Path2D();
+      for (const s of d.icon) path.addPath(new Path2D(s));
+      marks.set(d.k, { ...d, path });
+    }
+    return;
+  }
+  // The server says this ship has arrived somewhere it can be worked on.
+  if (m.t === 'interact') {
+    if (m.kind === 'refit') openRefit(m.ship);
     return;
   }
   if (m.t === 'refit') {
@@ -316,6 +333,8 @@ canvas.addEventListener('pointerdown', e => {
     const w = toWorld(e.clientX - r.left, e.clientY - r.top);
     // Controls are checked before anything else could claim the press -- including the
     // hold, which would otherwise arm underneath one.
+    const mk = markHit(w);
+    if (mk && selection.size) { pressedControl = { kind: 'mark', key: mk.k }; return; }
     const ctl = paneHit(w);
     if (ctl) {
       if (ctl.kind === 'rotate') { rotating = true; dragHeading = cmdShip.hd; }
@@ -803,7 +822,12 @@ function openRefit(id) {
   drawRefit();
 }
 
-function closeRefit() { refitting = null; refitEl.hidden = true; }
+function closeRefit() {
+  refitting = null;
+  refitEl.hidden = true;
+  // The session holds one interaction at a time, and the server cannot see a sheet close.
+  if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'interact-done' }));
+}
 
 // The same arithmetic the server does, per install point and nothing across points. If
 // these ever disagree the server wins; this is only here so the number moves as you drag.
@@ -1435,6 +1459,13 @@ function resolvePane(list) {
 }
 
 // What the press landed on, if anything. Hit radii are screen pixels.
+// A comfortable thumb rather than the badge: 45px of finger over an 18px mark.
+function markHit(world) {
+  for (const m of marks.values())
+    if (Math.hypot(world.x - m.x, world.y - m.y) < 26 / cam.zoom) return m;
+  return null;
+}
+
 function paneHit(world) {
   for (const c of pane)
     if (Math.hypot(world.x - c.pos.x, world.y - c.pos.y) < c.r / cam.zoom) return c;
@@ -1462,6 +1493,14 @@ function release(e) {
       const g = groupCircle();
       haptic(PULSE_DROP);
       if (g) clearSelection(g.x, g.y);
+    }
+    if (dragged < 8 && ctl.kind === 'mark' && selection.size) {
+      // Everything selected goes, and each carries the arming with it. Whichever gets
+      // there first and finds the way clear is the one that opens the sheet.
+      haptic(PULSE_DROP);
+      const m = marks.get(ctl.key);
+      if (m) confirm = { x: m.x, y: m.y, start: performance.now(), adding: true };
+      ws.send(JSON.stringify({ t: 'engage-mark', mark: ctl.key, ships: [...selection] }));
     }
     if (dragged < 8 && ctl.kind === 'focus') {
       // One reticle stands for every selected ship shooting at that hull, so dismissing
@@ -2042,6 +2081,7 @@ function draw() {
   if (dev) window.__rocks = state.rocks;
   if (dev) window.__walls = walls;
   if (dev) window.__scenery = scenery;
+  if (dev) window.__marks = marks;
   if (dev) window.__refitState = () => refitting && { was: refitting.was, fit: refitting.fit, pick: refitting.pick, mods: modules };
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
@@ -2187,6 +2227,25 @@ function draw() {
     ctx.fill(beam);
     ctx.restore();
     }
+  }
+
+  // Interaction markers, last and screen-sized: they are a thing you tap, not a thing in
+  // the world, so they do not grow when you zoom in.
+  for (const m of marks.values()) {
+    const R = 17 / cam.zoom, x = m.x - cam.x, y = m.y - cam.y;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = 'rgba(9,16,24,.88)';
+    ctx.strokeStyle = selection.size ? '#5ff0b0' : 'rgba(95,240,176,.35)';
+    ctx.lineWidth = 1.4 / cam.zoom;
+    const badge = new Path2D();
+    badge.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.fill(badge); ctx.stroke(badge);
+    const k = R * 1.15 / 24;
+    ctx.scale(k, k); ctx.translate(-12, -12);
+    ctx.lineWidth = 2 / (cam.zoom * k);
+    ctx.stroke(m.path);
+    ctx.restore();
   }
 
   drawDebris(now);
