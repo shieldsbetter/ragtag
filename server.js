@@ -122,6 +122,7 @@ const CARRIER = {
     { install: 'p1', type: 'gun', rot: -Math.PI / 2 }, { install: 'p3', type: 'gun', rot: -Math.PI / 2 },
     { install: 'p5', type: 'gun', rot: -Math.PI / 2 }, { install: 's1', type: 'gun', rot: Math.PI / 2 },
     { install: 's3', type: 'gun', rot: Math.PI / 2 }, { install: 's5', type: 'gun', rot: Math.PI / 2 },
+    { install: 'c2', type: 'tractor', rot: 0 },
   ],
   // Four discs down the spine rather than one circle around the whole hull: a bloated
   // collider is what would jam in a narrow fissure.
@@ -139,6 +140,13 @@ const CARRIER = {
 const MODULES = {
   gun: { turn: 2.2, range: 520, cooldown: 1.1, arcHalf: 1.4, hitR: 9, hp: TURRET_HP,
          size: 10, install: 40 },
+  // Not a weapon: no reach, so gunnery never picks a target for it. What it does is give
+  // the hull a tractor beam, and a second gives a second beam -- the beams come out of the
+  // ship rather than out of the module, so where it sits decides nothing except what else
+  // will fit beside it. Small enough to go between the guns amidships, which is the point
+  // of it: a radius of 3 clears the 13.6 to a neighbouring gun.
+  tractor: { turn: 0, range: 0, cooldown: 1, arcHalf: 0, hitR: 7, hp: 60,
+             size: 3, install: 60 },
   // Fixed to their hulls and never in anybody's hold, but they are what sits in an install
   // point, so they are modules like any other.
   fighterGun: { turn: 6, range: 420, cooldown: 0.9, arcHalf: 0.04, hitR: 15, hp: 200,
@@ -996,7 +1004,10 @@ function refitPrice(before, after) {
     const was = before.get(id), now = after.get(id);
     if (was) ore += (now && now.type === was.type ? 0 : MODULES[was.type].install * REFIT_REMOVE);
     if (now && (!was || was.type !== now.type)) ore += MODULES[now.type].install;
-    else if (now && was && !sameRot(was.rot, now.rot)) ore += MODULES[now.type].install * REFIT_ROTATE;
+    // A module with no reach does not point anywhere, so turning it is not a thing that can
+    // be charged for.
+    else if (now && was && MODULES[now.type].range > 0 && !sameRot(was.rot, now.rot))
+      ore += MODULES[now.type].install * REFIT_ROTATE;
   }
   return Math.round(ore);
 }
@@ -1654,7 +1665,7 @@ function newShip(owner, team, at = {}, hull = CARRIER) {
     wander: 0,
     order: null,          // what it has been told to do, by whoever is in charge of it
     ore: 0,               // what its hold has picked up
-    beam: null,           // the grain its tractor has hold of, for anyone watching
+    beams: [],            // the grains its tractors have hold of, for anyone watching
     prio: defaultPrio(),
     repairing: null,      // index of the one gun the repair point is going into
     repairHold: 0,        // seconds left before the crew may look elsewhere
@@ -2157,41 +2168,53 @@ function manageOre() {
 // One grain at a time, the nearest one in reach that the ship can actually see and that
 // nobody else has hold of. Raiders have no hold to put it in, so they do not reach for
 // it: the map is not quietly emptied behind you.
+// One beam per working tractor module. They are interchangeable -- nothing tells the
+// second beam from the first -- so this takes the nearest unclaimed grain that many times
+// over, and a hull carrying two fills its hold twice as fast.
 function tractor(s, dt) {
-  const had = s.beam;
-  s.beam = null;
-  const release = () => {
-    if (had === null) return;
-    const prev = ore.find(o => o.id === had);
-    if (prev && prev.held === s.id) prev.held = null;
+  const had = s.beams || [];
+  const beams = s.turrets.filter(t => t.type === 'tractor' && t.hp > 0).length;
+  s.beams = [];
+  // Let go of anything this ship was holding and is not holding now, once at the end,
+  // rather than per grain: two lists that have to be reconciled is how a grain ends up
+  // held by a beam that stopped existing.
+  const drop = keep => {
+    for (const id of had) {
+      if (keep.includes(id)) continue;
+      const prev = ore.find(o => o.id === id);
+      if (prev && prev.held === s.id) prev.held = null;
+    }
   };
-  if (!crewed(s)) return release();
+  if (!crewed(s) || !beams) return drop([]);
   const polys = nearbyWalls(s.x, s.y);
-  let best = null, bestD = TRACTOR_R;
-  for (const o of ore) {
-    // Spoken for: two beams on one grain would fight over its velocity and neither
-    // would land it.
-    if (o.held !== null && o.held !== s.id) continue;
-    const d = Math.hypot(o.x - s.x, o.y - s.y);
-    if (d >= bestD) continue;
-    // Rock stops a beam the way it stops a shell. Checked only for grains that would
-    // actually win, so the sight test runs a handful of times rather than once per grain.
-    if (polys.length && segmentBlocked(s.x, s.y, o.x, o.y, polys)) continue;
-    bestD = d; best = o;
+  for (let b = 0; b < beams; b++) {
+    let best = null, bestD = TRACTOR_R;
+    for (const o of ore) {
+      // Spoken for: two beams on one grain would fight over its velocity and neither would
+      // land it. Which now includes this ship's own other beams.
+      if (o.held !== null && o.held !== s.id) continue;
+      if (s.beams.includes(o.id)) continue;
+      const d = Math.hypot(o.x - s.x, o.y - s.y);
+      if (d >= bestD) continue;
+      // Rock stops a beam the way it stops a shell. Checked only for grains that would
+      // actually win, so the sight test runs a handful of times rather than once per grain.
+      if (polys.length && segmentBlocked(s.x, s.y, o.x, o.y, polys)) continue;
+      bestD = d; best = o;
+    }
+    if (!best) break;
+    if (bestD <= ORE_GRAB) {
+      ore.splice(ore.indexOf(best), 1);
+      s.ore += ORE_VALUE;
+      continue;                                     // that beam is free again this tick
+    }
+    best.held = s.id;
+    s.beams.push(best.id);
+    // Straight at the ship, overriding whatever drift it had: a beam that merely nudged
+    // would lose grains to their own momentum and look broken doing it.
+    best.vx = (s.x - best.x) / bestD * TRACTOR_PULL;
+    best.vy = (s.y - best.y) / bestD * TRACTOR_PULL;
   }
-  if (!best || best.id !== had) release();
-  if (!best) return;
-  if (bestD <= ORE_GRAB) {
-    ore.splice(ore.indexOf(best), 1);
-    s.ore += ORE_VALUE;
-    return;
-  }
-  best.held = s.id;
-  s.beam = best.id;
-  // Straight at the ship, overriding whatever drift it had: a beam that merely nudged
-  // would lose grains to their own momentum and look broken doing it.
-  best.vx = (s.x - best.x) / bestD * TRACTOR_PULL;
-  best.vy = (s.y - best.y) / bestD * TRACTOR_PULL;
+  drop(s.beams);
 }
 
 function step(dt) {
@@ -2347,7 +2370,7 @@ function snapshotFor(p) {
       hp: s.turrets.map(t => Math.round(s.owner === p.id ? t.hp : Math.max(0, t.hp))),
       ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
       // The beam is a thing in the world, so everyone near enough sees it.
-      ...(s.beam !== null ? { bm: s.beam } : {}),
+      ...(s.beams.length ? { bm: s.beams } : {}),
       // Only to the ship's owner, and only because it is what the editor reads back on
       // reconnect. It is identical frame to frame, so the shared deflate context sends
       // almost nothing for it.

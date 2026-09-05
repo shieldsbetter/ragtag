@@ -770,7 +770,8 @@ function refitItems(was, fit) {
     const a = before.get(id), b = after.get(id);
     if (a && (!b || b.type !== a.type)) put('Remove', a.type, price(a.type) * refitRates.remove);
     if (b && (!a || a.type !== b.type)) put('Add', b.type, price(b.type));
-    else if (b && a && !rotSame(a.rot, b.rot)) put('Reconfigure', b.type, price(b.type) * refitRates.rotate);
+    else if (b && a && aims(b.type) && !rotSame(a.rot, b.rot))
+      put('Reconfigure', b.type, price(b.type) * refitRates.rotate);
   }
   return acc;
 }
@@ -856,6 +857,10 @@ function refitBlockers(fit, where, held, id, type) {
        < (modules[type] || {}).size + (modules[f.type] || {}).size);
 }
 
+// A module that has no reach does not point anywhere, so it is not drawn as something
+// that does and cannot be turned.
+const aims = type => ((modules[type] || {}).range || 0) > 0;
+
 function moduleIcon(held, lit, blocking) {
   const mod = modules[held.type] || {};
   const g = svgEl('g', {});
@@ -867,10 +872,18 @@ function moduleIcon(held, lit, blocking) {
     g.append(svgEl('circle', { r: mod.size || 8,
       fill: blocking ? 'rgba(255,107,138,.16)' : 'rgba(108,168,255,.16)',
       stroke: blocking ? 'rgba(255,107,138,.6)' : 'rgba(108,168,255,.5)', 'stroke-width': .7 }));
-  g.append(svgEl('circle', { r: (mod.size || 8) / 2, fill: '#16283a',
+  // Half the module's own size, but never so small that a module reads as smaller than the
+  // dot marking an empty point -- a tractor is a third the width of a gun and would.
+  const r = Math.max(4, (mod.size || 8) / 2);
+  g.append(svgEl('circle', { r, fill: '#16283a',
                              stroke: lit ? '#5ff0b0' : '#cfe6ff', 'stroke-width': .8 }));
-  g.append(svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
-                           transform: `rotate(${held.rot * 180 / Math.PI}) scale(.35)` }));
+  if (aims(held.type))
+    g.append(svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
+                             transform: `rotate(${held.rot * 180 / Math.PI}) scale(.35)` }));
+  else {
+    g.append(svgEl('circle', { r: r * 0.55, fill: 'none', stroke: '#cfe6ff', 'stroke-width': .7 }));
+    g.append(svgEl('circle', { r: r * 0.18, fill: '#cfe6ff' }));
+  }
   return g;
 }
 
@@ -953,7 +966,7 @@ function drawRefit() {
       if (onto && onto.id === p.id)
         g.append(svgEl('circle', { r: 12, fill: 'none', stroke: '#ff6b8a', 'stroke-width': 1.2,
                                    'stroke-dasharray': '3 3' }));
-      if (refitting.sel === p.id) {
+      if (refitting.sel === p.id && aims(held.type)) {
         // The rotate ring. Dragging it points the module; dragging the module itself moves
         // it, so the two gestures never have to be told apart.
         g.append(svgEl('circle', { r: 17, fill: 'none', stroke: '#5ff0b0', 'stroke-width': 6,
@@ -2024,8 +2037,9 @@ function draw() {
   // at, not a thing with a width in metres.
   const BEAM_RGB = '106,184,255', BEAM_NEAR = 1.125, BEAM_FLARE = 8.25, BEAM_HZ = 1;
   for (const s of state.ships) {
-    if (s.bm === undefined) continue;
-    const grain = (state.ore || []).find(o => o.id === s.bm);
+    // A hull may be running more than one, so this is a list of grains rather than one.
+    for (const held of s.bm || []) {
+    const grain = (state.ore || []).find(o => o.id === held);
     if (!grain) continue;
     const dx = grain.x - s.x, dy = grain.y - s.y, d = Math.hypot(dx, dy) || 1;
     const px = -dy / d, py = dx / d;                   // across the beam
@@ -2045,6 +2059,7 @@ function draw() {
     ctx.fillStyle = `rgba(${BEAM_RGB},${0.10 + 0.20 * pulse})`;
     ctx.fill(beam);
     ctx.restore();
+    }
   }
 
   drawDebris(now);
