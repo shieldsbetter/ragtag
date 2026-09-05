@@ -58,7 +58,7 @@ const ACTIVE_R = 1400, KEEP_R = 2000, ROCK_TARGET = 18;
 // the seed rather than the crop. Grains disperse after ORE_LIFE, which is what bounds
 // the field: without it the population settles wherever collection happens to balance a
 // battle's worth of shattered rock, and a snapshot fills up with gravel.
-const ORE_TARGET = 7, ORE_VALUE = 5, ORE_LIFE = 30;
+const ORE_TARGET = 3, ORE_VALUE = 5, ORE_LIFE = 30;
 const TRACTOR_R = 260, TRACTOR_PULL = 110, ORE_GRAB = 26;
 
 // Opposition is scattered through the world rather than spawned at anyone: each chunk
@@ -698,10 +698,10 @@ function spawnRock(size, x, y, grace = 0) {
 // and a handful of ore shaken loose. The pieces cannot hurt anything for a moment, which
 // is what stops a cascade landing all at once.
 //
-// Any rock coming apart may give up ore, and mostly does not: one grain a third of the
-// time, and a second grain in a fifth of those. Two thirds of the rock you break leaves
-// nothing at all, which is what keeps a battle from carpeting the field in gravel.
-const ORE_CHANCE = 1 / 3, ORE_SECOND = 1 / 5;
+// Any rock coming apart may give up ore, and mostly does not: one grain a sixth of the
+// time, and a second grain in a fifth of those. Five rocks in six leave nothing at all,
+// which is what keeps a battle from carpeting the field in gravel.
+const ORE_CHANCE = 1 / 6, ORE_SECOND = 1 / 5;
 function shed(x, y) {
   if (Math.random() >= ORE_CHANCE) return;
   spawnOre(x, y);
