@@ -105,6 +105,20 @@ of rings (outline first, then holes). Nothing about it is persisted, which is wh
 laying material down, cutting a vein out of rock and blasting a hole in it all the same
 kind of operation: an edit to units.
 
+**Materials are ranked, and the higher one keeps the ground.** Matter of different kinds
+never merges, so where two kinds meet their outlines would otherwise cross in mid-air. The
+lower-ranked one is truncated at the boundary instead, so they abut exactly: `block` beats
+`rock`, which is how the starter town's asteroid keeps its shape while the biome's rock
+stops where it starts. Only pairs whose boxes meet are cut, which is a handful around the
+town rather than every wall in the area of interest.
+
+**Blocking matter stops asteroids; ordinary rock does not.** A drifting rock that reaches
+`block` comes apart exactly as if it had been shot, and its pieces are put down clear of
+the surface and thrown back along its normal — reflecting what the rock arrived with, so a
+glancing hit leaves at a glancing angle. Without the throw-back the pieces break out
+standing inside the wall and break again at once, and the wall visibly eats the rock
+instead of turning it away. Measured: 10 impacts in 12 leave two pieces travelling away.
+
 **The cell generates; the chunk only files.** A generator is handed a cell and returns
 polygons of material of any size, anywhere in it — a set piece draws its walls, a biome
 scatters its rock — and never sees a chunk or a unit. Anything too big is cut on a fixed

@@ -385,7 +385,7 @@ function townMatter() {
   let solid;
   try { solid = polygonClipping.difference(rock, cave, tunnel); }
   catch { solid = [rock]; }           // degenerate input: better a solid rock than none
-  return solid.map(poly => ({ ring: poly[0], mat: 'rock' }));
+  return solid.map(poly => ({ ring: poly[0], mat: 'block' }));
 }
 
 // The town is placed once, when the world is new, and holds the origin. Its six
@@ -728,6 +728,13 @@ let wallsByKey = new Map();           // stable key -> { key, rings, js, x0, y0,
 let wallBins = new Map();             // chunk key -> the walls whose box touches that chunk
 let mergedCache = new Map();          // which units were merged -> what they merged into
 
+// Matter of different kinds never merges, so where two kinds meet something has to give or
+// their outlines cross in mid-air. They are ranked instead, and the higher one keeps the
+// ground: the lower is truncated at the boundary, so the two abut exactly and neither is
+// drawn inside the other. Blocking rock is the town's, and the biome's ordinary rock stops
+// where it starts.
+const MAT_RANK = { rock: 1, block: 2 };
+
 // A unit's bounds, worked out once. Kept beside the unit rather than on it, because a
 // unit is written back to disk verbatim and a cached fact about it is not world state.
 const unitBoxes = new WeakMap();
@@ -792,6 +799,7 @@ function rebuildWalls() {
   wallsByKey = new Map();
   wallBins = new Map();
   mergedCache = new Map();
+  const built = [];
   for (const comp of groups.values()) {
     // Working out the components again is linear and cheap; the booleans are not. A
     // component whose membership has not changed merged to the same thing it did last
@@ -807,6 +815,27 @@ function rebuildWalls() {
     mergedCache.set(sig, merged);
     let base = comp[0].key;
     for (const e of comp) if (e.key < base) base = e.key;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const poly of merged) for (const [x, y] of poly[0]) {
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    built.push({ base, mat: comp[0].u.mat, merged, x0, y0, x1, y1 });
+  }
+
+  // Take the higher-ranked matter out of the lower wherever the two overlap. Only pairs
+  // whose boxes meet are considered, which in practice is a handful around the town rather
+  // than every wall in the area of interest.
+  for (const b of built) {
+    const cutters = built.filter(h => MAT_RANK[h.mat] > MAT_RANK[b.mat] &&
+      h.x0 <= b.x1 && b.x0 <= h.x1 && h.y0 <= b.y1 && b.y0 <= h.y1);
+    if (!cutters.length) continue;
+    try { b.merged = polygonClipping.difference(b.merged, ...cutters.map(c => c.merged)); }
+    catch { /* degenerate input: leave the overlap rather than lose the wall */ }
+  }
+
+  for (const b of built) {
+    const { merged, base } = b;
     merged.forEach((poly, n) => {
       const rings = poly.map(r => r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]));
       const key = merged.length > 1 ? `${base}/${n}` : base;
@@ -819,7 +848,7 @@ function rebuildWalls() {
           if (x < x0) x0 = x; if (x > x1) x1 = x;
           if (y < y0) y0 = y; if (y > y1) y1 = y;
         }
-        w = { key, rings, js, x0, y0, x1, y1 };
+        w = { key, rings, js, mat: b.mat, x0, y0, x1, y1 };
       }
       wallsByKey.set(key, w);
       for (let cx = chunkOf(w.x0); cx <= chunkOf(w.x1); cx++)
@@ -1113,6 +1142,34 @@ function nearbyWalls(x, y, ensure = false) {
   return out;
 }
 
+// Blocking matter near a point: the walls asteroids cannot pass. Everything collides with
+// walls the same way, so this asks the material rather than the shape.
+function nearbyBlocking(x, y) {
+  if (wallsDirty) rebuildWalls();
+  const out = [], seen = new Set();
+  const cx0 = chunkOf(x), cy0 = chunkOf(y);
+  for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
+    for (let cy = cy0 - 1; cy <= cy0 + 1; cy++)
+      for (const w of wallBins.get(chunkKey(cx, cy)) || [])
+        if (w.mat === 'block' && !seen.has(w.key)) { seen.add(w.key); out.push(w.rings); }
+  return out;
+}
+
+// Where a rock of radius `rad` meets blocking matter, and the way out of it: the nearest
+// point on the surface plus the normal there. A rock already inside is pushed toward the
+// nearest surface rather than away from it, which is the only direction that gets it out.
+function blockingHit(x, y, rad) {
+  for (const rings of nearbyBlocking(x, y)) {
+    const inside = pointInWall(rings, x, y);
+    const c = closestOnWall(rings, x, y);
+    if (!inside && c.d >= rad) continue;
+    const dx = inside ? c.x - x : x - c.x, dy = inside ? c.y - y : y - c.y;
+    const d = Math.hypot(dx, dy) || 1;
+    return { x: c.x, y: c.y, nx: dx / d, ny: dy / d };
+  }
+  return null;
+}
+
 // A wall is a list of rings: the first is its outline, any others are holes punched
 // through it. Crossing-count over every ring at once gives the even-odd answer, which
 // puts a point inside a hole correctly outside the wall.
@@ -1221,14 +1278,16 @@ function rollRich() {
 }
 
 function spawnRock(size, x, y, grace = 0, rich = rollRich()) {
-  rocks.push({
+  const made = {
     id: nextId++, size, x, y,
     vx: rand(-70, 70), vy: rand(-70, 70),
     a: rand(0, Math.PI * 2), spin: rand(-1.2, 1.2),
     r: size * 16, seed: Math.floor(Math.random() * 1e6),
     grace,                    // seconds before this rock can hurt anything
     rich,                     // 0-3 grains showing, and that many handed over per break
-  });
+  };
+  rocks.push(made);
+  return made;
 }
 
 // What is left of a rock that came apart, wherever it was standing: two smaller rocks
@@ -1245,15 +1304,31 @@ function shed(x, y) {
   if (Math.random() < ORE_SECOND) spawnOre(x, y);
 }
 
-function shatter(r) {
+// `off` is the surface it came apart against, if it came apart against one: the pieces
+// are put down clear of it and thrown back along its normal. Without that they break out
+// standing inside the wall, break again immediately, and the wall visibly eats the rock
+// instead of turning it away.
+function shatter(r, off = null) {
   shed(r.x, r.y);
   // What it was showing, it hands over -- on top of the roll, and on every break rather
   // than only the last one. Its children carry the same seam, so a rich rock pays out
   // again for each piece you take the trouble to finish.
   for (let i = 0; i < r.rich; i++) spawnOre(r.x, r.y);
   if (r.size <= 1) return;
-  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE, r.rich);
-  spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE, r.rich);
+  for (let i = 0; i < 2; i++) {
+    const kid = spawnRock(r.size - 1, r.x, r.y, SPLIT_GRACE, r.rich);
+    if (!off) continue;
+    // Reflect what it arrived with, so a glancing rock leaves at a glancing angle, and
+    // spread the two pieces apart. The floor stops a rock that crept in almost stationary
+    // from being left sitting against the wall.
+    const dot = r.vx * off.nx + r.vy * off.ny;
+    let bx = r.vx - 2 * dot * off.nx, by = r.vy - 2 * dot * off.ny;
+    const sp = Math.max(90, Math.hypot(bx, by));
+    const a = Math.atan2(by, bx) + rand(-0.5, 0.5);
+    kid.vx = Math.cos(a) * sp; kid.vy = Math.sin(a) * sp;
+    kid.x = off.x + off.nx * (kid.r + 8);
+    kid.y = off.y + off.ny * (kid.r + 8);
+  }
 }
 
 // Ships persist after their player leaves, so the neighbourhood fills up over a
@@ -1922,6 +1997,15 @@ function step(dt) {
   for (const r of rocks) {
     r.x += r.vx * dt; r.y += r.vy * dt; r.a += r.spin * dt;
     if (r.grace > 0) r.grace -= dt;
+  }
+  // Rocks against blocking matter. A rock that reaches it comes apart exactly as if it had
+  // been shot, and its pieces are thrown back off the surface.
+  for (let k = rocks.length - 1; k >= 0; k--) {
+    const r = rocks[k];
+    const off = blockingHit(r.x, r.y, r.r);
+    if (!off) continue;
+    rocks.splice(k, 1);
+    shatter(r, off);
   }
   for (let i = ore.length - 1; i >= 0; i--) {
     const o = ore[i];
