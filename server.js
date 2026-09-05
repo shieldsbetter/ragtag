@@ -308,31 +308,57 @@ const BIOME_NAMES = ['open', 'dense'];
 const SCREEN = 1732;                  // the unit content is drawn against; see CLAUDE.md
 const TOWN_SIDE = 2.12 * SCREEN;      // a regular hexagon; area goes as the side squared,
                                       // so 2.12 screens is half the three-screen one it was
-const TOWN_WALL = 150;                // how thick its curtain wall is
-const TOWN_INSET = 100;               // and how far inside the cell boundary it stands
+const TOWN_R = 2400;                  // the asteroid's mean radius. It has to clear the
+                                      // cell's apothem, jitter and offset included, or the
+                                      // rock crosses into a neighbour's ground
+const TOWN_CAVE = 1730;               // the cavern hollowed out of it: about half its area
+const TOWN_SHIFT = 350;               // how far the rock sits off the origin. The cavern is
+                                      // centred on the spawn, the rock is not, which is what
+                                      // makes one side thick enough to be worth tunnelling
+const TOWN_TUNNEL = 380;              // clear width of the passage out
+const TOWN_OUT = -Math.PI / 4;        // which way it runs: up and to the right
 
-// A regular hexagon of circumradius R, vertices at 0, 60, 120 ... so its edge normals --
-// where the neighbouring sites go -- fall at 30, 90, 150 ...
-const hexPoint = (R, k) => [Math.cos(k * Math.PI / 3) * R, Math.sin(k * Math.PI / 3) * R];
+// A regular hexagon's edge normals -- where the neighbouring sites go -- fall at 30, 90,
+// 150 ... which is what makes the town's cell come out as the hexagon it claims.
 const APOTHEM = Math.cos(Math.PI / 6);          // of a regular hexagon, as a fraction of R
 
-// The curtain wall, as six long slabs -- one per edge, consecutive ones sharing a corner
-// edge so there is no gap. Nothing here worries about how big a slab is or which chunk it
-// lands in: a generator emits matter, and cutting it to storable size is done for it.
-//
-// It is made of rock rather than a material of its own, because materials are what decide
-// whether two lumps merge, and a curtain wall that met a boulder and refused to join it
-// would leave two outlines crossing in mid-air.
-function townMatter() {
-  const aOut = TOWN_SIDE * APOTHEM - TOWN_INSET;
-  const rOut = aOut / APOTHEM, rIn = (aOut - TOWN_WALL) / APOTHEM;
-  const out = [];
-  for (let k = 0; k < 6; k++) {
-    const [ax, ay] = hexPoint(rOut, k), [bx, by] = hexPoint(rOut, k + 1);
-    const [cx, cy] = hexPoint(rIn, k), [dx, dy] = hexPoint(rIn, k + 1);
-    out.push({ ring: [[ax, ay], [bx, by], [dx, dy], [cx, cy]], mat: 'rock' });
+// An irregular ring of a given radius, which is all a rock has ever been here.
+function wobbleRing(cx, cy, r, sides, wobble, rnd) {
+  const ring = [];
+  for (let k = 0; k < sides; k++) {
+    const a = (k / sides) * Math.PI * 2;
+    const d = r * (1 + (rnd() - 0.5) * wobble);
+    ring.push([cx + Math.cos(a) * d, cy + Math.sin(a) * d]);
   }
-  return out;
+  return ring;
+}
+
+// The starting town: one big asteroid with a cavern hollowed out of it and a tunnel
+// running up and to the right into open space. People built a settlement in a hole in a
+// rock, and there is one way in and out.
+//
+// It is emitted as a single solid, worked out by subtracting the cavern and the tunnel
+// from the rock. That is the whole reason a generator hands over shapes rather than units:
+// the interesting geometry is a boolean between three polygons, and where the pieces of it
+// end up filed is somebody else's problem.
+//
+// The tunnel is cut as one long slab that starts inside the cavern and ends well outside
+// the rock, so the two cuts join into a single opening instead of leaving a plug standing
+// at the cavern wall.
+function townMatter() {
+  const rnd = siteRng({ x: 0, y: 0 });
+  const ux = Math.cos(TOWN_OUT), uy = Math.sin(TOWN_OUT);
+  const rock = [wobbleRing(ux * TOWN_SHIFT, uy * TOWN_SHIFT, TOWN_R, 28, 0.22, rnd)];
+  const cave = [wobbleRing(0, 0, TOWN_CAVE, 36, 0.1, rnd)];
+  const L = TOWN_R * 2 + TOWN_SHIFT, w = TOWN_TUNNEL / 2, px = -uy, py = ux;
+  const tunnel = [[
+    [px * w, py * w], [ux * L + px * w, uy * L + py * w],
+    [ux * L - px * w, uy * L - py * w], [-px * w, -py * w],
+  ]];
+  let solid;
+  try { solid = polygonClipping.difference(rock, cave, tunnel); }
+  catch { solid = [rock]; }           // degenerate input: better a solid rock than none
+  return solid.map(poly => ({ ring: poly[0], mat: 'rock' }));
 }
 
 // The town is placed once, when the world is new, and holds the origin. Its six
