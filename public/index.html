@@ -72,6 +72,14 @@
                   padding: 8px 14px; font: inherit; letter-spacing: .08em; }
   #refit button.confirm { border-color: #2f6f57; color: #5ff0b0; }
   #refit button.confirm:disabled { opacity: .35; color: #8ba0bb; border-color: #24384f; }
+  #refit .cost { position: relative; }
+  #refit .why-cost { border-radius: 50%; width: 22px; height: 22px; padding: 0; margin-left: 8px;
+                     color: #8ba0bb; line-height: 1; }
+  /* Sits under the total rather than in the flow, so opening it does not move the hull. */
+  #refit .itemised { position: absolute; top: 30px; right: 0; z-index: 1; white-space: nowrap;
+                     background: #0d151f; border: 1px solid #24384f; padding: 10px 12px;
+                     color: #cfe6ff; text-align: left; line-height: 1.7; }
+  #refit .itemised b { color: #d8a851; font-weight: normal; }
   #refit .board { flex: 1 1 auto; min-height: 0; display: flex; }
   /* overflow visible so a module carried past the hull stays under the finger: an svg
      clips to its viewBox by default, and the ghost is the one thing drawn outside it. */
@@ -185,7 +193,7 @@
   <div class="sheet">
     <header>
       <span class="who">REFIT</span>
-      <span class="cost"><b>0</b> ore</span>
+      <span class="cost"><b>0</b> ore<button type="button" class="why-cost" hidden>?</button></span>
       <button type="button" class="cancel">CANCEL</button>
       <button type="button" class="confirm">CONFIRM</button>
     </header>

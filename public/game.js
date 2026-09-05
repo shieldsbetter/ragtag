@@ -718,9 +718,17 @@ const refitPalette = refitEl.querySelector('.palette');
 const refitCost = refitEl.querySelector('.cost b');
 const refitWhy = refitEl.querySelector('.why');
 const refitOk = refitEl.querySelector('.confirm');
+const refitAsk = refitEl.querySelector('.why-cost');
 let refitting = null;   // { ship, was, fit, sel, pick }
+let refitShowItems = false;
+
+refitAsk.addEventListener('click', () => { refitShowItems = !refitShowItems; drawRefit(); });
 
 const modName = t => t.replace(/([A-Z])/g, ' $1').toLowerCase();
+const modTitle = t => modName(t).replace(/\b\w/g, c => c.toUpperCase());
+// A rotation the width of the wire's rounding is not a rotation. The server uses the same
+// tolerance, so the itemisation and the bill agree about what counts as a change.
+const rotSame = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))) < 0.02;
 
 // Takes an id, not a ship. The button that opens this is built once and closes over
 // whatever the ship looked like then, so passing the object meant reopening the sheet after
@@ -744,20 +752,30 @@ function closeRefit() { refitting = null; refitEl.hidden = true; }
 
 // The same arithmetic the server does, per install point and nothing across points. If
 // these ever disagree the server wins; this is only here so the number moves as you drag.
-function refitCost_(was, fit) {
+// What the difference is made of, grouped by what was done and to what. The total is the
+// sum of it, so the bill and the explanation cannot drift apart.
+function refitItems(was, fit) {
   const before = new Map(was.map(f => [f.install, f]));
   const after = new Map(fit.map(f => [f.install, f]));
-  let ore = 0;
+  const price = t => (modules[t] || {}).install || 0;
+  const acc = { Remove: {}, Add: {}, Reconfigure: {} };
+  const put = (kind, type, ore) => {
+    const cell = acc[kind][type] || (acc[kind][type] = { n: 0, ore: 0 });
+    cell.n++; cell.ore += ore;
+  };
   for (const id of new Set([...before.keys(), ...after.keys()])) {
     const a = before.get(id), b = after.get(id);
-    const price = t => (modules[t] || {}).install || 0;
-    if (a) ore += (b && b.type === a.type ? 0 : price(a.type) * refitRates.remove);
-    if (b && (!a || a.type !== b.type)) ore += price(b.type);
-    // Same tolerance the server uses: what arrives on the wire is rounded, and a rounding
-    // is not a turn.
-    else if (b && a && Math.abs(Math.atan2(Math.sin(a.rot - b.rot), Math.cos(a.rot - b.rot))) >= 0.02)
-      ore += price(b.type) * refitRates.rotate;
+    if (a && (!b || b.type !== a.type)) put('Remove', a.type, price(a.type) * refitRates.remove);
+    if (b && (!a || a.type !== b.type)) put('Add', b.type, price(b.type));
+    else if (b && a && !rotSame(a.rot, b.rot)) put('Reconfigure', b.type, price(b.type) * refitRates.rotate);
   }
+  return acc;
+}
+
+function refitCost_(was, fit) {
+  let ore = 0;
+  for (const kind of Object.values(refitItems(was, fit)))
+    for (const cell of Object.values(kind)) ore += cell.ore;
   return Math.round(ore);
 }
 
@@ -840,6 +858,22 @@ function drawRefit() {
   const cost = refitCost_(refitting.was, refitting.fit);
 
   refitCost.textContent = cost;
+  // Nothing to explain when nothing is owed, and a breakdown left standing over a zero
+  // total would be explaining a bill that no longer exists.
+  refitAsk.hidden = !cost;
+  if (!cost) refitShowItems = false;
+  refitEl.querySelector('.itemised')?.remove();
+  if (refitShowItems) {
+    const box = document.createElement('div');
+    box.className = 'itemised';
+    const lines = [];
+    for (const [kind, byType] of Object.entries(refitItems(refitting.was, refitting.fit)))
+      for (const [type, cell] of Object.entries(byType))
+        lines.push(`${kind} ${cell.n} ${modTitle(type)}${cell.n === 1 ? '' : 's'}`
+          + ` — <b>+${Math.round(cell.ore)}</b> ore`);
+    box.innerHTML = lines.join('<br>');
+    refitCost.parentElement.append(box);
+  }
   const short = cost > (s.or || 0);
   const owed = Object.entries(stock).filter(([, n]) => n < 0);
   refitOk.disabled = short || owed.length > 0;
