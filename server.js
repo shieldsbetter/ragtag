@@ -317,7 +317,7 @@ const REPAIR_DWELL = 3;
 // consistency, but the files are what will let later edits survive.
 const CHUNK = 900;
 const WORLD_SEED = 20260903;
-const WALL_FORMAT = 5;                // chunks store units and nothing else
+const WALL_FORMAT = 6;                // chunks store units, and any art laid over them
 const MAX_BLOBS = 6;                  // per chunk, at density 1
 const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
 
@@ -425,6 +425,47 @@ function wobbleRing(cx, cy, r, sides, wobble, rnd) {
     ring.push([cx + Math.cos(a) * d, cy + Math.sin(a) * d]);
   }
   return ring;
+}
+
+// Line art, which is scenery and nothing else: no collision, no matter, not merged with
+// anything. A set piece draws whatever it likes and the lines go over the wire when the
+// chunk holding them loads, so a station needs no matching artwork built into the client
+// and a new set piece can look like whatever it wants without one being shipped.
+//
+// The yard: staging built out from the cavern wall with two cranes over it, drawn in a
+// frame where x runs along the wall and y points into the cavern.
+function townArt() {
+  const A = -Math.PI * 3 / 4;                       // up and to the left, against the wall
+  const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT, cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
+  const nx = Math.cos(A), ny = Math.sin(A);         // out towards the rock
+  const ox = cx + nx * (TOWN_CAVE - 20), oy = cy + ny * (TOWN_CAVE - 20);
+  const px = -ny, py = nx;                          // along the wall
+  const at = (u, v) => [+(ox + px * u - nx * v).toFixed(1), +(oy + py * u - ny * v).toFixed(1)];
+  const line = (...pts) => pts.map(([u, v]) => at(u, v));
+  const lines = [];
+
+  // The staging: a deck off the wall, uprights, and two galleries above it.
+  lines.push(line([-300, 0], [300, 0]));
+  for (const v of [46, 96, 150]) lines.push(line([-270, v], [270, v]));
+  for (const u of [-270, -180, -90, 0, 90, 180, 270]) lines.push(line([u, 0], [u, 150]));
+  // Cross-bracing, alternating, so it reads as built rather than drawn.
+  for (let i = 0; i < 6; i++) {
+    const a = -270 + i * 90, b = a + 90;
+    lines.push(i % 2 ? line([a, 0], [b, 46]) : line([b, 0], [a, 46]));
+    lines.push(i % 2 ? line([b, 96], [a, 150]) : line([a, 96], [b, 150]));
+  }
+  // Two cranes leaning out over the cavern, each with a hook on a cable.
+  for (const [foot, tip, hook] of [[-180, [-320, 330], 250], [150, [300, 300], 225]]) {
+    lines.push(line([foot, 150], tip));             // jib
+    lines.push(line([foot + (tip[0] > foot ? 60 : -60), 150], tip));   // and its stay
+    lines.push(line(tip, [tip[0], hook]));          // cable
+    lines.push(line([tip[0] - 14, hook], [tip[0] + 14, hook], [tip[0], hook - 22], [tip[0] - 14, hook]));
+  }
+  // A hull in the stocks, which is what the yard is for.
+  lines.push(line([-90, 200], [60, 200], [96, 224], [60, 248], [-90, 248], [-110, 224], [-90, 200]));
+  lines.push(line([-60, 200], [-60, 248]), line([10, 200], [10, 248]));
+  for (const u of [-70, 40]) lines.push(line([u, 150], [u, 200]));     // props down to the deck
+  return [{ key: 'town:yard', lines }];
 }
 
 // The starting town: one big asteroid with a cavern hollowed out of it and a tunnel
@@ -763,9 +804,9 @@ function toUnits(ring, mat) {
 // chunk or a unit, which is the point: a set piece draws its walls, a biome scatters its
 // rock, and neither has to know how the world files things.
 function generateCell(s) {
-  if (s.kind === 'town') return townMatter();
+  if (s.kind === 'town') return { matter: townMatter(), art: townArt() };
   const b = BIOMES[s.kind] || BIOMES.open;
-  if (!b.density) return [];
+  if (!b.density) return { matter: [], art: [] };
   const poly = cellOf(s);
   const rnd = siteRng(s);
   let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity, area = 0;
@@ -796,7 +837,7 @@ function generateCell(s) {
     }
     out.push({ ring, mat: 'rock' });
   }
-  return out;
+  return { matter: out, art: [] };
 }
 
 // Run a cell's generator and file what comes out. Each unit goes to the chunk holding its
@@ -804,7 +845,16 @@ function generateCell(s) {
 // so it has to survive the chunk being dropped a moment later.
 function depositCell(s) {
   const touched = new Set();
-  for (const m of generateCell(s))
+  const made = generateCell(s);
+  // Art is filed by where it starts and never split: a set piece draws pieces small enough
+  // to belong somewhere, the way it emits walls small enough to belong to a chunk.
+  for (const piece of made.art || []) {
+    const [x, y] = piece.lines[0][0];
+    const c = loadChunk(chunkOf(x), chunkOf(y));
+    c.art.push(piece);
+    touched.add(c);
+  }
+  for (const m of made.matter)
     for (const u of toUnits(m.ring, m.mat)) {
       let sx = 0, sy = 0;
       for (const [x, y] of u.ring) { sx += x; sy += y; }
@@ -822,7 +872,8 @@ function saveChunk(c) {
   try {
     fs.mkdirSync(WORLD_DIR, { recursive: true });
     fs.writeFileSync(path.join(WORLD_DIR, `${c.cx}_${c.cy}.json`),
-                     JSON.stringify({ v: WALL_FORMAT, cx: c.cx, cy: c.cy, units: c.units }));
+                     JSON.stringify({ v: WALL_FORMAT, cx: c.cx, cy: c.cy, units: c.units,
+                                      ...(c.art.length ? { art: c.art } : {}) }));
   } catch { /* unwritable store: the world runs, it just will not survive a restart */ }
 }
 
@@ -830,12 +881,13 @@ function loadChunk(cx, cy) {
   const key = chunkKey(cx, cy);
   const had = chunks.get(key);
   if (had) return had;
-  let units = [];
+  let units = [], art = [];
   try {
     const saved = JSON.parse(fs.readFileSync(path.join(WORLD_DIR, `${cx}_${cy}.json`), 'utf8'));
     if (saved.v === WALL_FORMAT && Array.isArray(saved.units)) units = saved.units;
+    if (saved.v === WALL_FORMAT && Array.isArray(saved.art)) art = saved.art;
   } catch { /* nothing filed here, which is the normal case for open space */ }
-  const c = { cx, cy, key, units };
+  const c = { cx, cy, key, units, art };
   chunks.set(key, c);
   wallsDirty = true;
   // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which would
@@ -849,6 +901,8 @@ let wallsDirty = true;
 let wallsByKey = new Map();           // stable key -> { key, rings, js, x0, y0, x1, y1 }
 let wallBins = new Map();             // chunk key -> the walls whose box touches that chunk
 let mergedCache = new Map();          // which units were merged -> what they merged into
+let artByKey = new Map();             // set-piece scenery, keyed the way walls are
+let artBins = new Map();              // chunk key -> the art whose box touches that chunk
 
 // Matter of different kinds never merges, so where two kinds meet something has to give or
 // their outlines cross in mid-air. They are ranked instead, and the higher one keeps the
@@ -886,6 +940,26 @@ function unitBox(u) {
 // wall on the client look new and get sent again.
 function rebuildWalls() {
   wallsDirty = false;
+  // Scenery is rebuilt in the same pass, though there is nothing to merge: it is keyed and
+  // binned exactly as walls are, so it arrives and leaves by the same machinery.
+  artByKey = new Map();
+  artBins = new Map();
+  for (const c of chunks.values())
+    for (const piece of c.art || []) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const l of piece.lines) for (const [x, y] of l) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      const a = { key: piece.key, lines: piece.lines, x0, y0, x1, y1 };
+      artByKey.set(a.key, a);
+      for (let ax = chunkOf(x0); ax <= chunkOf(x1); ax++)
+        for (let ay = chunkOf(y0); ay <= chunkOf(y1); ay++) {
+          const k = chunkKey(ax, ay);
+          if (!artBins.has(k)) artBins.set(k, []);
+          artBins.get(k).push(a);
+        }
+    }
   const ent = [];
   const byChunk = new Map();
   for (const c of chunks.values()) {
@@ -2429,14 +2503,24 @@ function snapshotFor(p) {
 // window, while its far end was still in plain sight.
 function syncWalls(p) {
   const v = p.view;
-  const need = new Map();
+  const need = new Map(), needArt = new Map();
   for (let cx = chunkOf(v.x - STREAM_R); cx <= chunkOf(v.x + STREAM_R); cx++)
-    for (let cy = chunkOf(v.y - STREAM_R); cy <= chunkOf(v.y + STREAM_R); cy++)
-      for (const w of wallBins.get(chunkKey(cx, cy)) || []) need.set(w.key, w);
+    for (let cy = chunkOf(v.y - STREAM_R); cy <= chunkOf(v.y + STREAM_R); cy++) {
+      const k = chunkKey(cx, cy);
+      for (const w of wallBins.get(k) || []) need.set(w.key, w);
+      for (const a of artBins.get(k) || []) needArt.set(a.key, a);
+    }
   const add = [], del = [];
   for (const [k, w] of need) if (p.walls.get(k) !== w) { p.walls.set(k, w); add.push([k, w.rings]); }
   for (const k of [...p.walls.keys()]) if (!need.has(k)) { p.walls.delete(k); del.push(k); }
   if (add.length || del.length) p.ws.send(JSON.stringify({ t: 'walls', add, del }));
+
+  // Scenery, by the same rules. It is authored rather than derived, so it never changes
+  // once sent -- only whether you are near enough to have it.
+  const aAdd = [], aDel = [];
+  for (const [k, a] of needArt) if (!p.art.has(k)) { p.art.add(k); aAdd.push([k, a.lines]); }
+  for (const k of [...p.art]) if (!needArt.has(k)) { p.art.delete(k); aDel.push(k); }
+  if (aAdd.length || aDel.length) p.ws.send(JSON.stringify({ t: 'art', add: aAdd, del: aDel }));
 }
 
 // Snapshots are repetitive JSON, which deflate eats: measured 5.7KB -> 0.9KB per
@@ -2463,11 +2547,12 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
     p.walls = new Map();                      // a new socket has been sent no terrain yet
+    p.art = new Set();
 
     // Returning players keep the fleet they left; a new commander is issued one. No ship
     // is special -- they are simply the ships this player owns.

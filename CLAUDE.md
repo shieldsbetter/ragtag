@@ -105,6 +105,13 @@ of rings (outline first, then holes). Nothing about it is persisted, which is wh
 laying material down, cutting a vein out of rock and blasting a hole in it all the same
 kind of operation: an edit to units.
 
+**A set piece can draw whatever it likes, and the client is never told what it is.** Besides
+matter, a generator may emit *art*: polylines in world coordinates, filed into the chunk
+where they start and streamed by key exactly as walls are, so they arrive when you are near
+and leave when you go. The client draws lines and has no idea what any of it depicts — no
+matching artwork has to be shipped for a new set piece to look like something, and nothing
+about it collides, merges or is matter.
+
 **Materials are ranked, and the higher one keeps the ground.** Matter of different kinds
 never merges, so where two kinds meet their outlines would otherwise cross in mid-air. The
 lower-ranked one is truncated at the boundary instead, so they abut exactly: `block` beats

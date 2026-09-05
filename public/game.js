@@ -109,6 +109,9 @@ function renderStamp(serverTime, arrival) {
 
 let dev = false;
 const walls = new Map();        // wall key -> polygon, pushed by the server as the camera moves
+// Scenery a set piece drew for itself. The client has no idea what any of it depicts and
+// does not need one: it arrives as lines in world coordinates and is drawn as lines.
+const scenery = new Map();
 
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
@@ -170,6 +173,20 @@ ws.onmessage = e => {
     return;
   }
   if (m.t === 'reload') { location.reload(); return; }
+  if (m.t === 'art') {
+    for (const [k, lines] of m.add) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const l of lines) for (const [x, y] of l) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      const path = new Path2D();
+      for (const l of lines) l.forEach(([x, y], i) => i ? path.lineTo(x, y) : path.moveTo(x, y));
+      scenery.set(k, { path, x0, y0, x1, y1 });
+    }
+    for (const k of m.del) scenery.delete(k);
+    return;
+  }
   if (m.t === 'refit') {
     if (m.ok) closeRefit();
     else if (refitting) refitWhy.textContent = m.why;
@@ -2024,6 +2041,7 @@ function draw() {
   if (dev) window.__ore = state.ore || [];
   if (dev) window.__rocks = state.rocks;
   if (dev) window.__walls = walls;
+  if (dev) window.__scenery = scenery;
   if (dev) window.__refitState = () => refitting && { was: refitting.was, fit: refitting.fit, pick: refitting.pick, mods: modules };
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
@@ -2069,6 +2087,18 @@ function draw() {
 
   drawStars(cw, ch);
   if (!OFF.has('walls')) drawWalls(vis);
+  // Over the rock and under everything that moves: it is built on the wall, and nothing
+  // ever passes behind it.
+  for (const s of scenery.values()) {
+    if (s.x1 < vis.x0 || s.x0 > vis.x1 || s.y1 < vis.y0 || s.y0 > vis.y1) continue;
+    ctx.save();
+    ctx.translate(-cam.x, -cam.y);
+    ctx.strokeStyle = 'rgba(150,178,210,.55)';
+    ctx.lineWidth = 1.1 / cam.zoom;
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke(s.path);
+    ctx.restore();
+  }
 
   const at = o => [o.x - cam.x, o.y - cam.y];
 
