@@ -716,6 +716,8 @@ const refitEl = document.getElementById('refit');
 const refitBoard = refitEl.querySelector('.board');
 const refitPalette = refitEl.querySelector('.palette');
 const refitCost = refitEl.querySelector('.cost b');
+const refitHave = refitEl.querySelector('.cost i');
+const refitShort = refitEl.querySelector('.cost .short');
 const refitWhy = refitEl.querySelector('.why');
 const refitOk = refitEl.querySelector('.confirm');
 const refitAsk = refitEl.querySelector('.why-cost');
@@ -878,8 +880,19 @@ function drawRefit() {
   const where = installsOf(s.h);
   const stock = refitStock(s);
   const cost = refitCost_(refitting.was, refitting.fit);
+  const short = cost > (s.or || 0);
+  const owed = Object.entries(stock).filter(([, n]) => n < 0);
+  refitOk.disabled = short || owed.length > 0;
+  // The header says the ore does not stretch, so this line is left for the one thing it
+  // cannot say.
+  refitWhy.textContent = owed.length ? `no ${modName(owed[0][0])} in the hold` : '';
 
+  // What it costs against what is aboard, which is the only comparison that decides
+  // whether CONFIRM does anything.
   refitCost.textContent = cost;
+  refitHave.textContent = s.or || 0;
+  refitShort.hidden = !short;
+  refitCost.parentElement.classList.toggle('over', short);
   // Nothing to explain when nothing is owed, and a breakdown left standing over a zero
   // total would be explaining a bill that no longer exists.
   refitAsk.hidden = !cost;
@@ -896,11 +909,7 @@ function drawRefit() {
     box.innerHTML = lines.join('<br>');
     refitCost.parentElement.append(box);
   }
-  const short = cost > (s.or || 0);
-  const owed = Object.entries(stock).filter(([, n]) => n < 0);
-  refitOk.disabled = short || owed.length > 0;
-  refitWhy.textContent = short ? `${cost} ore needed, ${s.or || 0} aboard`
-    : owed.length ? `no ${modName(owed[0][0])} in the hold` : '';
+
 
   const svg = svgEl('svg', { viewBox: '-64 -34 128 68', preserveAspectRatio: 'xMidYMid meet' });
   svg.append(svgEl('path', { d: svgPath(HULL), fill: '#0d151f', stroke: '#4b6076', 'stroke-width': 1 }));

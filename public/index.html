@@ -65,9 +65,12 @@
   #refit .sheet { display: flex; flex-direction: column; width: 100%; max-width: 760px;
                   padding: 10px 12px 14px; gap: 8px; }
   #refit header { display: flex; align-items: center; gap: 10px; }
-  #refit .who { color: #5ff0b0; letter-spacing: .12em; }
   #refit .cost { margin-left: auto; color: #8ba0bb; }
   #refit .cost b { color: #d8a851; font-weight: normal; font-size: 18px; }
+  #refit .cost i { color: #8ba0bb; font-style: normal; font-size: 18px; }
+  /* More than there is aboard: the number says so, and so does the mark in front of it. */
+  #refit .cost.over b { color: #ff6b8a; }
+  #refit .cost .short { color: #ff6b8a; margin-right: 6px; }
   #refit button { background: #101a26; color: #cfe6ff; border: 1px solid #24384f;
                   padding: 8px 14px; font: inherit; letter-spacing: .08em; }
   #refit button.confirm { border-color: #2f6f57; color: #5ff0b0; }
@@ -192,8 +195,7 @@
 <div id="refit" hidden>
   <div class="sheet">
     <header>
-      <span class="who">REFIT</span>
-      <span class="cost"><b>0</b> ore<button type="button" class="why-cost" hidden>?</button></span>
+      <span class="cost"><span class="short" hidden>✗</span><b>0</b> / <i>0</i> ore<button type="button" class="why-cost" hidden>?</button></span>
       <button type="button" class="cancel">CANCEL</button>
       <button type="button" class="confirm">CONFIRM</button>
     </header>
