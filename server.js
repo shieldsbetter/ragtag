@@ -966,6 +966,11 @@ function canRefit(s) {
 // across the diff, so moving one is an uninstall and an install, which is deliberate: a
 // move price needs a rule for which module became which, and no such rule is obviously
 // fair. The client is never asked what it thinks the total is.
+// Rotations arrive rounded to the two decimals the wire carries, so a gun nobody touched
+// comes back as -1.57 against a stored -1.5707963. Compared exactly, that reads as a
+// deliberate turn and bills a quarter of an install for every gun on the ship.
+const sameRot = (a, b) => Math.abs(angleDiff(a, b)) < 0.02;
+
 function refitPrice(before, after) {
   let ore = 0;
   const ids = new Set([...before.keys(), ...after.keys()]);
@@ -973,7 +978,7 @@ function refitPrice(before, after) {
     const was = before.get(id), now = after.get(id);
     if (was) ore += (now && now.type === was.type ? 0 : MODULES[was.type].install * REFIT_REMOVE);
     if (now && (!was || was.type !== now.type)) ore += MODULES[now.type].install;
-    else if (now && was && was.rot !== now.rot) ore += MODULES[now.type].install * REFIT_ROTATE;
+    else if (now && was && !sameRot(was.rot, now.rot)) ore += MODULES[now.type].install * REFIT_ROTATE;
   }
   return Math.round(ore);
 }
@@ -1034,7 +1039,9 @@ function refit(s, want) {
   s.turrets = fitTurrets(s.hull, fit);
   for (const t of s.turrets) {
     const was = before.get(t.install);
-    if (was && was.type === t.type) { t.hp = was.hp; t.a = was.a; t.cool = was.cool; }
+    if (!was || was.type !== t.type) continue;
+    t.hp = was.hp; t.a = was.a; t.cool = was.cool;
+    if (sameRot(was.rot, t.rot)) t.rot = was.rot;   // rounding is not a turn
   }
   // Indices into the gun list no longer mean what they meant, and the crew's standing
   // orders were written in them.

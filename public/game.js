@@ -164,6 +164,11 @@ ws.onmessage = e => {
     return;
   }
   if (m.t === 'reload') { location.reload(); return; }
+  if (m.t === 'refit') {
+    if (m.ok) closeRefit();
+    else if (refitting) refitWhy.textContent = m.why;
+    return;
+  }
   // Walls arrive keyed by themselves rather than by chunk: one can be far larger than a
   // chunk, so there is no chunk that owns it.
   if (m.t === 'walls') {
@@ -676,6 +681,17 @@ function buildDetails(ships) {
         body.append(hold);
       }
       if (PANELS[openTab].guns && (s.ft || []).length) body.append(gunGrid(s));
+      // Offered only where it can be done. The server decides that -- it sends `dock` when
+      // the ship is somewhere a refit is allowed -- so the button cannot appear anywhere
+      // the order would be refused.
+      if (PANELS[openTab].guns && s.dock) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'refitbtn';
+        b.textContent = 'REFIT';
+        b.addEventListener('click', () => openRefit(s.id));
+        body.append(b);
+      }
       for (const [kind, label] of PANELS[openTab].rows)
         body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
       row.append(body);
@@ -683,6 +699,258 @@ function buildDetails(ships) {
     detailsBody.append(row);
   }
 }
+
+// ---- refit ----
+//
+// A sheet rather than a panel: on a phone the hull wants the whole width, and a ship being
+// rebuilt is not being flown. Nothing here is applied as it happens -- the whole layout goes
+// over as one order when CONFIRM is pressed, and the running cost is a preview of what the
+// server will work out for itself.
+const refitEl = document.getElementById('refit');
+const refitBoard = refitEl.querySelector('.board');
+const refitPalette = refitEl.querySelector('.palette');
+const refitCost = refitEl.querySelector('.cost b');
+const refitWhy = refitEl.querySelector('.why');
+const refitOk = refitEl.querySelector('.confirm');
+let refitting = null;   // { ship, was, fit, sel, pick }
+
+const modName = t => t.replace(/([A-Z])/g, ' $1').toLowerCase();
+
+// Takes an id, not a ship. The button that opens this is built once and closes over
+// whatever the ship looked like then, so passing the object meant reopening the sheet after
+// a refit showed the loadout from before it -- and the preview priced every change against
+// a hull that no longer existed.
+function openRefit(id) {
+  const s = (fleet || []).find(q => q.id === id);
+  if (!s) return;
+  refitting = {
+    ship: s.id,
+    was: (s.ft || []).map(([install, type, rot]) => ({ install, type, rot })),
+    fit: (s.ft || []).map(([install, type, rot]) => ({ install, type, rot })),
+    sel: null,          // the install point whose module is selected, and so rotatable
+    pick: null,         // a type chosen from the palette, waiting for an empty point
+  };
+  refitEl.hidden = false;
+  drawRefit();
+}
+
+function closeRefit() { refitting = null; refitEl.hidden = true; }
+
+// The same arithmetic the server does, per install point and nothing across points. If
+// these ever disagree the server wins; this is only here so the number moves as you drag.
+function refitCost_(was, fit) {
+  const before = new Map(was.map(f => [f.install, f]));
+  const after = new Map(fit.map(f => [f.install, f]));
+  let ore = 0;
+  for (const id of new Set([...before.keys(), ...after.keys()])) {
+    const a = before.get(id), b = after.get(id);
+    const price = t => (modules[t] || {}).install || 0;
+    if (a) ore += (b && b.type === a.type ? 0 : price(a.type) * refitRates.remove);
+    if (b && (!a || a.type !== b.type)) ore += price(b.type);
+    // Same tolerance the server uses: what arrives on the wire is rounded, and a rounding
+    // is not a turn.
+    else if (b && a && Math.abs(Math.atan2(Math.sin(a.rot - b.rot), Math.cos(a.rot - b.rot))) >= 0.02)
+      ore += price(b.type) * refitRates.rotate;
+  }
+  return Math.round(ore);
+}
+
+// What is in the hold once this layout is applied: what was there, plus everything coming
+// off, minus everything going on.
+function refitStock(s) {
+  const stock = { ...(s.hold || {}) };
+  const after = new Map(refitting.fit.map(f => [f.install, f]));
+  for (const f of refitting.was) {
+    const now = after.get(f.install);
+    if (!now || now.type !== f.type) stock[f.type] = (stock[f.type] || 0) + 1;
+  }
+  for (const f of refitting.fit) {
+    const was = refitting.was.find(w => w.install === f.install);
+    if (was && was.type === f.type) continue;
+    stock[f.type] = (stock[f.type] || 0) - 1;
+  }
+  return stock;
+}
+
+// Two modules may not overlap, and size is a radius, so this is the same test the server
+// runs. Rotation cannot break a fit -- it only points the arc somewhere else.
+function refitClash(fit, where, install, type) {
+  for (const f of fit) {
+    if (f.install === install) continue;
+    const a = where[install], b = where[f.install];
+    if (!a || !b) continue;
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) < (modules[type].size + modules[f.type].size)) return true;
+  }
+  return false;
+}
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+const svgEl = (n, attrs) => {
+  const e = document.createElementNS(SVGNS, n);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+};
+const svgPath = pts => pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x} ${y}`).join(' ') + ' Z';
+
+function drawRefit() {
+  if (!refitting) return;
+  const s = (fleet || []).find(q => q.id === refitting.ship);
+  if (!s) return closeRefit();
+  const where = installsOf(s.h);
+  const stock = refitStock(s);
+  const cost = refitCost_(refitting.was, refitting.fit);
+
+  refitCost.textContent = cost;
+  const short = cost > (s.or || 0);
+  const owed = Object.entries(stock).filter(([, n]) => n < 0);
+  refitOk.disabled = short || owed.length > 0;
+  refitWhy.textContent = short ? `${cost} ore needed, ${s.or || 0} aboard`
+    : owed.length ? `no ${modName(owed[0][0])} in the hold` : '';
+
+  const svg = svgEl('svg', { viewBox: '-64 -34 128 68', preserveAspectRatio: 'xMidYMid meet' });
+  svg.append(svgEl('path', { d: svgPath(HULL), fill: '#0d151f', stroke: '#4b6076', 'stroke-width': 1 }));
+  svg.append(svgEl('path', { d: `M${DECK[0][0]} ${DECK[0][1]}L${DECK[1][0]} ${DECK[1][1]}`,
+                             stroke: '#24384f', 'stroke-width': .8 }));
+
+  for (const p of (hulls[s.h] || {}).installs || []) {
+    const held = refitting.fit.find(f => f.install === p.id);
+    const g = svgEl('g', { transform: `translate(${p.at[0]} ${p.at[1]})`, 'data-install': p.id });
+    if (!held) {
+      const free = !refitting.pick || !refitClash(refitting.fit, where, p.id, refitting.pick);
+      g.append(svgEl('circle', { r: 7, fill: 'transparent',
+        stroke: refitting.pick ? (free ? '#5ff0b0' : '#ff6b8a') : '#2b4157',
+        'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+    } else {
+      const mod = modules[held.type] || {};
+      if (refitting.sel === p.id) {
+        // The rotate ring. Dragging it points the module; dragging the module itself moves
+        // it, so the two gestures never have to be told apart.
+        g.append(svgEl('circle', { r: 17, fill: 'none', stroke: '#5ff0b0', 'stroke-width': 6,
+                                   opacity: .18, 'data-ring': p.id }));
+        const hx = Math.cos(held.rot) * 17, hy = Math.sin(held.rot) * 17;
+        g.append(svgEl('circle', { cx: hx, cy: hy, r: 4, fill: '#5ff0b0', 'data-ring': p.id }));
+        const arc = svgEl('path', { fill: 'none', stroke: '#5ff0b0', opacity: .35, 'stroke-width': 1,
+          d: `M${Math.cos(held.rot - mod.arcHalf) * 26} ${Math.sin(held.rot - mod.arcHalf) * 26}`
+             + ` A26 26 0 ${mod.arcHalf > Math.PI / 2 ? 1 : 0} 1 `
+             + `${Math.cos(held.rot + mod.arcHalf) * 26} ${Math.sin(held.rot + mod.arcHalf) * 26}` });
+        g.append(arc);
+      }
+      g.append(svgEl('circle', { r: mod.size || 8, fill: '#16283a',
+                                 stroke: refitting.sel === p.id ? '#5ff0b0' : '#cfe6ff', 'stroke-width': 1 }));
+      const gun = svgEl('path', { d: svgPath(TURRET), fill: '#cfe6ff',
+                                  transform: `rotate(${held.rot * 180 / Math.PI}) scale(.7)` });
+      g.append(gun);
+    }
+    svg.append(g);
+  }
+  refitBoard.textContent = '';
+  refitBoard.append(svg);
+
+  refitPalette.textContent = '';
+  const kinds = Object.keys(stock).filter(t => stock[t] > 0 && !(modules[t] || {}).fixed);
+  if (!kinds.length) {
+    const e = document.createElement('span');
+    e.className = 'empty';
+    e.textContent = 'hold empty — drag a module off the hull to stow it';
+    refitPalette.append(e);
+  }
+  for (const t of kinds) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mod' + (refitting.pick === t ? ' on' : '');
+    b.innerHTML = `${modName(t)} <span class="n">×${stock[t]}</span>`;
+    b.addEventListener('click', () => {
+      refitting.pick = refitting.pick === t ? null : t;
+      refitting.sel = null;
+      drawRefit();
+    });
+    refitPalette.append(b);
+  }
+}
+
+// One pointer, three outcomes, decided by what it went down on and where it came up:
+// the ring rotates, a module dragged to another point moves and dragged off the hull
+// stows, and a module merely tapped is selected.
+let refitDrag = null;
+refitBoard.addEventListener('pointerdown', e => {
+  if (!refitting) return;
+  const svg = refitBoard.querySelector('svg');
+  if (!svg) return;
+  const target = e.target.closest('[data-install],[data-ring]');
+  if (!target) { refitting.sel = null; refitting.pick = null; drawRefit(); return; }
+  const ring = target.getAttribute('data-ring');
+  const install = ring || target.closest('[data-install]').getAttribute('data-install');
+  refitDrag = { install, ring: !!ring, moved: false };
+  svg.setPointerCapture(e.pointerId);
+});
+refitBoard.addEventListener('pointermove', e => {
+  if (!refitDrag || !refitting) return;
+  refitDrag.moved = true;
+  if (!refitDrag.ring) return;
+  const s = (fleet || []).find(q => q.id === refitting.ship);
+  const where = installsOf(s.h)[refitDrag.install];
+  const p = svgPoint(e);
+  const held = refitting.fit.find(f => f.install === refitDrag.install);
+  if (!p || !held || !where) return;
+  held.rot = Math.atan2(p.y - where[1], p.x - where[0]);
+  drawRefit();
+});
+refitBoard.addEventListener('pointerup', e => {
+  if (!refitDrag || !refitting) return;
+  const drag = refitDrag;
+  refitDrag = null;
+  const s = (fleet || []).find(q => q.id === refitting.ship);
+  if (!s) return;
+  const where = installsOf(s.h);
+  const held = refitting.fit.find(f => f.install === drag.install);
+
+  if (drag.ring) { drawRefit(); return; }
+  if (!drag.moved) {
+    // A tap. On an empty point it installs whatever the palette has chosen; on a module
+    // it selects it, which is what makes the rotate ring appear.
+    if (!held && refitting.pick) {
+      if (!refitClash(refitting.fit, where, drag.install, refitting.pick))
+        refitting.fit.push({ install: drag.install, type: refitting.pick, rot: 0 });
+    } else if (held) {
+      refitting.sel = refitting.sel === drag.install ? null : drag.install;
+      refitting.pick = null;
+    }
+    drawRefit();
+    return;
+  }
+  if (!held) { drawRefit(); return; }
+  // Dropped somewhere. On another point it moves, anywhere else it comes off.
+  const p = svgPoint(e);
+  let onto = null;
+  if (p) for (const q of (hulls[s.h] || {}).installs || [])
+    if (Math.hypot(q.at[0] - p.x, q.at[1] - p.y) < 11) onto = q.id;
+  if (onto === drag.install) { drawRefit(); return; }
+  if (onto && !refitting.fit.some(f => f.install === onto)) {
+    const rest = refitting.fit.filter(f => f !== held);
+    if (!refitClash(rest, where, onto, held.type)) held.install = onto;
+  } else if (!onto) {
+    refitting.fit = refitting.fit.filter(f => f !== held);
+    if (refitting.sel === drag.install) refitting.sel = null;
+  }
+  drawRefit();
+});
+
+function svgPoint(e) {
+  const svg = refitBoard.querySelector('svg');
+  if (!svg) return null;
+  const r = svg.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  // preserveAspectRatio meet: one scale for both axes, letterboxed on the long one.
+  const k = Math.min(r.width / vb.width, r.height / vb.height);
+  return { x: vb.x + (e.clientX - r.left - (r.width - vb.width * k) / 2) / k,
+           y: vb.y + (e.clientY - r.top - (r.height - vb.height * k) / 2) / k };
+}
+
+refitEl.querySelector('.cancel').addEventListener('click', closeRefit);
+refitOk.addEventListener('click', () => {
+  if (!refitting) return;
+  ws.send(JSON.stringify({ t: 'refit', ship: refitting.ship, fit: refitting.fit }));
+});
 
 // The state the repair curve is acting on, in the same panel as the curve: which guns
 // are hurt, which are gone, and where the one repair point is going right now.
@@ -1488,6 +1756,7 @@ function draw() {
   if (dev) window.__ore = state.ore || [];
   if (dev) window.__rocks = state.rocks;
   if (dev) window.__walls = walls;
+  if (dev) window.__refitState = () => refitting && { was: refitting.was, fit: refitting.fit, pick: refitting.pick, mods: modules };
   // Forget ships that no longer exist, and keep a designated one while anything is held.
   for (const id of [...selection]) if (!fleet.some(s => s.id === id)) selection.delete(id);
   if (!hasSelected && fleet.length) {          // pick one on arrival, then leave it alone

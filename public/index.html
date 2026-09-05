@@ -55,6 +55,33 @@
   #details .shiphead .tw { display: inline-block; color: #4e8f7d; transition: transform .15s; }
   #details .shiphead.open .tw { transform: rotate(90deg); }
   #details .shipbody { padding: 0 0 12px; }
+  /* The refit sheet. It is a full overlay rather than a panel: on a phone the hull wants
+     the whole width, and the ship is not being flown while it is being rebuilt. */
+  #refit { position: fixed; inset: 0; background: #060a10; z-index: 40;
+           display: flex; align-items: stretch; justify-content: center; }
+  #refit .sheet { display: flex; flex-direction: column; width: 100%; max-width: 760px;
+                  padding: 10px 12px 14px; gap: 8px; }
+  #refit header { display: flex; align-items: center; gap: 10px; }
+  #refit .who { color: #5ff0b0; letter-spacing: .12em; }
+  #refit .cost { margin-left: auto; color: #8ba0bb; }
+  #refit .cost b { color: #d8a851; font-weight: normal; font-size: 18px; }
+  #refit button { background: #101a26; color: #cfe6ff; border: 1px solid #24384f;
+                  padding: 8px 14px; font: inherit; letter-spacing: .08em; }
+  #refit button.confirm { border-color: #2f6f57; color: #5ff0b0; }
+  #refit button.confirm:disabled { opacity: .35; color: #8ba0bb; border-color: #24384f; }
+  #refit .board { flex: 1 1 auto; min-height: 0; display: flex; }
+  #refit svg { width: 100%; height: 100%; touch-action: none; }
+  #refit .why { color: #ff6b8a; min-height: 16px; }
+  #refit .palette { display: flex; gap: 8px; flex-wrap: wrap; min-height: 62px;
+                    border-top: 1px solid #1b2735; padding-top: 10px; }
+  #refit .mod { border: 1px solid #24384f; padding: 8px 12px; color: #cfe6ff;
+                display: flex; gap: 8px; align-items: baseline; }
+  #refit .mod.on { border-color: #5ff0b0; color: #5ff0b0; }
+  #refit .mod .n { color: #8ba0bb; }
+  #refit .empty { color: #55677d; align-self: center; }
+  #details .refitbtn { background: #101a26; color: #5ff0b0; border: 1px solid #2f6f57;
+                       padding: 8px 14px; font: inherit; letter-spacing: .08em;
+                       width: 100%; margin-top: 10px; }
   #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
   #details .hold { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 12px; }
   #details .hold b { color: #d8a851; font-weight: normal; font-size: 20px; }
@@ -146,6 +173,19 @@
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<div id="refit" hidden>
+  <div class="sheet">
+    <header>
+      <span class="who">REFIT</span>
+      <span class="cost"><b>0</b> ore</span>
+      <button type="button" class="cancel">CANCEL</button>
+      <button type="button" class="confirm">CONFIRM</button>
+    </header>
+    <div class="board"></div>
+    <div class="why"></div>
+    <div class="palette"></div>
+  </div>
+</div>
 <button id="detailsToggle" type="button" aria-label="Details"></button>
 <aside id="details"><h2>SELECTION</h2><div id="detailsBody"></div></aside>
 <script src="/game.js" type="module"></script>
