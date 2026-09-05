@@ -455,6 +455,11 @@ function manageEncounters(dt) {
 // fighting.
 const NEST_R = 1200;                  // how close you have to be for it to exist at all
 const NEST_NOTICE = 900, NEST_FORGET = 1700;
+// No two nests within twice the leash, so their pursuits cannot overlap: there is always
+// a direction that takes you out of one without carrying you into the next. Spacing is
+// what governs density now, not the roll -- most rolls land too near something and are
+// dropped.
+const NEST_APART = NEST_FORGET * 2;
 const GUARD_ORBIT = 120;              // how tightly the guard circles its cache
 
 const SCRIPTS = {
@@ -535,8 +540,13 @@ function trySpawnNest(cx, cy) {
   for (let i = 0; i < 10; i++) {
     const x = cx * CHUNK + rand(80, CHUNK - 80), y = cy * CHUNK + rand(80, CHUNK - 80);
     if (blockedAt(x, y, HULL_CLEAR, false)) continue;
+    // Against the other nests, not against their fighters. This used to test ships, which
+    // worked only because a nest built itself the instant it was placed -- once placement
+    // and building came apart, a dormant nest had no hulls to keep the next one away and
+    // they packed in on top of each other.
     let clear = true;
-    for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
+    for (const e of encounters) if (Math.hypot(e.x - x, e.y - y) < NEST_APART) { clear = false; break; }
+    if (clear) for (const s of ships) if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) { clear = false; break; }
     if (!clear) continue;
     addEncounter('nest', x, y, NEST_R);
     return;
