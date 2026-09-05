@@ -59,6 +59,9 @@
      the whole width, and the ship is not being flown while it is being rebuilt. */
   #refit { position: fixed; inset: 0; background: #060a10; z-index: 40;
            display: flex; align-items: stretch; justify-content: center; }
+  /* An id selector beats the UA's [hidden] rule, so without this the sheet is on screen
+     from the moment the page loads and CANCEL cannot put it away. */
+  #refit[hidden] { display: none; }
   #refit .sheet { display: flex; flex-direction: column; width: 100%; max-width: 760px;
                   padding: 10px 12px 14px; gap: 8px; }
   #refit header { display: flex; align-items: center; gap: 10px; }
