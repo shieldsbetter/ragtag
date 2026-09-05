@@ -568,7 +568,9 @@ const PANELS = [
     // where that ends, because the two halves of the axis mean different things: left of
     // it you are paying to bring a gun back, right of it you are topping one up.
     mark: () => wreckDepth / (wreckDepth + TURRET_HP),
-    rows: [['repair', 'Turrets']] },
+    // A curve per module type, and a hull only gets the row for what it is carrying: an
+    // envelope for equipment the ship does not have is a control that does nothing.
+    rows: [['repair', 'Turrets'], ['repair:tractor', 'Tractor']] },
 ];
 let openTab = 0;
 let prioMax = 8, wreckDepth = 150;
@@ -636,7 +638,11 @@ function syncDetails() {
   // Rebuilding blows away a half-dragged envelope, so it happens only when the shape of
   // the panel changes -- which ships, which one is open, which one wears the ring. The
   // live numbers are written into kept nodes every frame instead.
-  const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}|${openTab}`;
+  // The open ship's loadout is part of the shape too: which repair envelopes there are
+  // follows from what is installed, and a refit that changes it has to redraw the panel.
+  const open = ships.find(s => s.id === openShip);
+  const key = ships.map(s => s.id).join(',') + `|${openShip}|${designated}|${openTab}`
+    + `|${(open?.ft || []).map(f => f[1]).join(',')}`;
   if (key !== builtKey) { builtKey = key; buildDetails(ships); }
   for (const s of ships) {
     const el = statusEls.get(s.id);
@@ -707,8 +713,11 @@ function buildDetails(ships) {
         b.addEventListener('click', () => openRefit(s.id));
         body.append(b);
       }
-      for (const [kind, label] of PANELS[openTab].rows)
+      for (const [kind, label] of PANELS[openTab].rows) {
+        const only = kind.startsWith('repair:') && kind.slice(7);
+        if (only && !(s.ft || []).some(f => f[1] === only)) continue;
         body.append(envelope(s.id, kind, label, PANELS[openTab], s.pr && s.pr[kind]));
+      }
       row.append(body);
     }
     detailsBody.append(row);

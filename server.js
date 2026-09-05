@@ -183,7 +183,11 @@ const PRIO_MAX = 8;      // points, not stops: more than this is not thumb-edita
 // 'rock', 'turret', 'fighter' and 'cache' say what to shoot; 'repair' says what to mend.
 // Same curve, same order on the wire, same editor -- only the axis underneath differs,
 // which is distance for the first four and health for the last.
-const PRIO_KINDS = ['rock', 'turret', 'fighter', 'cache', 'repair'];
+// Repair curves are per module type, under `repair:<type>`, and `repair` is what anything
+// without its own falls back to. A crew told to leave guns alone until they are nearly
+// wrecked should not thereby be told the same about the winch.
+const PRIO_KINDS = ['rock', 'turret', 'fighter', 'cache', 'repair', 'repair:tractor'];
+const repairCurve = (s, t) => s.prio['repair:' + t.type] || s.prio.repair;
 // The default falls away with distance and never reaches zero, so an untouched ship
 // behaves exactly as it did before this existed: nearest first, nothing excluded.
 // Two bands that do not overlap, split at a quarter health. Below the split priority
@@ -200,6 +204,7 @@ const defaultPrio = () => {
     rock: [[0, 100], [1, 20]], turret: [[0, 100], [1, 20]],
     fighter: [[0, 100], [1, 20]], cache: [[0, 100], [1, 20]],
     repair: [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
+    'repair:tractor': [[0, 50], [quarter, 100], [quarter, 49], [1, 1]],
   };
 };
 
@@ -2095,7 +2100,7 @@ function resolveWalls(s) {
 function repairShip(s, dt) {
   const T = s.turrets;
   const wants = i => i !== null && T[i] && T[i].hp < maxHp(T[i])
-    && prioAt(s.prio.repair, repairFrac(T[i].hp, maxHp(T[i]))) > 0;
+    && prioAt(repairCurve(s, T[i]), repairFrac(T[i].hp, maxHp(T[i]))) > 0;
   s.repairHold -= dt;
 
   // Guns named by hand are not a stronger opinion about priority, they replace it: the
@@ -2119,7 +2124,7 @@ function repairShip(s, dt) {
     let best = null, bestScore = 0;
     for (let i = 0; i < T.length; i++) {
       if (!wants(i)) continue;
-      const score = prioAt(s.prio.repair, repairFrac(T[i].hp, maxHp(T[i])));
+      const score = prioAt(repairCurve(s, T[i]), repairFrac(T[i].hp, maxHp(T[i])));
       // Ties go to the gun nearest to being finished, so even a flat band completes one
       // before starting the next.
       if (score > bestScore || (score === bestScore && best !== null && T[i].hp > T[best].hp)) {
