@@ -146,6 +146,20 @@ an earlier version of this rule cancelled every order before the ship had moved.
 shared context. Removing redundant fields buys almost nothing; digits do, because
 entropy is what survives. Measure before restructuring the protocol.
 
+**Test servers leak, and this box has no RAM to spare.** Every throwaway server holds
+60-140MB, and any run that dies before its cleanup line leaves one behind. Thirty-eight
+of them once accumulated in a single session, about 4.5GB. Capture the pid at launch
+(`node server.js & S=$!`) and kill *that*, rather than looking the port up afterwards --
+the lookup is what silently misses.
+
+**`pgrep -f` and `pkill -f` match the shell that runs them.** The pattern is a literal
+substring of your own command line, so `pkill -f "node server.js"` kills the wrapper
+mid-script and the rest of the line never runs -- which looks exactly like the cleanup
+having worked. Bracket a character to break the self-match (`pgrep -f 'node [s]erver.js'`)
+or, better, use the pid you kept. Node also reports its comm as `MainThread` here, so
+`pkill -x node` finds nothing and `top` shows pages of processes that do not look like
+node at all.
+
 ---
 
 ## Diagnostics
