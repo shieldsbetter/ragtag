@@ -772,27 +772,44 @@ function trySpawnNest(cx, cy) {
 // world would grow without bound as you explore. Space exists where players are.
 const crewed = s => s.owner !== null;
 
-function chunkAnchors() {
+// Only a crewed hull makes world. A camera may hold what it is looking at, so nothing
+// vanishes in front of you, but it may not call anything into being -- otherwise a player
+// with a finger on the map could drag the world into existence for as far as they cared to
+// scroll, generating terrain, growing the mesh and deciding biomes for ground nobody has
+// been anywhere near.
+//
+// Three screens is deliberately generous: a screen at full zoom-out reaches MAX_VIEW, so
+// the edge of what exists stays two screens beyond anything anyone can see.
+const AOI_R = MAX_VIEW * 3;
+const AOI_KEEP = AOI_R + 900;         // a chunk of hysteresis, so a hovering ship does not thrash
+
+function shipAnchors() {
   const out = [];
-  for (const s of ships) if (crewed(s)) out.push({ x: s.x, y: s.y, load: ACTIVE_R, keep: KEEP_R });
+  for (const s of ships) if (crewed(s)) out.push({ x: s.x, y: s.y });
+  return out;
+}
+
+function watchAnchors() {
+  const out = [];
   for (const p of players.values())
-    if (p.view && p.ws.readyState === 1)
-      out.push({ x: p.view.x, y: p.view.y, load: STREAM_R, keep: STREAM_R + 400 });
+    if (p.view && p.ws && p.ws.readyState === 1) out.push({ x: p.view.x, y: p.view.y });
   return out;
 }
 
 function manageChunks() {
-  const anchors = chunkAnchors();
-  for (const a of anchors)
-    for (let cx = chunkOf(a.x - a.load); cx <= chunkOf(a.x + a.load); cx++)
-      for (let cy = chunkOf(a.y - a.load); cy <= chunkOf(a.y + a.load); cy++)
+  for (const a of shipAnchors())
+    for (let cx = chunkOf(a.x - AOI_R); cx <= chunkOf(a.x + AOI_R); cx++)
+      for (let cy = chunkOf(a.y - AOI_R); cy <= chunkOf(a.y + AOI_R); cy++)
         loadChunk(cx, cy);
 
   const keep = new Set();
-  for (const a of anchors)
-    for (let cx = chunkOf(a.x - a.keep); cx <= chunkOf(a.x + a.keep); cx++)
-      for (let cy = chunkOf(a.y - a.keep); cy <= chunkOf(a.y + a.keep); cy++)
+  const hold = (a, r) => {
+    for (let cx = chunkOf(a.x - r); cx <= chunkOf(a.x + r); cx++)
+      for (let cy = chunkOf(a.y - r); cy <= chunkOf(a.y + r); cy++)
         keep.add(chunkKey(cx, cy));
+  };
+  for (const a of shipAnchors()) hold(a, AOI_KEEP);
+  for (const a of watchAnchors()) hold(a, STREAM_R + 400);
   for (const key of [...chunks.keys()]) if (!keep.has(key)) chunks.delete(key);
 }
 

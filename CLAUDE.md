@@ -107,6 +107,12 @@ a convex cell always takes a corner with it. Cull that check by the cell's own r
 (`2 × cellRadius`), never by a fixed distance: a sprawling cell's corners run much further
 than its site suggests, and a fixed cull let a site 25,000 units away quietly steal one.
 
+**Only a crewed hull makes world.** Terrain and the mesh are generated within `AOI_R`
+— three max-zoom screens — of a player's ship, and nothing else. A camera may *hold*
+what it is looking at so nothing vanishes in front of you, but it may never call anything
+into being: otherwise a finger on the map drags the world into existence for as far as
+anyone cares to scroll, deciding biomes for ground nobody has been near.
+
 **Clients receive only what they can see.** `MAX_VIEW` bounds the camera, the client
 reports where it is looking, and snapshots carry only nearby entities plus your own
 ships. World *simulation* stays anchored to ships; only delivery follows the camera.
