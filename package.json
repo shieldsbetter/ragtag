@@ -1,6 +1,9 @@
 {
-    "name": "ships",
+    "name": "@shieldsbetter/ragtag",
     "version": "0.1.0",
+    "description": "A naval-tactics RTS in space: server-authoritative simulation over a WebSocket, drawn on a canvas as outlined polygons.",
+    "license": "ISC",
+    "author": "Hampton Smith",
     "type": "module",
     "scripts": {
         "dev": "DEV=1 node --watch server.js",
