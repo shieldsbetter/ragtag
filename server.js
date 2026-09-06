@@ -18,7 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Parsed rather than run: the server is the module body, not a handler, so help and
 // usage errors are dealt with here and everything below reads plain constants.
 const cli = command('ragtag', {
-    summary: 'Multiplayer naval-tactics roguelike.',
+    summary: 'Mobile-friendly multiplayer naval-tactics roguelike.',
     description:
         'Serves the game and simulates it. The world is written to ./world in the ' +
         'directory the command is run from.',

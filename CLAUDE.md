@@ -1,6 +1,6 @@
 # ragtag
 
-A multiplayer naval-tactics roguelike. Server-authoritative simulation over a WebSocket,
+A mobile-friendly multiplayer naval-tactics roguelike. Server-authoritative simulation over a WebSocket,
 drawn on a canvas as outlined polygons — Asteroids' look, an RTS's pace.
 
 ```

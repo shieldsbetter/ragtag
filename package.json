@@ -1,7 +1,7 @@
 {
     "name": "@shieldsbetter/ragtag",
     "version": "0.1.0",
-    "description": "Multiplayer naval-tactics roguelike",
+    "description": "Mobile-friendly multiplayer naval-tactics roguelike",
     "license": "ISC",
     "author": "Hampton Smith <1743291+hamptonsmith@users.noreply.github.com>",
     "repository": {
