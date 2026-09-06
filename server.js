@@ -4258,14 +4258,13 @@ function reachableAddresses() {
 
 // A title, the QR under it, then the link. The QR is what a phone is here for, so it goes
 // where a thumb-held camera finds it: between the name and the text it encodes.
-function announce(title, url, qr = true) {
+function announce(title, url) {
     console.log(`\n${title}`);
     // Rendered to a string and trimmed: the library signs off with blank lines, which
     // would put a gap between the code and the link it encodes.
-    if (qr)
-        qrcode.generate(url, { small: true }, (code) =>
-            console.log(code.replace(/\s+$/, '')),
-        );
+    qrcode.generate(url, { small: true }, (code) =>
+        console.log(code.replace(/\s+$/, '')),
+    );
     console.log(`  ${url}`);
 }
 
@@ -4355,8 +4354,6 @@ server.listen(PORT, async () => {
     console.log(
         `\nragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
     );
-    // No QR: a phone scanning this would be pointed at itself.
-    announce('this machine', `http://localhost:${PORT}`, false);
     for (const { name, url } of reachableAddresses()) announce(name, url);
     const tunnel = NGROK ? await openTunnel(PORT) : null;
     if (tunnel) announce('ngrok', tunnel);
