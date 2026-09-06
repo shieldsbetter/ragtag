@@ -4258,8 +4258,9 @@ function reachableAddresses() {
 
 // A title, the QR under it, then the link. The QR is what a phone is here for, so it goes
 // where a thumb-held camera finds it: between the name and the text it encodes.
-function announce(title, url) {
+function announce(title, url, qr = true) {
     console.log(`\n${title}`);
+    if (!qr) return console.log(`  ${url}`);
     // Rendered to a string and trimmed: the library signs off with blank lines, which
     // would put a gap between the code and the link it encodes.
     qrcode.generate(url, { small: true }, (code) =>
@@ -4354,7 +4355,11 @@ server.listen(PORT, async () => {
     console.log(
         `\nragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
     );
-    for (const { name, url } of reachableAddresses()) announce(name, url);
+    // Nothing but the loopback: say so rather than print nothing at all, which reads as
+    // a server that failed to start. No QR -- a phone scanning it points at itself.
+    const found = reachableAddresses();
+    if (found.length) for (const { name, url } of found) announce(name, url);
+    else announce('this machine only', `http://localhost:${PORT}`, false);
     const tunnel = NGROK ? await openTunnel(PORT) : null;
     if (tunnel) announce('ngrok', tunnel);
     else if (!NGROK) console.log('\n(--ngrok for a public URL)');
