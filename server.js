@@ -4316,10 +4316,7 @@ server.listen(PORT, async () => {
         const lan = lanAddress();
         if (lan) {
             console.log(`  lan     http://${lan}:${PORT}`);
-            if (!NGROK)
-                console.log(
-                    '          (--ngrok for a public URL, at the cost of metered bandwidth)',
-                );
+            if (!NGROK) console.log('          (--ngrok for a public URL)');
             qrcode.generate(`http://${lan}:${PORT}`, { small: true });
         } else {
             console.log('  (no network interface found -- localhost only)');
