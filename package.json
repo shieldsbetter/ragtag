@@ -29,6 +29,7 @@
     "scripts": {
         "dev": "DEV=1 node --watch server.js",
         "lint": "eslint --max-warnings=0",
+        "prepublishOnly": "npm run lint && npm run prettier:check",
         "prettier": "prettier . --write",
         "prettier:check": "prettier . --check",
         "start": "node server.js"
