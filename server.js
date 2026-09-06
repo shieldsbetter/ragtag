@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
 import { command } from '@shieldsbetter/sbopts';
 import { stack, stringWidth, text } from '@shieldsbetter/termiflo';
+import { produce } from 'immer';
 import polygonClipping from 'polygon-clipping';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -836,7 +837,10 @@ function townMarks() {
         {
             key: 'town:harbour',
             kind: 'talk',
-            node: 'harbour:hello',
+            // The role, and the frame that sits under everybody's stack. The module is
+            // named, not imported: this is data, and it ends up in save files.
+            who: 'harbourmaster',
+            talk: ['harbour', {}],
             x: +harbour[0].toFixed(1),
             y: +harbour[1].toFixed(1),
             r: 260,
@@ -1754,8 +1758,7 @@ function armedArrivals() {
         p.busy = m.key;
         s.arm = null;
         if (m.kind === 'talk') {
-            p.talk = { node: m.node, ship: s.id };
-            sendTalk(p);
+            startTalk(p, s.id, m);
             continue;
         }
         p.ws.send(
@@ -2179,96 +2182,103 @@ const newMoving = () =>
 
 // ---- conversation ----
 //
-// A node is something somebody says and a list of things you may say back. Choosing one
-// tells the server what to do next: another node, a hand-off to some other interaction, or
-// the end of it. Only the server knows the tree -- a client is handed one node at a time
-// and cannot read ahead, which is what will let a later node depend on what you have done
-// rather than on what you have been told.
+// A conversation is a stack of frames, and a frame is `[module, state]` -- a name and a
+// bag, both plain JSON, so a whole conversation serialises by being what it already is.
+// Behaviour is never in the stack: the name is looked up in `conversations/`, which is
+// what makes the stack safe to write to disk and reload into a newer build.
 //
-// A session is held in a conversation until it terminates. There is no way out of the
-// sheet except through an option, so a tree with no ending is an authoring bug and reads
-// like one.
-const TALKS = {
-    'harbour:hello': {
-        say:
-            'Harbourmaster leans on the rail. "New hull, is it? We do not get many ' +
-            'through here since the lanes closed. What do you want?"',
-        options: [
-            {
-                label: 'What is there to do around here?',
-                then: { talk: 'harbour:work' },
-            },
-            { label: 'I have ore to sell.', then: { open: 'town:market' } },
-            { label: 'My ship needs work.', then: { open: 'town:yard' } },
-            { label: 'Nothing. Good day.', then: { end: true } },
-        ],
-    },
-    'harbour:work': {
-        say:
-            '"Out there, mostly. Rock worth cutting, and nests worth clearing if you ' +
-            'have the guns for it. Bring back what you find -- the market pays, and the ' +
-            'yard will bolt it on."',
-        options: [
-            { label: 'Nests?', then: { talk: 'harbour:nests' } },
-            {
-                label: 'Then I will see to my ship.',
-                then: { open: 'town:yard' },
-            },
-            { label: 'Understood.', then: { end: true } },
-        ],
-    },
-    'harbour:nests': {
-        say:
-            '"Fighters standing over a cache. They come at you and they do not stop. ' +
-            'Whatever is in the cache is yours if you are still flying afterwards."',
-        options: [
-            {
-                label: 'Anything else worth knowing?',
-                then: { talk: 'harbour:work' },
-            },
-            { label: 'I will keep it in mind.', then: { end: true } },
-        ],
-    },
-};
-
-// What the client is told: the words, and the options as labels and nothing else. Which
-// node it is, and what any option does, stays here.
-function sendTalk(p) {
-    const node = TALKS[p.talk?.node];
-    if (!node) return endTalk(p);
-    p.ws.send(
-        JSON.stringify({
-            t: 'talk',
-            ship: p.talk.ship,
-            say: node.say,
-            options: node.options.map((o) => o.label),
-        }),
-    );
-}
-
-function endTalk(p) {
-    p.talk = null;
-    p.busy = null;
-    if (p.ws.readyState === 1) p.ws.send(JSON.stringify({ t: 'talk-end' }));
-}
-
-// Handing off ends the conversation rather than suspending it: the sheet you are sent to
-// is the interaction now, and it is reached by walking the tree again if you want it back.
-function talkChoose(p, i) {
-    const node = TALKS[p.talk?.node];
-    const opt = node?.options[i];
-    if (!opt) return;
-    const then = opt.then;
-    if (then.talk) {
-        p.talk.node = then.talk;
-        return sendTalk(p);
+// The bottom frame is authored by whatever offers the conversation; everything above it
+// is an interrupt -- something that has to be dealt with before the usual business. Each
+// frame is asked in turn, from the top, and answers with one step:
+//
+//   { say, options }     say this, and offer these
+//   { pop }              nothing to say; drop me and ask the next one down
+//   { exit }             the conversation ends, and I stay where I am
+//   { open: markKey }    hand the session to another interaction; the conversation ends
+//
+// A frame that has become irrelevant -- a quest finished somewhere else entirely -- pops
+// itself the next time it is asked, and the client never learns it was there.
+const CONVERSATIONS = await (async () => {
+    const dir = path.join(__dirname, 'conversations');
+    const found = new Map();
+    for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+        const entry = path.join(dir, name, 'index.js');
+        if (fs.existsSync(entry))
+            found.set(name, (await import(pathToFileURL(entry))).default);
     }
-    if (then.open) {
-        const mark = marks.get(then.open);
-        // Whatever it was pointing at is not loaded, or not there any more. Saying nothing
+    return found;
+})();
+
+// Each conversationalist is an instance, not a role: one town has one harbourmaster, but
+// the same set piece stamped somewhere else has its own. The set piece instance is the
+// site that laid it down, which is already how one cell's rock is told from a neighbour's.
+const whoId = (mark) =>
+    `/setpieces/${mark.src ?? 'world'}/conversationalists/${mark.who}`;
+
+// Per player: two people may be mid-sentence with the same person and neither should see
+// the other's half of it. The bottom frame is seeded from what the set piece authored, so
+// "the world decides the default, the player owns the interrupts" holds without the two
+// being stored in different places.
+function stackFor(p, who, seed) {
+    if (!p.talks[who]?.length) p.talks[who] = seed ? [seed] : [];
+    return p.talks[who];
+}
+
+// Ask the stack what happens next. Walks down through frames with nothing to say, so a
+// pop is invisible to the client: it sees the first frame that actually speaks.
+//
+// `choice` is the option index, or null when nothing has been answered. `start` tells the
+// two null cases apart: a frame being taken up -- walked up to, or uncovered by a pop --
+// against being asked again where it already was, which is what a reconnect does. A
+// conversation that reset itself on every reconnect would be a way to rewind one.
+function nextStep(p, who, choice, start) {
+    const stack = p.talks[who] ?? [];
+    let input = choice,
+        fresh = start;
+    // Bounded rather than `while (true)`: a frame that pops on every ask, forever, is an
+    // authoring bug, and one that hangs the tick loop is a much worse one.
+    for (let guard = 0; guard < 64; guard++) {
+        const frame = stack[stack.length - 1];
+        if (!frame) return { exit: true }; // nothing left to say, by anybody
+        const hold = CONVERSATIONS.get(frame[0]);
+        // Named a module this build does not have -- renamed, or gone. Drop the frame and
+        // carry on down: an interrupt nobody can run degrades to never being mentioned,
+        // which is survivable, and refusing to load the save is not.
+        if (!hold) {
+            console.warn(`conversation: no module ${frame[0]}; frame dropped`);
+            stack.pop();
+            input = null;
+            fresh = true;
+            continue;
+        }
+        let step;
+        // immer: the holder mutates its own state and returns the step. What comes back
+        // from produce is the next state, replacing the frame's if anything changed.
+        frame[1] = produce(frame[1], (draft) => {
+            step = hold(draft, {
+                who,
+                player: p.id,
+                ship: p.talk?.ship,
+                choice: input,
+                start: fresh,
+            });
+        });
+        if (!step?.pop) return step ?? { exit: true };
+        stack.pop();
+        input = null; // whoever is underneath is starting, not answering
+        fresh = true;
+    }
+    return { exit: true };
+}
+
+// One step, turned into whatever the client should be looking at.
+function playTalk(p, step) {
+    if (step.open) {
+        const mark = marks.get(step.open);
+        // Whatever it pointed at is not loaded, or not there any more. Saying nothing
         // would leave the sheet spinning, so the conversation simply ends.
         if (!mark) return endTalk(p);
-        const ship = p.talk.ship;
+        const ship = p.talk?.ship;
         p.talk = null;
         p.busy = mark.key;
         return p.ws.send(
@@ -2280,7 +2290,28 @@ function talkChoose(p, i) {
             }),
         );
     }
-    endTalk(p);
+    if (!step.say) return endTalk(p);
+    p.ws.send(
+        JSON.stringify({
+            t: 'talk',
+            ship: p.talk?.ship,
+            say: step.say,
+            options: step.options ?? [],
+        }),
+    );
+}
+
+function startTalk(p, shipId, mark) {
+    const who = whoId(mark);
+    stackFor(p, who, mark.talk);
+    p.talk = { who, ship: shipId };
+    playTalk(p, nextStep(p, who, null, true));
+}
+
+function endTalk(p) {
+    p.talk = null;
+    p.busy = null;
+    if (p.ws.readyState === 1) p.ws.send(JSON.stringify({ t: 'talk-end' }));
 }
 
 // ---- the market ----
@@ -4127,7 +4158,8 @@ wss.on('connection', (ws) => {
                 ships: new Map(),
                 told: null,
                 busy: null,
-                talk: null, // where in a conversation tree, if it is in one
+                talk: null, // who it is talking to, if it is talking to anybody
+                talks: {}, // conversationalist id -> stack of [module, state]
                 view: { x: 0, y: 0 },
             };
             players.set(id, p);
@@ -4189,9 +4221,10 @@ wss.on('connection', (ws) => {
                 wreck: WRECK_DEPTH,
             }),
         );
-        // Held in the conversation it was in: a reload lands back on the same node rather
-        // than outside a sheet the server still believes is open.
-        if (p.talk) sendTalk(p);
+        // Held in the conversation it was in: a reload lands back on the same words
+        // rather than outside a sheet the server still believes is open. Asked again
+        // rather than replayed, because the frame's own state is where it was up to.
+        if (p.talk) playTalk(p, nextStep(p, p.talk.who, null, false));
     }
 
     ws.on('message', (raw) => {
@@ -4275,7 +4308,7 @@ wss.on('connection', (ws) => {
         } else if (m.t === 'interact-done') {
             p.busy = null;
         } else if (m.t === 'talk-choose' && Number.isInteger(m.option)) {
-            talkChoose(p, m.option);
+            if (p.talk) playTalk(p, nextStep(p, p.talk.who, m.option, false));
         } else if (m.t === 'trade' && m.buy && m.sell) {
             for (const s of ships) {
                 if (s.owner !== p.id || s.id !== m.ship) continue;

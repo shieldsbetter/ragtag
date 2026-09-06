@@ -17,7 +17,8 @@
     },
     "files": [
         "server.js",
-        "public"
+        "public",
+        "conversations"
     ],
     "engines": {
         "node": ">=20"
@@ -37,6 +38,7 @@
     "dependencies": {
         "@shieldsbetter/sbopts": "^0.1.0",
         "@shieldsbetter/termiflo": "^0.1.0",
+        "immer": "^11.1.18",
         "polygon-clipping": "^0.15.7",
         "qrcode-terminal": "^0.12.0",
         "ws": "^8.18.0"

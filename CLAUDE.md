@@ -129,15 +129,37 @@ lay themselves out again, so discarding chunk files takes a biome's rock away fo
 ground somebody has already explored. `WALL_OLDEST` is the oldest still read, and fields
 added since default to empty.
 
-**A conversation is a tree the server walks and the client cannot read.** A node is a
-statement and a list of things you may say back; the client is handed one node at a time
-— the words and the labels, nothing else — and answers with the index it tapped. What an
-option _does_ never crosses the wire, which is what will let a later node turn on what
-you have done rather than on what you have been told. A session is held in a conversation
-until an option ends it: the sheet has no way out of its own, and the node is resent on
-reconnect, so a reload lands back on the same words. Handing off to another interaction
-_ends_ the conversation rather than suspending it — you walk the tree again if you want
-it back.
+**A conversation is a stack of frames, and a frame is a name and a bag.** `['harbour',
+{at: 'nests'}]` — plain JSON both halves, so a conversation serialises by being what it
+already is. Behaviour is never in the stack: the name is looked up in `conversations/`,
+which is what makes a stack safe to write to disk and load into a build that has moved on.
+A module is one function handed an immer draft of its own bag; where it is in its own tree
+is state like anything else, which is what makes resuming after a reconnect free.
+
+**Frames are asked from the top, and one with nothing to say pops itself.** The bottom
+frame is authored by whatever offers the conversation; everything above it is an interrupt
+— something to be dealt with before the usual business. A step is `{say, options}`,
+`{pop}` (drop me, ask the next one down), `{exit}` (it ends, I stay) or `{open: markKey}`
+(hand off, and it ends). A quest finished somewhere else pops its own frame the next time
+it is asked, so nothing has to reach in and remove it, and the client never learns it was
+there. A module this build does not have is dropped with a warning rather than refusing
+the save: an interrupt nobody can run degrades to never being mentioned.
+
+**`start` tells a frame being taken up from one being asked again.** Both arrive with no
+answer to a question. Walked up to, or uncovered by a pop, a frame should begin at the top
+of what it has to say; asked again after a reconnect it should hand back where it already
+was. Without the distinction, reconnecting is a way to rewind a conversation.
+
+**The client is handed one step at a time and cannot read ahead.** Words and labels,
+nothing else; it answers with the index it tapped. What an option _does_ never crosses the
+wire, which is what lets a later step turn on what you have done rather than on what you
+have been told. A session is held in a conversation until a step ends it — the sheet has
+no way out of its own.
+
+**A conversationalist is an instance, not a role.** One town has one harbourmaster, and
+the same set piece stamped somewhere else has its own, so the id carries the site that
+laid it down — already how one cell's rock is told from a neighbour's. Stacks are per
+player, because two people may be mid-sentence with the same person.
 
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
