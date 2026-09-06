@@ -4,8 +4,8 @@ A multiplayer naval-tactics roguelike. Server-authoritative simulation over a We
 drawn on a canvas as outlined polygons — Asteroids' look, an RTS's pace.
 
 ```
-PORT=8123 npm run dev              # 8080 is usually taken on this machine
-PORT=8123 npm run dev -- --ngrok  # ...and a public ngrok URL
+npm run dev -- --port 8123             # 3000 is the default
+npm run dev -- --port 8123 --ngrok     # ...and a public ngrok URL
 ```
 
 Startup prints the localhost URL, this machine's address on the local network, and a QR

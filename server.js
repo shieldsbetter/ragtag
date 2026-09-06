@@ -9,18 +9,48 @@ import { performance } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
+import { command } from '@shieldsbetter/sbopts';
 import polygonClipping from 'polygon-clipping';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 8080;
+
+// Parsed rather than run: the server is the module body, not a handler, so help and
+// usage errors are dealt with here and everything below reads plain constants.
+const cli = command('ragtag', {
+    summary: 'Multiplayer naval-tactics roguelike.',
+    description:
+        'Serves the game and simulates it. The world is written to ./world in the ' +
+        'directory the command is run from.',
+    flags: {
+        port: {
+            short: 'p',
+            type: 'number',
+            summary: 'Port to listen on. Defaults to 3000, or $PORT.',
+        },
+        // A public tunnel is opt-in. It is metered, and this game pushes ~22KB/s per
+        // client continuously, which eats a free ngrok allowance quickly. By default the
+        // server advertises its address on the local network, which costs nothing.
+        ngrok: { type: 'boolean', summary: 'Also open a public ngrok tunnel.' },
+    },
+});
+let cmdline;
+try {
+    cmdline = cli.parse(process.argv.slice(2));
+} catch (e) {
+    console.error(e.message);
+    process.exit(1);
+}
+if (cmdline.help) {
+    console.log(cli.help());
+    process.exit(0);
+}
+// A flag said out loud beats the environment, which beats the default.
+const PORT =
+    cmdline.flags.port ?? (process.env.PORT ? Number(process.env.PORT) : 3000);
+const NGROK = cmdline.flags.ngrok || process.env.NGROK === '1';
 
 const TICK = 1000 / 30;
 const DEV = !!process.env.DEV;
-// A public tunnel is opt-in. It is metered, and this game pushes ~22KB/s per client
-// continuously, which eats a free ngrok allowance quickly. By default the
-// server advertises its address on the local network, which costs nothing.
-const argv = new Set(process.argv.slice(2));
-const NGROK = argv.has('--ngrok') || process.env.NGROK === '1';
 
 // A running process can outlive the file it was started from -- a watcher dies, a
 // restart is missed -- and a stale server is indistinguishable from a working one
