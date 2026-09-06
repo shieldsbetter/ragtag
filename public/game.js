@@ -13,7 +13,7 @@ const canvas = document.getElementById('c');
 // perfectly -- which no amount of changing what we draw could avoid. ?gpu=1 opts back in
 // for comparison.
 const CPU = !new URLSearchParams(location.search).has('gpu');
-const screen = canvas.getContext('2d', { alpha: false });
+const front = canvas.getContext('2d', { alpha: false });
 const back = document.createElement('canvas');
 const ctx = back.getContext('2d', { alpha: false, willReadFrequently: CPU });
 const hud = document.getElementById('hud');
@@ -130,6 +130,7 @@ function renderStamp(serverTime, arrival) {
 }
 
 let dev = false;
+let badFrames = 0; // heading rings refused as un-drawable; shown in the dev HUD
 const walls = new Map(); // wall key -> polygon, pushed by the server as the camera moves
 // Scenery a set piece drew for itself. The client has no idea what any of it depicts and
 // does not need one: it arrives as lines in world coordinates and is drawn as lines.
@@ -252,14 +253,18 @@ const SESSION_KEY = 'ships.session';
 let session;
 try {
     session = localStorage.getItem(SESSION_KEY);
-} catch {}
+} catch {
+    // private window: a session is made below and lives only as long as the page
+}
 if (!session) {
     session =
         crypto.randomUUID?.() ??
         String(Math.random()).slice(2) + Date.now().toString(36);
     try {
         localStorage.setItem(SESSION_KEY, session);
-    } catch {} // private window: this session only
+    } catch {
+        // private window: this session only
+    }
 }
 
 const ws = new WebSocket(
@@ -409,16 +414,18 @@ const ZOOM_KEY = 'ships.zoom';
 try {
     const z = parseFloat(sessionStorage.getItem(ZOOM_KEY));
     if (z > 0) cam.zoom = clampZoom(z);
-} catch {}
+} catch {
+    // no session storage: start at the default zoom
+}
 addEventListener('pagehide', () => {
     try {
         sessionStorage.setItem(ZOOM_KEY, String(cam.zoom));
-    } catch {}
+    } catch {
+        // no session storage: the zoom simply does not survive the reload
+    }
 });
 
 // ---- the view ----
-const lerp = (a, b, t) => a + (b - a) * t;
-
 // A ship is both halves at once: where it is, worked out from the line it is on, and what
 // it is, which arrived on its own channel when it changed. Everything past here wants one
 // object. A hull we have motion for but no description of is not drawable, so it is skipped
@@ -626,13 +633,13 @@ let longTimer = null,
 // Haptics exist on Chrome/Android and nowhere else -- Firefox disabled vibration in 79
 // and removed it in 129, iOS never had it -- so the visual confirmation has to carry the
 // gesture on its own. A ring flies out on add and collapses in on drop.
-let confirm = null; // { x, y, start, adding }
+let ack = null; // { x, y, start, adding }
 // Screen pixels, not world units: these are feedback about a gesture, so they must clear
 // the thumb making it whatever the zoom happens to be.
-const CONFIRM_MS = 320,
+const ACK_MS = 320,
     HOLD_R = 62,
-    CONFIRM_R0 = 70,
-    CONFIRM_GROW = 95;
+    ACK_R0 = 70,
+    ACK_GROW = 95;
 // Nothing is drawn for the first fraction of a press. A tap is over in about a tenth of
 // a second, and flashing a ring for every one of them turns ordinary tapping into
 // visual noise. Past this the arc sweeps from empty to full, finishing exactly as the
@@ -684,7 +691,7 @@ function clearSelection(x, y) {
     if (!selection.size) return;
     selection.clear();
     designated = null;
-    confirm = { x, y, start: performance.now(), adding: false };
+    ack = { x, y, start: performance.now(), adding: false };
 }
 
 function toggleInSelection(id) {
@@ -697,8 +704,7 @@ function toggleInSelection(id) {
         selection.delete(id);
         if (designated === id) designated = [...selection][0];
     }
-    if (ship)
-        confirm = { x: ship.x, y: ship.y, start: performance.now(), adding };
+    if (ship) ack = { x: ship.x, y: ship.y, start: performance.now(), adding };
 }
 
 // A ship is tappable at its hull size, but never smaller than a thumb: zoomed out, the
@@ -2265,7 +2271,7 @@ function release(e) {
             haptic(PULSE_DROP);
             const m = marks.get(ctl.key);
             if (m)
-                confirm = {
+                ack = {
                     x: m.x,
                     y: m.y,
                     start: performance.now(),
@@ -2326,7 +2332,7 @@ function release(e) {
             if (foe) {
                 orderFocus(foe.id, [...selection]);
                 haptic(PULSE_DROP);
-                confirm = {
+                ack = {
                     x: foe.x,
                     y: foe.y,
                     start: performance.now(),
@@ -2822,8 +2828,6 @@ function rotateIcon(x, y, a, hot) {
     ctx.restore();
 }
 
-let badFrames = 0;
-
 // Corner brackets around the ship taking orders. The heading ring moves to the
 // destination once a move is ordered, so it cannot also say which ship is selected.
 // The selection's outline, and the icon that dismisses it.
@@ -2929,17 +2933,17 @@ function drawHold(s, held) {
 // The answer to "did that register?" on every platform: a ring thrown outward when a
 // ship joins the selection, drawn inward when it leaves.
 function drawConfirm(now) {
-    const t = (now - confirm.start) / CONFIRM_MS;
+    const t = (now - ack.start) / ACK_MS;
     if (t >= 1) {
-        confirm = null;
+        ack = null;
         return;
     }
-    const e = confirm.adding ? t : 1 - t; // outward to add, inward to drop
+    const e = ack.adding ? t : 1 - t; // outward to add, inward to drop
     const p = new Path2D();
     p.arc(
-        confirm.x - cam.x,
-        confirm.y - cam.y,
-        (CONFIRM_R0 + e * CONFIRM_GROW) / cam.zoom,
+        ack.x - cam.x,
+        ack.y - cam.y,
+        (ACK_R0 + e * ACK_GROW) / cam.zoom,
         0,
         Math.PI * 2,
     );
@@ -3056,16 +3060,6 @@ function drawWalls(vis) {
         for (const w of of) ctx.stroke(w.path);
     }
     ctx.restore();
-}
-
-// One crisp pass. Widths are screen pixels divided by zoom, so linework keeps its
-// weight at every magnification instead of turning into hairlines or slabs.
-function stroke(color, width) {
-    ctx.strokeStyle = color;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.lineWidth = width / cam.zoom;
-    ctx.stroke();
 }
 
 // Shapes are built as Path2D objects and handed to stroke()/fill() explicitly, rather
@@ -3378,7 +3372,7 @@ function draw() {
             :   holding;
         drawHold(on, now - holding.start);
     }
-    if (confirm) drawConfirm(now);
+    if (ack) drawConfirm(now);
     if (cmdShip) drawControl(cmdShip);
     pane = resolvePane(buildPane());
     if (dev) window.__pane = pane; // inspectable: module scope is not
@@ -3488,8 +3482,8 @@ function draw() {
         )
         .join('\n');
     // One operation onto the visible layer, once the frame is complete.
-    screen.setTransform(1, 0, 0, 1, 0, 0);
-    screen.drawImage(back, 0, 0);
+    front.setTransform(1, 0, 0, 1, 0, 0);
+    front.drawImage(back, 0, 0);
 
     syncDetails();
     hud.style.color = state.stale ? '#ffb347' : '';
@@ -3498,7 +3492,7 @@ function draw() {
         `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}` +
         `  c${clientVersion}` +
         (dev ?
-            `  mv=${moving.ship.size + moving.rock.size + moving.ore.size + moving.shot.size} walls=${walls.size}`
+            `  mv=${moving.ship.size + moving.rock.size + moving.ore.size + moving.shot.size} walls=${walls.size} bad=${badFrames}`
         :   '') +
         (OFF.size ? `  off:${[...OFF].join(',')}` : '') +
         `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps` +

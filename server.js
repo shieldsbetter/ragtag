@@ -549,7 +549,6 @@ const chunkOf = (v) => Math.floor(v / CHUNK);
 // this touches terrain, so unlike chunk loading it cannot start a cascade.
 const CELL_R = 2400; // roughly how far apart sites sit: a cell is a few chunks
 const CELL_JITTER = 0.38; // how irregular the mesh is, as a fraction of CELL_R
-const CELL_RING = 6; // sites placed around a cell to bound it
 const CELL_FAR = CELL_R * 8; // the box a cell is clipped out of; touching it means unbounded
 // A cell is closed once nothing of it reaches further than this. Merely *bounded* is not
 // enough: three neighbours can close a cell while leaving it sprawling, and its far
@@ -3369,7 +3368,6 @@ function intercept(dx, dy, ux, uy, B) {
 const LOS_TRIES = 6; // give up on a turret rather than sight-check a whole battlefield
 
 function aimTurrets(s, targets, dt) {
-    const hull = s.hull;
     // An embedded gun answers no line-of-sight question at all: it is standing in a wall, so
     // every shot it could ever take is blocked, and the exemption is the whole point of it.
     const polys = s.hull.embedded ? [] : nearbyWalls(s.x, s.y); // once per ship, not per gun
@@ -3630,7 +3628,7 @@ function manageOre() {
 // One beam per working tractor module. They are interchangeable -- nothing tells the
 // second beam from the first -- so this takes the nearest unclaimed grain that many times
 // over, and a hull carrying two fills its hold twice as fast.
-function tractor(s, dt) {
+function tractor(s) {
     const had = s.beams || [];
     const beams = s.turrets.filter(
         (t) => t.type === 'tractor' && t.hp > 0,
@@ -3771,7 +3769,7 @@ function step(dt) {
         o.life -= dt;
         if (o.life <= 0) ore.splice(i, 1);
     }
-    for (const s of ships) tractor(s, dt);
+    for (const s of ships) tractor(s);
 
     // Rocks against guns. The hull is not a target -- same as for shells -- so a rock that
     // misses a turret sails over the ship it is mounted on.
