@@ -10,6 +10,7 @@ import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
 import qrcode from 'qrcode-terminal';
 import { command } from '@shieldsbetter/sbopts';
+import { stack, stringWidth, text } from '@shieldsbetter/termiflo';
 import polygonClipping from 'polygon-clipping';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -4256,18 +4257,40 @@ function reachableAddresses() {
     return found;
 }
 
-// A title, the QR under it, then the link. The QR is what a phone is here for, so it goes
-// where a thumb-held camera finds it: between the name and the text it encodes.
-function announce(title, url, qr = true) {
-    console.log(`\n${title}`);
-    if (!qr) return console.log(`  ${url}`);
-    // Rendered to a string and trimmed: the library signs off with blank lines, which
-    // would put a gap between the code and the link it encodes.
-    qrcode.generate(url, { small: true }, (code) =>
-        console.log(code.replace(/\s+$/, '')),
+// The callback is called synchronously; it is only how the library hands back a string
+// rather than printing one. Trailing blank lines go: the gap between blocks is the
+// layout's business now, not the QR's.
+// The widest QR built so far. A code cannot be wrapped and still be scanned, so the
+// banner is never laid out narrower than one, however narrow the terminal is: a square
+// running off the edge can be read by scrolling, and a folded one cannot be read at all.
+let qrWidth = 0;
+
+function qrBlock(url) {
+    let art;
+    qrcode.generate(
+        url,
+        { small: true },
+        (code) => (art = code.replace(/\s+$/, '')),
     );
-    console.log(`  ${url}`);
+    // Every line of a QR is the same width and newlines are hard breaks, so this centres
+    // the square as a unit rather than each row on its own.
+    qrWidth = Math.max(qrWidth, stringWidth(art.split('\n')[0]));
+    return text(art, { align: 'center', hyphenate: false });
 }
+
+// A title, the QR under it, then the link. The QR is what a phone is here for, so it goes
+// where a thumb-held camera finds it: between the name and the text it encodes. The
+// margins are declared rather than printed, so neighbours collapse to a single blank line
+// however these blocks end up arranged.
+const announce = (title, url, qr = true) =>
+    stack(
+        [
+            text(title, { align: 'center' }),
+            qr && qrBlock(url),
+            text(url, { align: 'center' }),
+        ],
+        { marginTop: 1, marginBottom: 1 },
+    );
 
 // An agent already tunnelling THIS port is worth adopting -- that is the --watch
 // restart case. One pointed at another port belongs to someone else's server, and
@@ -4352,15 +4375,27 @@ for (const sig of ['SIGINT', 'SIGTERM'])
 seedBastions();
 
 server.listen(PORT, async () => {
-    console.log(
-        `\nragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
-    );
     // Nothing but the loopback: say so rather than print nothing at all, which reads as
     // a server that failed to start. No QR -- a phone scanning it points at itself.
     const found = reachableAddresses();
-    if (found.length) for (const { name, url } of found) announce(name, url);
-    else announce('this machine only', `http://localhost:${PORT}`, false);
+    const where =
+        found.length ?
+            found.map(({ name, url }) => announce(name, url))
+        :   [announce('this machine only', `http://localhost:${PORT}`, false)];
     const tunnel = NGROK ? await openTunnel(PORT) : null;
-    if (tunnel) announce('ngrok', tunnel);
-    else if (!NGROK) console.log('\n(--ngrok for a public URL)');
+    // Built whole and printed once, because the tunnel is awaited: half a banner before
+    // the wait and half after is how a QR ends up split across a pause.
+    console.log(
+        stack([
+            text(
+                `ragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
+                { marginTop: 1 },
+            ),
+            ...where,
+            tunnel && announce('ngrok', tunnel),
+            !tunnel && !NGROK && text('(--ngrok for a public URL)'),
+        ]).toString(
+            Math.max(qrWidth, Math.min(process.stdout.columns || 80, 80)),
+        ),
+    );
 });

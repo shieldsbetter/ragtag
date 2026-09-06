@@ -35,6 +35,7 @@
     },
     "dependencies": {
         "@shieldsbetter/sbopts": "^0.1.0",
+        "@shieldsbetter/termiflo": "^0.1.0",
         "polygon-clipping": "^0.15.7",
         "qrcode-terminal": "^0.12.0",
         "ws": "^8.18.0"
