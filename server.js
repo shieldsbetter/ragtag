@@ -4320,6 +4320,7 @@ let ngrokProc = null;
 async function openTunnel(port) {
     const already = await existingTunnel(port);
     if (already) return already;
+    let missing = false;
     ngrokProc = spawn(
         'ngrok',
         ['http', String(port), '--log', 'stdout', '--log-format', 'json'],
@@ -4348,15 +4349,22 @@ async function openTunnel(port) {
                 }
             }
         });
-        ngrokProc.on('error', () => finish(null));
+        // ENOENT is the only failure worth telling apart: there is nothing to
+        // authenticate or configure, the program is simply not on the PATH.
+        ngrokProc.on('error', (e) => {
+            missing = e.code === 'ENOENT';
+            finish(null);
+        });
         ngrokProc.on('exit', () => finish(null));
         setTimeout(() => finish(null), 12000);
     });
-    if (!url)
-        console.log(
-            '  (ngrok did not start -- is it installed and authenticated?)',
-        );
-    return url;
+    if (url) return { url };
+    return {
+        problem:
+            missing ?
+                'ngrok is not installed -- https://ngrok.com/download'
+            :   'ngrok did not start -- is it authenticated? (ngrok config add-authtoken ...)',
+    };
 }
 
 const stopTunnel = () => {
@@ -4374,6 +4382,24 @@ for (const sig of ['SIGINT', 'SIGTERM'])
 // passes clean.
 seedBastions();
 
+// Refusing to start is worth a sentence, not a stack trace: this is the one moment the
+// boot output matters most, and every one of these is something the reader can act on.
+// Both servers need the listener: ws forwards the http server's error to itself, and an
+// error event with nothing listening on the socket server is thrown however this ends.
+const cannotListen = (e) => {
+    const say = {
+        EADDRINUSE: `Port ${PORT} is already in use. Try --port with another one.`,
+        EACCES: `Port ${PORT} needs privileges this process does not have. Try --port above 1023.`,
+        EADDRNOTAVAIL: `Nothing here can listen on ${PORT}.`,
+    }[e.code];
+    console.error(
+        `\n${say ?? `Could not listen on port ${PORT}: ${e.message}`}`,
+    );
+    process.exit(1);
+};
+server.on('error', cannotListen);
+wss.on('error', cannotListen);
+
 server.listen(PORT, async () => {
     // Nothing but the loopback: say so rather than print nothing at all, which reads as
     // a server that failed to start. No QR -- a phone scanning it points at itself.
@@ -4382,7 +4408,7 @@ server.listen(PORT, async () => {
         found.length ?
             found.map(({ name, url }) => announce(name, url))
         :   [announce('this machine only', `http://localhost:${PORT}`, false)];
-    const tunnel = NGROK ? await openTunnel(PORT) : null;
+    const { url: tunnel, problem } = NGROK ? await openTunnel(PORT) : {};
     // Built whole and printed once, because the tunnel is awaited: half a banner before
     // the wait and half after is how a QR ends up split across a pause.
     console.log(
@@ -4393,7 +4419,8 @@ server.listen(PORT, async () => {
             ),
             ...where,
             tunnel && announce('ngrok', tunnel),
-            !tunnel && !NGROK && text('(--ngrok for a public URL)'),
+            problem && text(problem, { marginTop: 1 }),
+            !NGROK && text('(--ngrok for a public URL)'),
         ]).toString(
             Math.max(qrWidth, Math.min(process.stdout.columns || 80, 80)),
         ),
