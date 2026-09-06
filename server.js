@@ -35,7 +35,8 @@ const cli = command('ragtag', {
         datadir: {
             short: 'd',
             type: 'string',
-            summary: 'Where the world is kept. Defaults to ./ragtag.',
+            summary:
+                'Where the world is kept. Defaults to ./ragtag, or $RAGTAG_DATADIR.',
         },
     },
 });
@@ -524,9 +525,12 @@ const MAX_BLOBS = 6; // per chunk, at density 1
 // lives in a directory shared by every world and often not writable. Run it where you
 // want the world, which in a checkout is the checkout. Named for the program rather than
 // for what it holds, because it is made in whatever directory somebody happened to be in.
+// $PORT is a convention worth inheriting -- everything that hosts a server sets it. A
+// bare $DATADIR is nobody's convention, so an ambient one would be a surprise rather than
+// a service; this one says whose it is.
 const WORLD_DIR =
     cmdline.flags.datadir ||
-    process.env.WORLD_DIR ||
+    process.env.RAGTAG_DATADIR ||
     path.join(process.cwd(), 'ragtag');
 
 const MIME = {
