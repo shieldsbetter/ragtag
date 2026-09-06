@@ -20,8 +20,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cli = command('ragtag', {
     summary: 'Mobile-friendly multiplayer naval-tactics roguelike.',
     description:
-        'Serves the game and simulates it. The world is written to ./world in the ' +
-        'directory the command is run from.',
+        'Serves the game and simulates it. The world is written to ./ragtag in the ' +
+        'directory the command is run from, unless --datadir says otherwise.',
     flags: {
         port: {
             short: 'p',
@@ -32,6 +32,11 @@ const cli = command('ragtag', {
         // client continuously, which eats a free ngrok allowance quickly. By default the
         // server advertises its address on the local network, which costs nothing.
         ngrok: { type: 'boolean', summary: 'Also open a public ngrok tunnel.' },
+        datadir: {
+            short: 'd',
+            type: 'string',
+            summary: 'Where the world is kept. Defaults to ./ragtag.',
+        },
     },
 });
 let cmdline;
@@ -517,8 +522,12 @@ const WALL_OLDEST = 5; // ...and the oldest that can still be read
 const MAX_BLOBS = 6; // per chunk, at density 1
 // Beside wherever it was started, not beside the code: installed globally, the code
 // lives in a directory shared by every world and often not writable. Run it where you
-// want the world, which in a checkout is the checkout.
-const WORLD_DIR = process.env.WORLD_DIR || path.join(process.cwd(), 'world');
+// want the world, which in a checkout is the checkout. Named for the program rather than
+// for what it holds, because it is made in whatever directory somebody happened to be in.
+const WORLD_DIR =
+    cmdline.flags.datadir ||
+    process.env.WORLD_DIR ||
+    path.join(process.cwd(), 'ragtag');
 
 const MIME = {
     '.html': 'text/html',

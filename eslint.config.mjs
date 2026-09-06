@@ -6,7 +6,7 @@ import { defineConfig } from 'eslint/config';
 
 export default defineConfig([
     // Throwaway probes and the world's own state are not source.
-    { ignores: ['**/*.cjs', 'world/'] },
+    { ignores: ['**/*.cjs', 'ragtag/'] },
     {
         files: ['**/*.{js,mjs}'],
         plugins: { js },

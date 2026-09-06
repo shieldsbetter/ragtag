@@ -70,7 +70,7 @@ only ever be a bonus on top of something that works everywhere.
 **Not requirements** — do not reason from these, and do not reintroduce them as
 justifications:
 
-- _That `world/` can be deleted and the same world come back._ It cannot, and that is
+- _That the data directory can be deleted and the same world come back._ It cannot, and that is
   fine. The world is state, not a cache of a seed: the mesh is grown as it is explored,
   cells are decided from whatever content exists at that moment, and generation is
   allowed to depend on what was generated before it. Reproducibility from the seed was
@@ -172,12 +172,12 @@ into it, so a chunk loading at the rim of the area of interest does not re-merge
 three screens the other way. Steady state is 14-18ms against a 33ms tick.
 
 **The mesh is world state, not a cache.** Space is partitioned by a Voronoi diagram over
-persisted sites in `world/sites.json`: every point belongs to its nearest site, so the
+persisted sites in `sites.json` under the data directory: every point belongs to its nearest site, so the
 partition is total by construction. A site's position is fixed once placed — a loaded
 neighbour is already shaped by it — but its biome is undecided until the cell loads,
 which is where new content enters: a biome added later is assigned to cells not yet
-loaded, without touching anything already generated. Delete `world/` and the terrain
-comes back; delete `sites.json` and the map does not.
+loaded, without touching anything already generated. Delete the data directory and the terrain
+comes back; delete `sites.json` alone and the map does not.
 
 **A set piece claims a cell by placing its neighbours.** For any convex polygon and any
 site inside it, reflecting the site across each edge gives the neighbour that produces
