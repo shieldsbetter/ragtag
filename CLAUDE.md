@@ -49,10 +49,11 @@ modifier key. Feedback is sized in screen pixels, never world units, because a t
 the same size at every zoom and covers roughly 45px of whatever is under it.
 
 **One game on every screen.** Phone and desktop show the same thing. Platform-specific
-rendering tricks are a bug, not an optimisation, and platform-specific *feedback* may
+rendering tricks are a bug, not an optimisation, and platform-specific _feedback_ may
 only ever be a bonus on top of something that works everywhere.
 
 **Open questions** — undecided, do not assume an answer:
+
 - Pathfinding beyond local avoidance. A ship aims past the edge of whatever single wall
   stands between it and its destination, which clears isolated obstacles. It will not
   solve a maze and is not meant to: it sits in the mouth of a concave pocket until the
@@ -68,7 +69,8 @@ only ever be a bonus on top of something that works everywhere.
 
 **Not requirements** — do not reason from these, and do not reintroduce them as
 justifications:
-- *That `world/` can be deleted and the same world come back.* It cannot, and that is
+
+- _That `world/` can be deleted and the same world come back._ It cannot, and that is
   fine. The world is state, not a cache of a seed: the mesh is grown as it is explored,
   cells are decided from whatever content exists at that moment, and generation is
   allowed to depend on what was generated before it. Reproducibility from the seed was
@@ -98,7 +100,7 @@ discs. A new class of ship is a new object here.
 
 **Matter is units; a wall is a view of them.** A unit is one lump: a polygon and what it
 is made of. Units are the only thing stored. A chunk owns the units whose centre falls
-inside it and is free to have them hang over its seams. A *wall* is not held anywhere —
+inside it and is free to have them hang over its seams. A _wall_ is not held anywhere —
 it is the answer to "what does the loaded matter look like from outside", built by
 unioning touching units of the same material with `polygon-clipping`, so a wall is a list
 of rings (outline first, then holes). Nothing about it is persisted, which is what makes
@@ -106,7 +108,7 @@ laying material down, cutting a vein out of rock and blasting a hole in it all t
 kind of operation: an edit to units.
 
 **A set piece can draw whatever it likes, and the client is never told what it is.** Besides
-matter, a generator may emit *art*: polylines in world coordinates, filed into the chunk
+matter, a generator may emit _art_: polylines in world coordinates, filed into the chunk
 where they start and streamed by key exactly as walls are, so they arrive when you are near
 and leave when you go. The client draws lines and has no idea what any of it depicts — no
 matching artwork has to be shipped for a new set piece to look like something, and nothing
@@ -128,8 +130,8 @@ ground somebody has already explored. `WALL_OLDEST` is the oldest still read, an
 added since default to empty.
 
 **A set piece can offer something to do, and the server decides what that is.** Besides
-matter and art, a generator may emit *interaction markers*: a point, a reach, a kind, and
-an icon the marker carries itself. Tapping one sends the selection there *armed*; arriving
+matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
+an icon the marker carries itself. Tapping one sends the selection there _armed_; arriving
 inside the reach fires the interaction, and the server tells the client what to open. A
 session holds one interaction at a time, so a second ship arriving while the first is still
 inside stays armed and fires when the way clears — which is why one tap can yield two
@@ -179,7 +181,7 @@ comes back; delete `sites.json` and the map does not.
 
 **A set piece claims a cell by placing its neighbours.** For any convex polygon and any
 site inside it, reflecting the site across each edge gives the neighbour that produces
-that edge — the perpendicular bisector of the pair *is* the edge line. Six reflections,
+that edge — the perpendicular bisector of the pair _is_ the edge line. Six reflections,
 six edges, and the Voronoi cell comes out as exactly the authored shape. The claim is
 permanent and cannot grow; the contents inside it are free to change with later versions.
 
@@ -230,7 +232,7 @@ a convex cell always takes a corner with it. Cull that check by the cell's own r
 than its site suggests, and a fixed cull let a site 25,000 units away quietly steal one.
 
 **Only a crewed hull makes world.** Terrain and the mesh are generated within `AOI_R`
-— three max-zoom screens — of a player's ship, and nothing else. A camera may *hold*
+— three max-zoom screens — of a player's ship, and nothing else. A camera may _hold_
 what it is looking at so nothing vanishes in front of you, but it may never call anything
 into being: otherwise a finger on the map drags the world into existence for as far as
 anyone cares to scroll, deciding biomes for ground nobody has been near.
@@ -239,7 +241,7 @@ anyone cares to scroll, deciding biomes for ground nobody has been near.
 whole area of interest rather than a small disc: they appear only in a thin band just
 outside `AOI_R` and are culled past `AOI_KEEP`, so no one watches one wink in or out.
 Density is what is preserved, not the count — the same rock per unit of space over an
-area twenty times larger, about 500 a ship. The band has to sit *inside* the radius the
+area twenty times larger, about 500 a ship. The band has to sit _inside_ the radius the
 stocking counts over, or rocks spawn where they are never counted and the field grows
 without bound. Ore is exempt on purpose: it comes and goes near the ship, because it
 is meant to be noticed. Nests are placed past `AOI_R * NEST_EDGE` for the same reason a
@@ -247,10 +249,10 @@ rock is — found at the rim, a nest was always there and you sailed up to it.
 
 **A "screen" is 1732 world units, and it is the unit to design against.** At full
 zoom-out the visible rectangle's half-diagonal is always `MAX_VIEW` (2200) on every
-device — `minZoom` solves for it, so the zoom *factor* changes with pixel size but the
+device — `minZoom` solves for it, so the zoom _factor_ changes with pixel size but the
 world distance does not. What changes is the aspect, since a fixed diagonal splits
 differently: 16:9 sees 1917 × 1078 from the centre, a phone upright sees 1078 × 1917,
-21:9 sees 2022 × 866. So the disc that is visible on *every* device has a radius of 866,
+21:9 sees 2022 × 866. So the disc that is visible on _every_ device has a radius of 866,
 the short half-side of the widest aspect, and one screen is twice that. Content within
 half a screen of a point is on screen everywhere. 2200 is the corner reach and nothing
 beyond it is ever visible. Width and height individually are not stable — a layout that
@@ -260,10 +262,10 @@ For scale: a cell is roughly 3.5 screens across, and the area of interest is 7.6
 
 **Clients receive only what they can see.** `MAX_VIEW` bounds the camera, the client
 reports where it is looking, and snapshots carry only nearby entities plus your own
-ships. World *simulation* stays anchored to ships; only delivery follows the camera.
+ships. World _simulation_ stays anchored to ships; only delivery follows the camera.
 
 **Nothing is sent on a clock.** There are no snapshots and no tick rate on the wire. A
-thing that moves is *described* — where it was at a moment, and how fast — and the client
+thing that moves is _described_ — where it was at a moment, and how fast — and the client
 carries it on from there in a straight line. It is described again only when that line has
 drifted past tolerance (3 units, 0.05 rad), and never more than `MOTION_HZ` (4) times a
 second. A rock costs one message for its whole life; a ship sitting still costs nothing;
@@ -272,7 +274,7 @@ it is what happens when the error never grows.
 
 **A correction is a nudge, not a snap.** The client keeps the line it was on as well as
 the one it has just been given and cross-fades between them over `MOTION_BLEND` ms with
-`u²(3−2u)`, which is flat at both ends — so position *and* speed stay continuous. The fade
+`u²(3−2u)`, which is flat at both ends — so position _and_ speed stay continuous. The fade
 must start where the render clock stood **when the correction arrived**, not at a fixed
 offset from the correction's own timestamp: starting part-way along puts a step in exactly
 where the fade was meant to remove one. Measured on screen, that mistake showed as a
@@ -298,7 +300,7 @@ was drawn could avoid it; this is the only lever a page has. `?gpu=1` opts back 
 compare. Do not remove this without testing on a phone.
 
 **Terrain generation is re-entrant.** `blockedAt` loads the chunks it inspects, so
-anything that queries walls *because* a chunk loaded will pull in nine more, each of
+anything that queries walls _because_ a chunk loaded will pull in nine more, each of
 which rolls for its own raider, and the frontier walks outward forever. It starved the
 tick loop completely -- the server clock froze while wall time ran on, which looks
 exactly like ships being stuck rather than like a busy process. Work triggered by chunk
@@ -313,7 +315,7 @@ fly far enough from the town and terrain simply stopped arriving. Anything walki
 mesh should iterate `sites`, not collect what `siteFor` returns.
 
 **Raiders are not anchors.** Terrain stays resident and asteroid fields stay stocked
-around *crewed* ships only. A ship left in every chunk you have ever visited would
+around _crewed_ ships only. A ship left in every chunk you have ever visited would
 otherwise hold both open for the life of the process, and the world would grow without
 bound as you explore.
 
@@ -333,7 +335,7 @@ burning — a carrier spends its first several seconds turning, motionless and h
 an earlier version of this rule cancelled every order before the ship had moved.
 
 **What goes together is what changes together, not what is about the same subject.**
-A ship is split across two channels by *rate*, not by topic: where it is and how it is
+A ship is split across two channels by _rate_, not by topic: where it is and how it is
 moving (including whether it is burning, and where its guns point) on the motion channel;
 what it is — hull, loadout, damage, orders, hold — on the standing one, resent whole when
 any of it changes. Thrust sat on the standing side for a while, and every flicker of the
@@ -349,7 +351,7 @@ all saved 93%.
 **Test servers leak, and this box has no RAM to spare.** Every throwaway server holds
 60-140MB, and any run that dies before its cleanup line leaves one behind. Thirty-eight
 of them once accumulated in a single session, about 4.5GB. Capture the pid at launch
-(`node server.js & S=$!`) and kill *that*, rather than looking the port up afterwards --
+(`node server.js & S=$!`) and kill _that_, rather than looking the port up afterwards --
 the lookup is what silently misses.
 
 **`pgrep -f` and `pkill -f` match the shell that runs them.** The pattern is a literal
@@ -378,7 +380,7 @@ theorising did not.
 
 ## Conventions
 
-Comments explain *why*, especially where the code looks arbitrary: a constant that was
+Comments explain _why_, especially where the code looks arbitrary: a constant that was
 measured, a workaround for a device bug, an ordering that matters. What the code does
 is visible; what it is defending against is not.
 

@@ -1,264 +1,728 @@
 <!doctype html>
-<meta charset="utf-8">
+<meta charset="utf-8" />
 <!-- Without this a phone lays the page out at 980px and scales it down, so the canvas
      backing store becomes devicePixelRatio * 980 wide -- around 16 million pixels at 3x,
      which is the size limit mobile browsers enforce before they start dropping tiles. -->
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+/>
 <title>ships</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #05070d; overflow: hidden; }
-  /* touch-action: none — otherwise the browser eats pinch and drag before we see them */
-  canvas { display: block; cursor: crosshair; touch-action: none; }
-  #hud {
-    position: fixed; top: 12px; left: 14px; color: #7fe8c8;
-    font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; text-shadow: 0 0 6px #0f6;
-    pointer-events: none; white-space: pre;
-  }
+    html,
+    body {
+        margin: 0;
+        height: 100%;
+        background: #05070d;
+        overflow: hidden;
+    }
+    /* touch-action: none — otherwise the browser eats pinch and drag before we see them */
+    canvas {
+        display: block;
+        cursor: crosshair;
+        touch-action: none;
+    }
+    #hud {
+        position: fixed;
+        top: 12px;
+        left: 14px;
+        color: #7fe8c8;
+        font:
+            12px/1.5 ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+        text-shadow: 0 0 6px #0f6;
+        pointer-events: none;
+        white-space: pre;
+    }
 
-  /* ---- details drawer ----
+    /* ---- details drawer ----
      Somewhere to put controls too fiddly to draw on the canvas -- target priorities and
      the like. It is a real DOM panel rather than canvas drawing because it holds lists
      and toggles, which the browser already knows how to lay out and make accessible.
      The panel and its one toggle button are placed entirely by CSS: three layouts (wide
      dock, portrait drawer, landscape drawer) with no JS branch to keep in step. */
-  :root { --panel: 340px; --edge: 10px; }
+    :root {
+        --panel: 340px;
+        --edge: 10px;
+    }
 
-  #details, #detailsToggle {
-    font: 12px/1.6 ui-monospace, Menlo, Consolas, monospace;
-    color: #7fe8c8; background: #080c15; border: 1px solid #1d3040;
-  }
-  /* Nothing is selected -> nothing to detail. Having no selection is a legitimate
+    #details,
+    #detailsToggle {
+        font:
+            12px/1.6 ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+        color: #7fe8c8;
+        background: #080c15;
+        border: 1px solid #1d3040;
+    }
+    /* Nothing is selected -> nothing to detail. Having no selection is a legitimate
      state, so the panel leaves no stub behind when it is empty. */
-  #details, #detailsToggle { display: none; }
-  body.has-selection #details, body.has-selection #detailsToggle { display: block; }
+    #details,
+    #detailsToggle {
+        display: none;
+    }
+    body.has-selection #details,
+    body.has-selection #detailsToggle {
+        display: block;
+    }
 
-  /* Base case is the phone held upright: a drawer over the bottom half. */
-  #details {
-    position: fixed; left: 0; right: 0; bottom: 0; height: 50vh;
-    box-sizing: border-box; padding: 12px 14px; overflow-y: auto;
-    border-width: 1px 0 0 0;
-    transform: translateY(100%); transition: transform .18s ease;
-    -webkit-overflow-scrolling: touch;
-  }
-  body.details-open #details { transform: none; }
+    /* Base case is the phone held upright: a drawer over the bottom half. */
+    #details {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 50vh;
+        box-sizing: border-box;
+        padding: 12px 14px;
+        overflow-y: auto;
+        border-width: 1px 0 0 0;
+        transform: translateY(100%);
+        transition: transform 0.18s ease;
+        -webkit-overflow-scrolling: touch;
+    }
+    body.details-open #details {
+        transform: none;
+    }
 
-  #details h2 { font: inherit; letter-spacing: .18em; color: #4e8f7d; margin: 0 0 6px; }
-  #details .ship { border-top: 1px solid #14232f; }
-  /* The whole overview line is the accordion's hinge, so it is a button: a thumb aims at
+    #details h2 {
+        font: inherit;
+        letter-spacing: 0.18em;
+        color: #4e8f7d;
+        margin: 0 0 6px;
+    }
+    #details .ship {
+        border-top: 1px solid #14232f;
+    }
+    /* The whole overview line is the accordion's hinge, so it is a button: a thumb aims at
      a row, not at a chevron. */
-  #details .shiphead {
-    display: block; width: 100%; text-align: left; font: inherit; color: inherit;
-    background: none; border: 0; padding: 9px 2px; cursor: pointer;
-  }
-  #details .shiphead b { color: #cfeee2; font-weight: normal; }
-  #details .shiphead .st { color: #4e8f7d; }
-  #details .shiphead .tw { display: inline-block; color: #4e8f7d; transition: transform .15s; }
-  #details .shiphead.open .tw { transform: rotate(90deg); }
-  #details .shipbody { padding: 0 0 12px; }
-  /* The refit sheet. It is a full overlay rather than a panel: on a phone the hull wants
+    #details .shiphead {
+        display: block;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: 0;
+        padding: 9px 2px;
+        cursor: pointer;
+    }
+    #details .shiphead b {
+        color: #cfeee2;
+        font-weight: normal;
+    }
+    #details .shiphead .st {
+        color: #4e8f7d;
+    }
+    #details .shiphead .tw {
+        display: inline-block;
+        color: #4e8f7d;
+        transition: transform 0.15s;
+    }
+    #details .shiphead.open .tw {
+        transform: rotate(90deg);
+    }
+    #details .shipbody {
+        padding: 0 0 12px;
+    }
+    /* The refit sheet. It is a full overlay rather than a panel: on a phone the hull wants
      the whole width, and the ship is not being flown while it is being rebuilt. */
-  #refit { position: fixed; inset: 0; background: #060a10; z-index: 40;
-           display: flex; align-items: stretch; justify-content: center; }
-  /* An id selector beats the UA's [hidden] rule, so without this the sheet is on screen
+    #refit {
+        position: fixed;
+        inset: 0;
+        background: #060a10;
+        z-index: 40;
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+    }
+    /* An id selector beats the UA's [hidden] rule, so without this the sheet is on screen
      from the moment the page loads and CANCEL cannot put it away. */
-  #refit[hidden] { display: none; }
-  #refit .sheet { display: flex; flex-direction: column; width: 100%; max-width: 760px;
-                  padding: 10px 12px 14px; gap: 8px; }
-  #refit header { display: flex; align-items: center; gap: 10px; }
-  #refit .cost { margin-left: auto; color: #8ba0bb; }
-  #refit .cost b { color: #d8a851; font-weight: normal; font-size: 18px; }
-  #refit .cost i { color: #8ba0bb; font-style: normal; font-size: 18px; }
-  /* More than there is aboard: the number says so, and so does the mark in front of it. */
-  #refit .cost.over b { color: #ff6b8a; }
-  #refit .cost .short { color: #ff6b8a; margin-right: 6px; }
-  #refit button { background: #101a26; color: #cfe6ff; border: 1px solid #24384f;
-                  padding: 8px 14px; font: inherit; letter-spacing: .08em; }
-  #refit button.confirm { border-color: #2f6f57; color: #5ff0b0; }
-  #refit button.confirm:disabled { opacity: .35; color: #8ba0bb; border-color: #24384f; }
-  #refit .cost { position: relative; }
-  #refit .why-cost { border-radius: 50%; width: 22px; height: 22px; padding: 0; margin-left: 8px;
-                     color: #8ba0bb; line-height: 1; }
-  /* Sits under the total rather than in the flow, so opening it does not move the hull. */
-  #refit .itemised { position: absolute; top: 30px; right: 0; z-index: 1; white-space: nowrap;
-                     background: #0d151f; border: 1px solid #24384f; padding: 10px 12px;
-                     color: #cfe6ff; text-align: left; line-height: 1.7; }
-  #refit .itemised b { color: #d8a851; font-weight: normal; }
-  #refit .board { flex: 1 1 auto; min-height: 0; display: flex; }
-  /* overflow visible so a module carried past the hull stays under the finger: an svg
+    #refit[hidden] {
+        display: none;
+    }
+    #refit .sheet {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        max-width: 760px;
+        padding: 10px 12px 14px;
+        gap: 8px;
+    }
+    #refit header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    #refit .cost {
+        margin-left: auto;
+        color: #8ba0bb;
+    }
+    #refit .cost b {
+        color: #d8a851;
+        font-weight: normal;
+        font-size: 18px;
+    }
+    #refit .cost i {
+        color: #8ba0bb;
+        font-style: normal;
+        font-size: 18px;
+    }
+    /* More than there is aboard: the number says so, and so does the mark in front of it. */
+    #refit .cost.over b {
+        color: #ff6b8a;
+    }
+    #refit .cost .short {
+        color: #ff6b8a;
+        margin-right: 6px;
+    }
+    #refit button {
+        background: #101a26;
+        color: #cfe6ff;
+        border: 1px solid #24384f;
+        padding: 8px 14px;
+        font: inherit;
+        letter-spacing: 0.08em;
+    }
+    #refit button.confirm {
+        border-color: #2f6f57;
+        color: #5ff0b0;
+    }
+    #refit button.confirm:disabled {
+        opacity: 0.35;
+        color: #8ba0bb;
+        border-color: #24384f;
+    }
+    #refit .cost {
+        position: relative;
+    }
+    #refit .why-cost {
+        border-radius: 50%;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        margin-left: 8px;
+        color: #8ba0bb;
+        line-height: 1;
+    }
+    /* Sits under the total rather than in the flow, so opening it does not move the hull. */
+    #refit .itemised {
+        position: absolute;
+        top: 30px;
+        right: 0;
+        z-index: 1;
+        white-space: nowrap;
+        background: #0d151f;
+        border: 1px solid #24384f;
+        padding: 10px 12px;
+        color: #cfe6ff;
+        text-align: left;
+        line-height: 1.7;
+    }
+    #refit .itemised b {
+        color: #d8a851;
+        font-weight: normal;
+    }
+    #refit .board {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+    }
+    /* overflow visible so a module carried past the hull stays under the finger: an svg
      clips to its viewBox by default, and the ghost is the one thing drawn outside it. */
-  #refit svg { width: 100%; height: 100%; touch-action: none; overflow: visible; }
-  #refit .why { color: #ff6b8a; min-height: 16px; }
-  #refit .palette { display: flex; gap: 8px; flex-wrap: wrap; min-height: 62px;
-                    border-top: 1px solid #1b2735; padding-top: 10px; }
-  #refit .mod { border: 1px solid #24384f; padding: 8px 12px; color: #cfe6ff;
-                display: flex; gap: 8px; align-items: baseline; touch-action: none; }
-  #refit .mod.on { border-color: #5ff0b0; color: #5ff0b0; }
-  /* Not in the hold yet: it lands there when the pointer comes up. */
-  #refit .mod.ghost { border-style: dashed; opacity: .5; }
-  #refit .mod .pending { color: #5ff0b0; }
-  #refit .mod .n { color: #8ba0bb; }
-  #refit .empty { color: #55677d; align-self: center; }
-  /* The market wears the refit sheet's clothes: same overlay, same header, same buttons. */
-  #market { position: fixed; inset: 0; background: #060a10; z-index: 40;
-            display: flex; align-items: stretch; justify-content: center; }
-  #market[hidden] { display: none; }
-  #market .sheet { display: flex; flex-direction: column; width: 100%; max-width: 900px;
-                   padding: 10px 12px 14px; gap: 10px; }
-  #market header { display: flex; align-items: center; gap: 10px; }
-  #market .cost { margin-left: auto; color: #8ba0bb; }
-  #market .cost b { color: #d8a851; font-weight: normal; font-size: 18px; }
-  #market .cost i { color: #8ba0bb; font-style: normal; font-size: 18px; }
-  #market .cost.over b { color: #ff6b8a; }
-  #market .cost.paid b { color: #5ff0b0; }
-  #market .cost .short { color: #ff6b8a; margin-right: 6px; }
-  #market button { background: #101a26; color: #cfe6ff; border: 1px solid #24384f;
-                   padding: 8px 14px; font: inherit; letter-spacing: .08em; }
-  #market button.confirm { border-color: #2f6f57; color: #5ff0b0; }
-  #market button.confirm:disabled { opacity: .35; color: #8ba0bb; border-color: #24384f; }
-  /* Stacked on a phone, side by side once there is width for it. */
-  #market .cols { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
-  #market section { flex: 1 1 0; min-height: 0; overflow: auto; border: 1px solid #1b2735; padding: 8px 10px; }
-  #market h3 { margin: 0 0 8px; font-size: 11px; font-weight: normal;
-               letter-spacing: .16em; color: #5ff0b0; }
-  #market .sell h3 { color: #d8a851; }
-  /* The row sets the colour the mark inherits: currentColor otherwise falls all the way
+    #refit svg {
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        overflow: visible;
+    }
+    #refit .why {
+        color: #ff6b8a;
+        min-height: 16px;
+    }
+    #refit .palette {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        min-height: 62px;
+        border-top: 1px solid #1b2735;
+        padding-top: 10px;
+    }
+    #refit .mod {
+        border: 1px solid #24384f;
+        padding: 8px 12px;
+        color: #cfe6ff;
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        touch-action: none;
+    }
+    #refit .mod.on {
+        border-color: #5ff0b0;
+        color: #5ff0b0;
+    }
+    /* Not in the hold yet: it lands there when the pointer comes up. */
+    #refit .mod.ghost {
+        border-style: dashed;
+        opacity: 0.5;
+    }
+    #refit .mod .pending {
+        color: #5ff0b0;
+    }
+    #refit .mod .n {
+        color: #8ba0bb;
+    }
+    #refit .empty {
+        color: #55677d;
+        align-self: center;
+    }
+    /* The market wears the refit sheet's clothes: same overlay, same header, same buttons. */
+    #market {
+        position: fixed;
+        inset: 0;
+        background: #060a10;
+        z-index: 40;
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+    }
+    #market[hidden] {
+        display: none;
+    }
+    #market .sheet {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        max-width: 900px;
+        padding: 10px 12px 14px;
+        gap: 10px;
+    }
+    #market header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    #market .cost {
+        margin-left: auto;
+        color: #8ba0bb;
+    }
+    #market .cost b {
+        color: #d8a851;
+        font-weight: normal;
+        font-size: 18px;
+    }
+    #market .cost i {
+        color: #8ba0bb;
+        font-style: normal;
+        font-size: 18px;
+    }
+    #market .cost.over b {
+        color: #ff6b8a;
+    }
+    #market .cost.paid b {
+        color: #5ff0b0;
+    }
+    #market .cost .short {
+        color: #ff6b8a;
+        margin-right: 6px;
+    }
+    #market button {
+        background: #101a26;
+        color: #cfe6ff;
+        border: 1px solid #24384f;
+        padding: 8px 14px;
+        font: inherit;
+        letter-spacing: 0.08em;
+    }
+    #market button.confirm {
+        border-color: #2f6f57;
+        color: #5ff0b0;
+    }
+    #market button.confirm:disabled {
+        opacity: 0.35;
+        color: #8ba0bb;
+        border-color: #24384f;
+    }
+    /* Stacked on a phone, side by side once there is width for it. */
+    #market .cols {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+    #market section {
+        flex: 1 1 0;
+        min-height: 0;
+        overflow: auto;
+        border: 1px solid #1b2735;
+        padding: 8px 10px;
+    }
+    #market h3 {
+        margin: 0 0 8px;
+        font-size: 11px;
+        font-weight: normal;
+        letter-spacing: 0.16em;
+        color: #5ff0b0;
+    }
+    #market .sell h3 {
+        color: #d8a851;
+    }
+    /* The row sets the colour the mark inherits: currentColor otherwise falls all the way
      through to the page default, and the icon comes out invisible on the dark sheet. */
-  #market .row { display: flex; align-items: center; gap: 10px; padding: 6px 0; color: #cfe6ff; }
-  #market .row .nm { flex: 1 1 auto; color: #cfe6ff; }
-  #market .row .pr { color: #8ba0bb; }
-  #market .row .n { min-width: 2ch; text-align: center; color: #cfe6ff; }
-  #market .row button { padding: 4px 12px; min-width: 44px; }
-  #market .row button:disabled { opacity: .3; }
-  #market .none { color: #55677d; padding: 6px 0; }
-  @media (min-width: 700px) { #market .cols { flex-direction: row; } }
-  #details .sub { color: #4e8f7d; letter-spacing: .14em; margin: 2px 0 8px; }
-  #details .hold { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 12px; }
-  #details .hold b { color: #d8a851; font-weight: normal; font-size: 20px; }
-  /* Modules are not ore and do not get ore's colour. */
-  #details .hold.mod { margin: 0 0 6px; }
-  /* The mark takes the colour of the text it labels; what it means is its shape. */
-  #details .mi { flex: none; align-self: center; color: inherit; }
-  #details .gun .gl .mi { margin-right: 1px; }
-  #details .hold.mod b { color: #9fd4ff; font-size: 16px; }
-  #details .hold.empty { color: #55677d; margin: 0 0 6px; }
-  /* A thumb needs a target, so the strip is full width and the buttons split it. */
-  #details .tabs { display: flex; gap: 3px; margin: 4px 0 12px; }
-  #details .tabs button {
-    flex: 1; font: inherit; letter-spacing: .1em; padding: 9px 0; cursor: pointer;
-    color: #4e8f7d; background: none; border: 1px solid #14232f; border-radius: 3px;
-    touch-action: manipulation;
-  }
-  #details .tabs button.on { color: #cfeee2; background: #0c1420; border-color: #2a4658; }
+    #market .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 0;
+        color: #cfe6ff;
+    }
+    #market .row .nm {
+        flex: 1 1 auto;
+        color: #cfe6ff;
+    }
+    #market .row .pr {
+        color: #8ba0bb;
+    }
+    #market .row .n {
+        min-width: 2ch;
+        text-align: center;
+        color: #cfe6ff;
+    }
+    #market .row button {
+        padding: 4px 12px;
+        min-width: 44px;
+    }
+    #market .row button:disabled {
+        opacity: 0.3;
+    }
+    #market .none {
+        color: #55677d;
+        padding: 6px 0;
+    }
+    @media (min-width: 700px) {
+        #market .cols {
+            flex-direction: row;
+        }
+    }
+    #details .sub {
+        color: #4e8f7d;
+        letter-spacing: 0.14em;
+        margin: 2px 0 8px;
+    }
+    #details .hold {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        margin: 4px 0 12px;
+    }
+    #details .hold b {
+        color: #d8a851;
+        font-weight: normal;
+        font-size: 20px;
+    }
+    /* Modules are not ore and do not get ore's colour. */
+    #details .hold.mod {
+        margin: 0 0 6px;
+    }
+    /* The mark takes the colour of the text it labels; what it means is its shape. */
+    #details .mi {
+        flex: none;
+        align-self: center;
+        color: inherit;
+    }
+    #details .gun .gl .mi {
+        margin-right: 1px;
+    }
+    #details .hold.mod b {
+        color: #9fd4ff;
+        font-size: 16px;
+    }
+    #details .hold.empty {
+        color: #55677d;
+        margin: 0 0 6px;
+    }
+    /* A thumb needs a target, so the strip is full width and the buttons split it. */
+    #details .tabs {
+        display: flex;
+        gap: 3px;
+        margin: 4px 0 12px;
+    }
+    #details .tabs button {
+        flex: 1;
+        font: inherit;
+        letter-spacing: 0.1em;
+        padding: 9px 0;
+        cursor: pointer;
+        color: #4e8f7d;
+        background: none;
+        border: 1px solid #14232f;
+        border-radius: 3px;
+        touch-action: manipulation;
+    }
+    #details .tabs button.on {
+        color: #cfeee2;
+        background: #0c1420;
+        border-color: #2a4658;
+    }
 
-  /* The guns, laid out the way they sit on the hull: port left, starboard right. */
-  #details .guns { display: grid; gap: 8px 10px; margin: 0 0 16px; }
-  #details .gun { cursor: pointer; }
-  #details .gun .gl { color: #4e8f7d; display: flex; align-items: center; gap: 4px; }
-  /* Named by hand: a pulsing outline around the whole cell, so it reads as an order
+    /* The guns, laid out the way they sit on the hull: port left, starboard right. */
+    #details .guns {
+        display: grid;
+        gap: 8px 10px;
+        margin: 0 0 16px;
+    }
+    #details .gun {
+        cursor: pointer;
+    }
+    #details .gun .gl {
+        color: #4e8f7d;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+    }
+    /* Named by hand: a pulsing outline around the whole cell, so it reads as an order
      standing rather than a state. Around the cell rather than the bar because a full
      bar is solid green and an outline on it disappears into the fill. */
-  #details .gun.named .gl { color: #cfeee2; }
-  #details .gun.named {
-    outline: 1px solid #5ff0b0; outline-offset: 2px; border-radius: 2px;
-    animation: named 1.1s ease-in-out infinite;
-  }
-  @keyframes named {
-    0%, 100% { outline-color: #5ff0b0; }
-    50%      { outline-color: #1d3f35; }
-  }
-  #details .gun .bar {
-    position: relative; height: 12px; margin-top: 3px; overflow: hidden;
-    background: #101c26; border: 1px solid #14232f;
-  }
-  #details .gun .bar i { display: block; height: 100%; }
-  #details .gun .bar em {
-    position: absolute; inset: 0; font: 8px/12px ui-monospace, Menlo, Consolas, monospace;
-    font-style: normal; letter-spacing: .2em; text-align: center; color: #ffe0d2; display: none;
-    /* The rebuild fill grows underneath this, so by the time a wreck is nearly back the
+    #details .gun.named .gl {
+        color: #cfeee2;
+    }
+    #details .gun.named {
+        outline: 1px solid #5ff0b0;
+        outline-offset: 2px;
+        border-radius: 2px;
+        animation: named 1.1s ease-in-out infinite;
+    }
+    @keyframes named {
+        0%,
+        100% {
+            outline-color: #5ff0b0;
+        }
+        50% {
+            outline-color: #1d3f35;
+        }
+    }
+    #details .gun .bar {
+        position: relative;
+        height: 12px;
+        margin-top: 3px;
+        overflow: hidden;
+        background: #101c26;
+        border: 1px solid #14232f;
+    }
+    #details .gun .bar i {
+        display: block;
+        height: 100%;
+    }
+    #details .gun .bar em {
+        position: absolute;
+        inset: 0;
+        font:
+            8px/12px ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+        font-style: normal;
+        letter-spacing: 0.2em;
+        text-align: center;
+        color: #ffe0d2;
+        display: none;
+        /* The rebuild fill grows underneath this, so by the time a wreck is nearly back the
        word is pale text on bright orange. A dark shadow costs nothing over the empty bar
        and is what makes it readable over the full one. */
-    text-shadow: 0 0 3px rgba(0, 0, 0, .95), 0 1px 2px rgba(0, 0, 0, .9);
-  }
-  #details .gun.wrecked .bar { background: rgba(120, 24, 38, .35); border-color: #8a3040; }
-  #details .gun.wrecked .bar em { display: block; }
-  #details .wrench { width: 11px; height: 11px; fill: #5ff0b0; flex: none; display: none; }
-  #details .gun.fixing .wrench { display: block; }
-  #details .gun.fixing .gl { color: #cfeee2; }
+        text-shadow:
+            0 0 3px rgba(0, 0, 0, 0.95),
+            0 1px 2px rgba(0, 0, 0, 0.9);
+    }
+    #details .gun.wrecked .bar {
+        background: rgba(120, 24, 38, 0.35);
+        border-color: #8a3040;
+    }
+    #details .gun.wrecked .bar em {
+        display: block;
+    }
+    #details .wrench {
+        width: 11px;
+        height: 11px;
+        fill: #5ff0b0;
+        flex: none;
+        display: none;
+    }
+    #details .gun.fixing .wrench {
+        display: block;
+    }
+    #details .gun.fixing .gl {
+        color: #cfeee2;
+    }
 
-  #details .env { margin-bottom: 14px; }
-  #details .envhead { color: #cfeee2; display: flex; justify-content: space-between; }
-  #details .envhead b { color: #3d6b5e; font-weight: normal; }
-  #details .env svg { width: 100%; height: auto; display: block; touch-action: none; }
-  #details .env .frame { fill: #060a11; stroke: #14232f; }
-  /* Left of the line the gun is gone and you are paying to bring it back. */
-  #details .env .dead { fill: rgba(120, 24, 38, .30); }
-  #details .env .deadline { stroke: #8a3040; stroke-width: 1; stroke-dasharray: 3 3; }
-  #details .env .curve { fill: none; stroke: #7fe8c8; stroke-width: 1.6; }
-  #details .env .stop { fill: #05070d; stroke: #7fe8c8; stroke-width: 1.6; }
-  #details .env .stop.off { stroke: #a45; fill: #2a1218; }
-  /* about to be removed: hollow, so the threshold is visible before you let go */
-  #details .env .stop.doomed { stroke: #ff5a63; fill: none; stroke-dasharray: 2 2; }
-  #details .envaxis { display: flex; justify-content: space-between; color: #3d6b5e; }
+    #details .env {
+        margin-bottom: 14px;
+    }
+    #details .envhead {
+        color: #cfeee2;
+        display: flex;
+        justify-content: space-between;
+    }
+    #details .envhead b {
+        color: #3d6b5e;
+        font-weight: normal;
+    }
+    #details .env svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        touch-action: none;
+    }
+    #details .env .frame {
+        fill: #060a11;
+        stroke: #14232f;
+    }
+    /* Left of the line the gun is gone and you are paying to bring it back. */
+    #details .env .dead {
+        fill: rgba(120, 24, 38, 0.3);
+    }
+    #details .env .deadline {
+        stroke: #8a3040;
+        stroke-width: 1;
+        stroke-dasharray: 3 3;
+    }
+    #details .env .curve {
+        fill: none;
+        stroke: #7fe8c8;
+        stroke-width: 1.6;
+    }
+    #details .env .stop {
+        fill: #05070d;
+        stroke: #7fe8c8;
+        stroke-width: 1.6;
+    }
+    #details .env .stop.off {
+        stroke: #a45;
+        fill: #2a1218;
+    }
+    /* about to be removed: hollow, so the threshold is visible before you let go */
+    #details .env .stop.doomed {
+        stroke: #ff5a63;
+        fill: none;
+        stroke-dasharray: 2 2;
+    }
+    #details .envaxis {
+        display: flex;
+        justify-content: space-between;
+        color: #3d6b5e;
+    }
 
-  /* One button, three homes: it sits at the screen edge when shut and rides just clear
+    /* One button, three homes: it sits at the screen edge when shut and rides just clear
      of the panel when open, so it never ends up underneath what it opened. */
-  #detailsToggle {
-    position: fixed; right: var(--edge); bottom: var(--edge);
-    width: 46px; height: 46px; border-radius: 50%; padding: 0;
-    font-size: 17px; cursor: pointer; touch-action: manipulation;
-    transition: right .18s ease, bottom .18s ease;
-  }
-  body.details-open #detailsToggle { bottom: calc(50vh + var(--edge)); }
+    #detailsToggle {
+        position: fixed;
+        right: var(--edge);
+        bottom: var(--edge);
+        width: 46px;
+        height: 46px;
+        border-radius: 50%;
+        padding: 0;
+        font-size: 17px;
+        cursor: pointer;
+        touch-action: manipulation;
+        transition:
+            right 0.18s ease,
+            bottom 0.18s ease;
+    }
+    body.details-open #detailsToggle {
+        bottom: calc(50vh + var(--edge));
+    }
 
-  /* Turned sideways there is no vertical room to give away, so it takes the right half
+    /* Turned sideways there is no vertical room to give away, so it takes the right half
      instead. Same panel, same open state -- only which edge it slides from changes. */
-  @media (orientation: landscape) {
-    #details {
-      left: auto; top: 0; width: 50vw; height: auto;
-      border-width: 0 0 0 1px; transform: translateX(100%);
+    @media (orientation: landscape) {
+        #details {
+            left: auto;
+            top: 0;
+            width: 50vw;
+            height: auto;
+            border-width: 0 0 0 1px;
+            transform: translateX(100%);
+        }
+        body.details-open #detailsToggle {
+            bottom: var(--edge);
+            right: calc(50vw + var(--edge));
+        }
     }
-    body.details-open #detailsToggle { bottom: var(--edge); right: calc(50vw + var(--edge)); }
-  }
 
-  /* Wide enough to give the panel a permanent home beside the game rather than over it. */
-  @media (min-width: 900px) {
-    #details {
-      left: auto; top: 0; height: auto; width: var(--panel);
-      border-width: 0 0 0 1px; transform: translateX(100%);
+    /* Wide enough to give the panel a permanent home beside the game rather than over it. */
+    @media (min-width: 900px) {
+        #details {
+            left: auto;
+            top: 0;
+            height: auto;
+            width: var(--panel);
+            border-width: 0 0 0 1px;
+            transform: translateX(100%);
+        }
+        body.details-open #details {
+            transform: none;
+        }
+        #detailsToggle {
+            top: var(--edge);
+            bottom: auto;
+        }
+        body.details-open #detailsToggle {
+            top: var(--edge);
+            bottom: auto;
+            right: calc(var(--panel) + var(--edge));
+        }
     }
-    body.details-open #details { transform: none; }
-    #detailsToggle { top: var(--edge); bottom: auto; }
-    body.details-open #detailsToggle { top: var(--edge); bottom: auto; right: calc(var(--panel) + var(--edge)); }
-  }
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
 <div id="market" hidden>
-  <div class="sheet">
-    <header>
-      <span class="cost"><span class="short" hidden>✗</span><b>0</b> / <i>0</i> ore</span>
-      <button type="button" class="cancel">CLOSE</button>
-      <button type="button" class="confirm">TRADE</button>
-    </header>
-    <div class="cols">
-      <section class="buy"><h3>FOR SALE</h3><div class="rows"></div></section>
-      <section class="sell"><h3>YOUR HOLD</h3><div class="rows"></div></section>
+    <div class="sheet">
+        <header>
+            <span class="cost"
+                ><span class="short" hidden>✗</span><b>0</b> /
+                <i>0</i> ore</span
+            >
+            <button type="button" class="cancel">CLOSE</button>
+            <button type="button" class="confirm">TRADE</button>
+        </header>
+        <div class="cols">
+            <section class="buy">
+                <h3>FOR SALE</h3>
+                <div class="rows"></div>
+            </section>
+            <section class="sell">
+                <h3>YOUR HOLD</h3>
+                <div class="rows"></div>
+            </section>
+        </div>
+        <div class="why"></div>
     </div>
-    <div class="why"></div>
-  </div>
 </div>
 <div id="refit" hidden>
-  <div class="sheet">
-    <header>
-      <span class="cost"><span class="short" hidden>✗</span><b>0</b> / <i>0</i> ore<button type="button" class="why-cost" hidden>?</button></span>
-      <button type="button" class="cancel">CANCEL</button>
-      <button type="button" class="confirm">CONFIRM</button>
-    </header>
-    <div class="board"></div>
-    <div class="why"></div>
-    <div class="palette"></div>
-  </div>
+    <div class="sheet">
+        <header>
+            <span class="cost"
+                ><span class="short" hidden>✗</span><b>0</b> /
+                <i>0</i> ore<button type="button" class="why-cost" hidden>
+                    ?
+                </button></span
+            >
+            <button type="button" class="cancel">CANCEL</button>
+            <button type="button" class="confirm">CONFIRM</button>
+        </header>
+        <div class="board"></div>
+        <div class="why"></div>
+        <div class="palette"></div>
+    </div>
 </div>
 <button id="detailsToggle" type="button" aria-label="Details"></button>
-<aside id="details"><h2>SELECTION</h2><div id="detailsBody"></div></aside>
+<aside id="details">
+    <h2>SELECTION</h2>
+    <div id="detailsBody"></div>
+</aside>
 <script src="/game.js" type="module"></script>
