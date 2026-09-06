@@ -1201,8 +1201,6 @@ function rebuildWalls() {
   }
 }
 
-// What a socket has been told about each kind of drifting thing, and at which stamp.
-const newDrift = () => Object.fromEntries(DRIFTERS.map(([k]) => [k, new Map()]));
 
 const pendingNests = [];
 
@@ -1226,56 +1224,7 @@ function armedArrivals() {
   }
 }
 
-// ---- drifting things ----
-//
-// A rock is set moving once and never touched again: nothing accelerates it, nothing
-// steers it, and the two things that could -- a shell and blocking stone -- destroy it
-// instead. So its whole future is one line, and saying it thirty times a second says the
-// same thing thirty times.
-//
-// It is sent once, as where it was and how fast, and the client works out the rest. It is
-// heard from again only when it stops existing. Measured before doing this: rocks were 68%
-// of the wire, and trimming the fields that never change saved 3% of it, because deflate
-// had already eaten the repetition -- the coordinates were the whole cost, and the only way
-// to stop paying for coordinates is to stop sending them.
-// Three lists, one rule. A thing is described once and heard from again only if the line
-// it is travelling on changes -- which for a rock or a shell is never, and for a grain is
-// only while a beam has hold of it. `stamp` counts the times its line changed, so a client
-// knows whether what it was told is still true.
-const DRIFTERS = [
-  ['rock', () => rocks, r => [r.id, Math.round(r.x), Math.round(r.y), Math.round(r.vx),
-                              Math.round(r.vy), +r.a.toFixed(2), +r.spin.toFixed(2),
-                              r.size, r.seed, r.rich | 0]],
-  ['ore', () => ore, o => [o.id, Math.round(o.x), Math.round(o.y), Math.round(o.vx),
-                           Math.round(o.vy), +o.a.toFixed(2), +o.spin.toFixed(2), o.mod || 0]],
-  ['shot', () => bullets, b => [b.id, Math.round(b.x), Math.round(b.y),
-                                Math.round(b.vx), Math.round(b.vy)]],
-];
 
-function syncDrift(p) {
-  const v = p.view, R2 = STREAM_R * STREAM_R;
-  const near = o => { const dx = o.x - v.x, dy = o.y - v.y; return dx * dx + dy * dy < R2; };
-  const now = +performance.now().toFixed(1);
-  const add = {}, del = {};
-  for (const [kind, list, pack] of DRIFTERS) {
-    const known = p.drift[kind];
-    const adds = [], dels = [];
-    const seen = new Set();
-    for (const e of list()) {
-      if (!near(e)) continue;
-      seen.add(e.id);
-      const stamp = e.stamp | 0;
-      if (known.get(e.id) === stamp) continue;      // still on the line we described
-      known.set(e.id, stamp);
-      adds.push([...pack(e), now]);
-    }
-    for (const id of known.keys()) if (!seen.has(id)) { known.delete(id); dels.push(id); }
-    if (adds.length) add[kind] = adds;
-    if (dels.length) del[kind] = dels;
-  }
-  if (Object.keys(add).length || Object.keys(del).length)
-    p.ws.send(JSON.stringify({ t: 'drift', add, del }));
-}
 
 // Everything about a ship that does not change every tick: what it is, what is bolted to
 // it, how hurt it is, what its crew have been told. Sent when it changes and not otherwise.
@@ -1287,6 +1236,12 @@ function syncDrift(p) {
 function shipInfo(s, own) {
   return {
     owner: s.owner, h: hullKey(s.hull),
+    // Where it is pointed, and where it was told to go. Both change when an order is given
+    // rather than every tick, so they belong with the rest of what a ship *is*.
+    hd: +s.heading.toFixed(2),
+    ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
+    // The beam is a thing in the world, so everyone near enough sees it.
+    ...(s.beams.length ? { bm: s.beams } : {}),
     // Whose side it is on, which is not the same question as whose it is. Without this the
     // client can only ask "is it mine", so another player's ships -- and the settlement's
     // own guns -- were drawn in the colour reserved for the enemy.
@@ -1308,7 +1263,7 @@ function shipInfo(s, own) {
       ? { pr: s.prio, ...(s.focus !== null ? { fo: s.focus } : {}),
           ...(s.repairing !== null ? { rp: s.repairing } : {}),
           ...(s.repairFocus.length ? { rf: s.repairFocus } : {}),
-          hold: s.hold }
+          hold: s.hold, or: s.ore }
       : {}),
   };
 }
@@ -1438,6 +1393,113 @@ function refit(s, want) {
   s.repairing = null; s.repairFocus = [];
   return null;
 }
+
+// What still goes out on a clock: nothing that moves. The world's shape, whose ships
+// these are, who is playing, and the fact that something just died -- said once each,
+// when it happens.
+function worldFor(p, now, motion) {
+  const roster = JSON.stringify({ v: VERSION, stale,
+    players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })) });
+  const saw = kills.filter(k => near(p, k.x, k.y));
+  const has = Object.keys(motion.a).length || Object.keys(motion.d).length;
+  if (!has && !saw.length && p.told === roster) return null;
+  const first = p.told !== roster;
+  p.told = roster;
+  return JSON.stringify({
+    t: 'm', st: now, ...(first ? JSON.parse(roster) : {}),
+    ...(Object.keys(motion.a).length ? { a: motion.a } : {}),
+    ...(Object.keys(motion.d).length ? { d: motion.d } : {}),
+    ...(saw.length ? { kills: saw } : {}),
+  });
+}
+
+// ---- motion on the wire ----
+//
+// Nothing is sent on a clock. A thing that moves is described once -- where it was at a
+// moment, and how fast -- and the client carries it on from there in a straight line. It is
+// described again only when that straight line has drifted far enough from the truth to be
+// worth a correction, and never more than MOTION_HZ times a second.
+//
+// So a rock, which really does travel in a straight line, is described once and never
+// mentioned again. A ship under power drifts off its line as it accelerates and turns, and
+// gets a correction four times a second. A ship sitting still gets nothing at all. The
+// linear case is not a special case: it is what happens when the error never grows.
+//
+// The curve lives on the client. It is given a position and a velocity, it has a position
+// and a velocity of its own, and it eases from one to the other rather than jumping -- so a
+// correction is a nudge rather than a snap, and being slightly wrong costs smoothness
+// instead of teleporting anything.
+const near = (p, x, y) => {
+  const dx = x - p.view.x, dy = y - p.view.y;
+  return dx * dx + dy * dy < STREAM_R * STREAM_R;
+};
+
+const MOTION_HZ = 4;
+const MOTION_GAP = 1000 / MOTION_HZ;
+const MOVE_TOL = 3;                   // world units of drift worth correcting
+const TURN_TOL = 0.05;                // ...and radians, about a pixel at a hull's tip
+
+// What a client would think, given what it was last told.
+function predict(sent, now) {
+  const dt = (now - sent.t) / 1000;
+  return { x: sent.x + sent.vx * dt, y: sent.y + sent.vy * dt, a: sent.a + sent.va * dt };
+}
+
+// Everything that moves, and how to read its motion. Turrets ride with their ship: they are
+// cosmetic, and a gun's bearing is not worth a message of its own.
+const MOVERS = [
+  { kind: 'ship', all: () => ships, id: s => s.id,
+    sees: (p, s) => s.owner === p.id || near(p, s.x, s.y),
+    read: s => ({ x: s.x, y: s.y, a: s.a, vx: s.vx, vy: s.vy, va: s.va || 0,
+                  tu: s.turrets.map(t => [+t.a.toFixed(2), +(t.va || 0).toFixed(2)]),
+                  // Burning or not. It rides with the motion because it is about the
+                  // motion; on the standing record every flicker of the throttle would
+                  // resend the loadout with it.
+                  of: [s.th ? 1 : 0] }) },
+  { kind: 'rock', all: () => rocks, id: r => r.id, sees: (p, r) => near(p, r.x, r.y),
+    read: r => ({ x: r.x, y: r.y, a: r.a, vx: r.vx, vy: r.vy, va: r.spin,
+                  of: [r.size, r.seed, r.rich | 0] }) },
+  { kind: 'ore', all: () => ore, id: o => o.id, sees: (p, o) => near(p, o.x, o.y),
+    read: o => ({ x: o.x, y: o.y, a: o.a, vx: o.vx, vy: o.vy, va: o.spin, of: [o.mod || 0] }) },
+  { kind: 'shot', all: () => bullets, id: b => b.id, sees: (p, b) => near(p, b.x, b.y),
+    read: b => ({ x: b.x, y: b.y, a: 0, vx: b.vx, vy: b.vy, va: 0, of: [] }) },
+];
+
+function syncMotion(p, now) {
+  const a = {}, d = {};
+  for (const m of MOVERS) {
+    const known = p.moving[m.kind];
+    const rows = [], gone = [];
+    const seen = new Set();
+    for (const e of m.all()) {
+      if (!m.sees(p, e)) continue;
+      const id = m.id(e);
+      seen.add(id);
+      const sent = known.get(id);
+      const truth = m.read(e);
+      if (sent) {
+        if (now - sent.t < MOTION_GAP) continue;             // said recently enough
+        const gu = predict(sent, now);
+        const off = Math.hypot(truth.x - gu.x, truth.y - gu.y);
+        const turn = Math.abs(angleDiff(truth.a, gu.a));
+        const guns = (truth.tu || []).some((t, i) =>
+          Math.abs(angleDiff(t[0], (sent.tu?.[i]?.[0] ?? 0) + (sent.tu?.[i]?.[1] ?? 0) * (now - sent.t) / 1000)) > TURN_TOL * 3);
+        const same = JSON.stringify(truth.of) === JSON.stringify(sent.of);
+        if (off < MOVE_TOL && turn < TURN_TOL && !guns && same) continue;  // its guess is good enough
+      }
+      known.set(id, { ...truth, t: now });
+      rows.push([id, +truth.x.toFixed(1), +truth.y.toFixed(1), +truth.a.toFixed(2),
+                 Math.round(truth.vx), Math.round(truth.vy), +truth.va.toFixed(2),
+                 ...(truth.tu ? [truth.tu] : []), ...(truth.of ? [truth.of] : [])]);
+    }
+    for (const id of known.keys()) if (!seen.has(id)) { known.delete(id); gone.push(id); }
+    if (rows.length) a[m.kind] = rows;
+    if (gone.length) d[m.kind] = gone;
+  }
+  return { a, d };
+}
+
+const newMoving = () => Object.fromEntries(MOVERS.map(m => [m.kind, new Map()]));
 
 // ---- the market ----
 //
@@ -2102,6 +2164,9 @@ function hit(o1, o2) {
 // The only integrator. The live sim and the autopilot's rollout both run this, so a
 // prediction cannot drift from what actually happens.
 function advance(st, cmd, dt, hull) {
+  // How fast it is turning, kept because it is half of what a client needs to carry on
+  // turning by itself between one word from the server and the next.
+  st.va = dt > 0 ? cmd.turn / dt : 0;
   st.a += cmd.turn;
   if (cmd.thrust) { st.vx += Math.cos(st.a) * hull.accel * dt; st.vy += Math.sin(st.a) * hull.accel * dt; }
   const sp = Math.hypot(st.vx, st.vy);
@@ -2466,8 +2531,10 @@ function aimTurrets(s, targets, dt) {
     t.cool -= dt;
     const step = T.turn * dt;
     const err = angleDiff(want === null ? rest : want, t.a);
+    const wasA = t.a;
     t.a += clamp(err, step);
     t.a = rest + clamp(angleDiff(t.a, rest), T.arcHalf);   // hull turning under the gun cannot push it out of arc
+    t.va = dt > 0 ? angleDiff(t.a, wasA) / dt : 0;
 
     if (want !== null && Math.abs(err) <= step && t.cool <= 0) {
       t.cool = T.cooldown;
@@ -2769,38 +2836,6 @@ function step(dt) {
   manageOre();
 }
 
-// One snapshot per client, holding only what that client's camera can reach. Your own
-// ships are always included however far you have panned, or you would lose the ability
-// to give them orders. The player list stays whole: it is small and drives the board.
-function snapshotFor(p) {
-  const v = p.view, R2 = STREAM_R * STREAM_R;
-  const near = o => { const dx = o.x - v.x, dy = o.y - v.y; return dx * dx + dy * dy < R2; };
-  return JSON.stringify({
-    // The send time, so a client can space snapshots by when they were produced rather
-    // than by when it got round to reading them.
-    t: 's', st: +performance.now().toFixed(1), v: VERSION, ...(stale ? { stale: 1 } : {}),
-    players: [...players.values()].map(q => ({ id: q.id, name: q.name, score: q.score })),
-    // Only what changes every tick. Everything about a ship that holds still between
-    // frames goes on its own channel, said when it changes -- see syncShips.
-    ships: [...ships].filter(s => s.owner === p.id || near(s)).map(s => ({
-      id: s.id,
-      // Ships keep sub-pixel position -- they are what the eye follows -- but angles do
-      // not need three decimals: 0.01rad is a pixel at the tip of a hull.
-      x: +s.x.toFixed(1), y: +s.y.toFixed(1), a: +s.a.toFixed(2), th: s.th, hd: +s.heading.toFixed(2),
-      tu: s.turrets.map(t => +t.a.toFixed(2)),
-      ...(s.dest ? { dx: Math.round(s.dest.x), dy: Math.round(s.dest.y) } : {}),
-      // The beam is a thing in the world, so everyone near enough sees it.
-      ...(s.beams.length ? { bm: s.beams } : {}),
-      // Small, and changes every time a grain lands. Bundled with the standing half, one
-      // grain resent the loadout and every envelope with it: what goes together is what
-      // changes together, not what is about the same subject.
-      ...(s.owner === p.id ? { or: s.ore } : {}),
-    })),
-    // Rocks and shells round to whole units: interpolation smooths the half-unit of
-    // error, and nobody is inspecting a shell's sub-pixel position.
-    ...(kills.length ? { kills: kills.filter(near) } : {}),
-  });
-}
 
 // Walls are static, so they are pushed once per player when a ship comes near and dropped
 // when it leaves, rather than riding in every snapshot -- a dense biome would otherwise
@@ -2865,14 +2900,15 @@ wss.on('connection', ws => {
       p.ws = ws;
     } else {
       const id = nextId++;
-      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), drift: newDrift(), ships: new Map(), busy: null, view: { x: 0, y: 0 } };
+      p = { id, ws, name: `ship-${id}`, score: 0, walls: new Map(), art: new Set(), marks: new Set(), moving: newMoving(), ships: new Map(), told: null, busy: null, view: { x: 0, y: 0 } };
       players.set(id, p);
       sessions.set(session, id);
     }
     p.walls = new Map();                      // a new socket has been sent no terrain yet
     p.art = new Set();
     p.marks = new Set();
-    p.drift = newDrift();
+    p.moving = newMoving();
+    p.told = null;
     p.ships = new Map();
     p.busy = null;                            // the interaction this session has open
 
@@ -2996,9 +3032,9 @@ setInterval(() => {
   for (const p of players.values()) {
     if (!p.ws || p.ws.readyState !== 1) continue;
     if (streamChunks) syncWalls(p);
-    syncDrift(p);
     syncShips(p);
-    p.ws.send(snapshotFor(p));
+    const msg = worldFor(p, +performance.now().toFixed(1), syncMotion(p, Date.now()));
+    if (msg) p.ws.send(msg);
   }
   kills.length = 0;                 // said once, to whoever was near enough to see it
 }, TICK);

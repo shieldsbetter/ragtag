@@ -91,7 +91,10 @@ resize();
 // past so there are always two snapshots straddling the render clock to lerp between.
 // No clock sync needed, and a late packet costs smoothness only, never a rubber-band.
 const RENDER_DELAY = 120;
-const buffer = [];              // [{ rt, snap }] oldest -> newest
+// What the world is, apart from where everything in it is: who is playing, and whether the
+// server this page was served by is still the one running. Said once, and again when it
+// changes.
+let roster = null, version = null, stale = 0;
 
 // Snapshots are placed on the render timeline by the SERVER's send time, not by when
 // this client processed them. A main-thread hitch makes several arrive back to back,
@@ -115,29 +118,57 @@ const scenery = new Map();
 // Somewhere you can do something, offered by a set piece. It carries its own icon, so the
 // client draws a thing it cannot name and does not need to.
 const marks = new Map();
-// Things that drift: rocks, loose ore, shells in flight. Each was described to us once --
-// where it was, when, and how fast -- and we work out the rest, so nothing about one
-// crosses the wire again unless the line it is travelling on changes.
-const drift = { rock: new Map(), ore: new Map(), shot: new Map() };
+// Everything that moves. Each was described to us -- where it was at a moment, and how
+// fast -- and we carry it on from there ourselves. Nothing arrives on a clock: a rock
+// travelling in a straight line is described once and never mentioned again, and a
+// manoeuvring ship is corrected a few times a second, when its real path has left the
+// line we were last given.
+const moving = { ship: new Map(), rock: new Map(), ore: new Map(), shot: new Map() };
+// What rides along with the motion of each kind, in the order the server packs it.
+const CARRIES = { ship: ['th'], rock: ['size', 'seed', 'rich'], ore: ['m'], shot: [] };
 // What a ship is, as against where it is. Sent when it changes rather than every tick, and
 // folded back into each ship as the frame is built so nothing downstream has to know.
 const shipInfo = new Map();
 
-// Where one is at a moment on the render clock. Server time is mapped onto this client's
-// timeline by the same offset the snapshots use, so a description and a snapshot agree
-// about when "now" is.
-const driftAt = (d, clock) => {
-  const dt = (clock - (d.t0 + clockOffset)) / 1000;
-  return { ...d, x: d.x0 + d.vx * dt, y: d.y0 + d.vy * dt, a: d.a0 + d.spin * dt };
+// A correction is a nudge, not a snap. We hold the line we were on as well as the one we
+// have just been given, and cross-fade between them with a curve that is flat at both ends
+// -- so position AND speed are continuous, and a ship that was wrong by a few units eases
+// onto the truth instead of jumping to it. This is the whole of the interpolation: there
+// is no buffer of frames to sit between, because there are no frames.
+const MOTION_BLEND = 250;
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+const along = (tr, clock) => {
+  const dt = (clock - tr.t) / 1000;
+  return { x: tr.x + tr.vx * dt, y: tr.y + tr.vy * dt, a: tr.a + tr.va * dt };
 };
-const driftList = (kind, clock) => [...drift[kind].values()].map(d => driftAt(d, clock));
-
-// What each kind's description is made of, in the order the server packs it.
-const DRIFT_SHAPE = {
-  rock: ['id', 'x0', 'y0', 'vx', 'vy', 'a0', 'spin', 'size', 'seed', 'rich', 't0'],
-  ore: ['id', 'x0', 'y0', 'vx', 'vy', 'a0', 'spin', 'm', 't0'],
-  shot: ['id', 'x0', 'y0', 'vx', 'vy', 't0'],
-};
+function stateAt(e, clock) {
+  const now = along(e.track, clock);
+  let { x, y, a } = now, s = 1;
+  if (e.prev) {
+    // The fade starts where the render clock stood when the correction arrived, not at
+    // some fixed offset from the correction's own timestamp: starting anywhere else means
+    // starting part-way along, which puts a step in exactly where the fade was meant to
+    // remove one.
+    const u = (clock - e.b0) / MOTION_BLEND;
+    if (u < 1) {
+      s = u <= 0 ? 0 : u * u * (3 - 2 * u);       // flat at both ends: speed carries through
+      const was = along(e.prev, clock);
+      x = was.x + (now.x - was.x) * s;
+      y = was.y + (now.y - was.y) * s;
+      a = was.a + angDiff(now.a, was.a) * s;
+    }
+  }
+  const o = { ...e.of, id: e.id, x, y, a };
+  if (e.track.tu) o.tu = e.track.tu.map(([ta, tv], i) => {
+    const to = ta + tv * (clock - e.track.t) / 1000;
+    const from = e.prev?.tu?.[i];
+    if (!from || s >= 1) return to;
+    const was = from[0] + from[1] * (clock - e.prev.t) / 1000;
+    return was + angDiff(to, was) * s;
+  });
+  return o;
+}
+const driftList = (kind, clock) => [...moving[kind].values()].map(e => stateAt(e, clock));
 
 // Walls never move, so each polygon's bounds are worth computing once on arrival and
 // keeping: culling against them is what stops a phone drawing a whole streamed region
@@ -219,19 +250,6 @@ ws.onmessage = e => {
     for (const [id, info] of m.set || []) shipInfo.set(id, info);
     return;
   }
-  if (m.t === 'drift') {
-    for (const [kind, ids] of Object.entries(m.del || {}))
-      for (const id of ids) drift[kind].delete(id);
-    for (const [kind, rows] of Object.entries(m.add || {})) {
-      const shape = DRIFT_SHAPE[kind];
-      for (const row of rows) {
-        const d = { a0: 0, spin: 0 };
-        shape.forEach((f, i) => d[f] = row[i]);
-        drift[kind].set(d.id, d);
-      }
-    }
-    return;
-  }
   if (m.t === 'marks') {
     for (const k of m.del || []) marks.delete(k);
     for (const d of m.add || []) {
@@ -266,15 +284,30 @@ ws.onmessage = e => {
     for (const k of m.del) walls.delete(k);
     return;
   }
-  if (m.t !== 's') return;
-  const rt = m.st === undefined ? performance.now() : renderStamp(m.st, performance.now());
+  if (m.t !== 'm') return;
+  const rt = renderStamp(m.st, performance.now());
+  if (m.players) { roster = m.players; version = m.v; stale = m.stale; }
+  for (const [kind, ids] of Object.entries(m.d || {}))
+    for (const id of ids) moving[kind].delete(id);
+  for (const [kind, rows] of Object.entries(m.a || {})) {
+    const carries = CARRIES[kind];
+    for (const row of rows) {
+      const [id, x, y, a, vx, vy, va] = row;
+      const track = { x, y, a, vx, vy, va, t: rt };
+      if (kind === 'ship') track.tu = row[7];
+      const of = {};
+      (row[kind === 'ship' ? 8 : 7] || []).forEach((v, i) => of[carries[i]] = v);
+      const had = moving[kind].get(id);
+      // The line we were on is kept as the one to ease off. Without it a correction lands
+      // as a jump, which is exactly what sending less often would make more visible.
+      moving[kind].set(id, { id, of, track,
+        prev: had ? had.track : null, b0: performance.now() - RENDER_DELAY });
+    }
+  }
   // A death is a one-shot: the server says it once and forgets, so it is caught here on
-  // arrival rather than read out of the interpolated view. It is stamped on the same
-  // timeline as the snapshots so it plays when the ship is seen to vanish, not a render
-  // delay early.
+  // arrival rather than read out of the drawn view. It is stamped on the render timeline
+  // so it plays when the ship is seen to vanish, not a render delay early.
   for (const k of m.kills || []) blowUp(k, rt);
-  buffer.push({ rt, snap: m });
-  while (buffer.length > 2 && buffer[1].rt < performance.now() - RENDER_DELAY - 500) buffer.shift();
 };
 
 // The server streams around the camera, so it has to know where the camera is. Only
@@ -294,50 +327,24 @@ const ZOOM_KEY = 'ships.zoom';
 try { const z = parseFloat(sessionStorage.getItem(ZOOM_KEY)); if (z > 0) cam.zoom = clampZoom(z); } catch {}
 addEventListener('pagehide', () => { try { sessionStorage.setItem(ZOOM_KEY, String(cam.zoom)); } catch {} });
 
-// ---- interpolation ----
+// ---- the view ----
 const lerp = (a, b, t) => a + (b - a) * t;
-const lerpAngle = (a, b, t) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * t;
 
-// Newest snapshot is the source of truth for *existence*: entities gone from it are
-// gone. The older one only supplies a "where was this a moment ago" to lerp from.
-function blend(older, newer, t) {
-  const pair = (list, prevById, extra) => list.map(e => {
-    const p = prevById.get(e.id);
-    if (!p) return e;
-    return { ...e, ...extra(p, e), x: lerp(p.x, e.x, t), y: lerp(p.y, e.y, t) };
-  });
-  const byId = l => new Map(l.map(e => [e.id, e]));
-  return {
-    v: newer.v, stale: newer.stale,
-    players: newer.players,
-    // The per-tick half interpolated, the standing half folded in whole: a ship the
-    // client can draw is both, and every consumer past here wants one object.
-    ships: pair(newer.ships, byId(older.ships), (p, e) => ({
-      a: lerpAngle(p.a, e.a, t),
-      tu: e.tu.map((v, i) => p.tu?.[i] === undefined ? v : lerpAngle(p.tu[i], v, t)),
-      ...(shipInfo.get(e.id) || {}),
-    })),
-  };
-}
-
-let lastGood = null, stalls = 0;
-
+// A ship is both halves at once: where it is, worked out from the line it is on, and what
+// it is, which arrived on its own channel when it changed. Everything past here wants one
+// object. A hull we have motion for but no description of is not drawable, so it is skipped
+// rather than half-drawn -- the two are sent in the same breath, so it is only ever the
+// first frame of a ship coming into view.
 function viewState() {
-  if (!buffer.length) return null;
-  const target = performance.now() - RENDER_DELAY;
-  for (let i = buffer.length - 1; i > 0; i--) {
-    const a = buffer[i - 1], b = buffer[i];
-    if (a.rt <= target && target <= b.rt) {
-      lastGood = blend(a.snap, b.snap, (target - a.rt) / (b.rt - a.rt));
-      return lastGood;
-    }
-  }
-  // No pair straddles the render clock: the feed stalled, or a main-thread hitch bunched
-  // several arrivals together. Hold the last interpolated frame -- a frozen frame is
-  // invisible, whereas snapping to the newest raw snapshot and back is a visible jump of
-  // a whole render delay, in position and heading both.
-  stalls++;
-  return lastGood ?? buffer[buffer.length - 1].snap;
+  if (!roster) return null;
+  const clock = performance.now() - RENDER_DELAY;
+  return {
+    v: version, stale,
+    players: roster,
+    ships: [...moving.ship.values()]
+      .filter(e => shipInfo.has(e.id))
+      .map(e => ({ ...stateAt(e, clock), ...shipInfo.get(e.id) })),
+  };
 }
 
 // ---- camera controls ----
@@ -2361,7 +2368,7 @@ function draw() {
   for (const s of state.ships) {
     // A hull may be running more than one, so this is a list of grains rather than one.
     for (const held of s.bm || []) {
-    const grain = drift.ore.has(held) ? driftAt(drift.ore.get(held), now - RENDER_DELAY) : null;
+    const grain = moving.ore.has(held) ? stateAt(moving.ore.get(held), now - RENDER_DELAY) : null;
     if (!grain) continue;
     const dx = grain.x - s.x, dy = grain.y - s.y, d = Math.hypot(dx, dy) || 1;
     const px = -dy / d, py = dx / d;                   // across the beam
@@ -2501,7 +2508,7 @@ function draw() {
   hud.textContent = `TAP select  HOLD add/clear  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n`
     + `${Math.round(cam.x)}, ${Math.round(cam.y)}   ${dev ? '[dev] ' : ''}v${state.v || '???????'}`
     + `  c${clientVersion}`
-    + (dev ? `  buf=${buffer.length} stalls=${stalls} walls=${walls.size}` : '')
+    + (dev ? `  mv=${moving.ship.size + moving.rock.size + moving.ore.size + moving.shot.size} walls=${walls.size}` : '')
     + (OFF.size ? `  off:${[...OFF].join(',')}` : '')
     + `  ${CPU ? 'cpu' : 'gpu'} ${fps.toFixed(0)}fps`
     + (dev ? `  vib:${vib.ok ? 'api' : 'none'}/${vib.calls}/${vib.last}` : '') + `\n`

@@ -262,9 +262,25 @@ For scale: a cell is roughly 3.5 screens across, and the area of interest is 7.6
 reports where it is looking, and snapshots carry only nearby entities plus your own
 ships. World *simulation* stays anchored to ships; only delivery follows the camera.
 
-**Interpolation renders the past.** Snapshots are placed on the timeline by the
-server's send time, not by arrival, and drawn `RENDER_DELAY` ms late. Stamping by
-arrival replays a third of a second of motion in a millisecond when a phone hitches.
+**Nothing is sent on a clock.** There are no snapshots and no tick rate on the wire. A
+thing that moves is *described* — where it was at a moment, and how fast — and the client
+carries it on from there in a straight line. It is described again only when that line has
+drifted past tolerance (3 units, 0.05 rad), and never more than `MOTION_HZ` (4) times a
+second. A rock costs one message for its whole life; a ship sitting still costs nothing;
+a ship under power costs four small rows a second. The linear case is not a special case,
+it is what happens when the error never grows.
+
+**A correction is a nudge, not a snap.** The client keeps the line it was on as well as
+the one it has just been given and cross-fades between them over `MOTION_BLEND` ms with
+`u²(3−2u)`, which is flat at both ends — so position *and* speed stay continuous. The fade
+must start where the render clock stood **when the correction arrived**, not at a fixed
+offset from the correction's own timestamp: starting part-way along puts a step in exactly
+where the fade was meant to remove one. Measured on screen, that mistake showed as a
+frame-to-frame speed spike of 3× the median, four times a second.
+
+**Messages are still placed on the timeline by the server's send time**, not by arrival,
+and read `RENDER_DELAY` ms late. Stamping by arrival replays a third of a second of motion
+in a millisecond when a phone hitches.
 
 ---
 
@@ -316,12 +332,13 @@ destination is a carrier shoving at rock forever. It only counts as stuck while 
 burning — a carrier spends its first several seconds turning, motionless and healthy, and
 an earlier version of this rule cancelled every order before the ship had moved.
 
-**Anything moving in a straight line is described, not reported.** A rock, a loose grain
-and a shell in flight are each told to a client once — where it was, when, and how fast —
-and the client works out the rest. Nothing about one crosses the wire again unless the line
-it is travelling on changes, which for a rock or a shell is never and for a grain is only
-while a beam has hold of it. Ships are the exception and are still sent every tick, because
-they accelerate and steer. Measured: 12.75 KB/s to 0.90 KB/s with a fight going on.
+**What goes together is what changes together, not what is about the same subject.**
+A ship is split across two channels by *rate*, not by topic: where it is and how it is
+moving (including whether it is burning, and where its guns point) on the motion channel;
+what it is — hull, loadout, damage, orders, hold — on the standing one, resent whole when
+any of it changes. Thrust sat on the standing side for a while, and every flicker of the
+throttle resent the loadout with it. Measured: 12.75 KB/s at 30 Hz snapshots, 1.33 after
+describing drifters, ~0.3–0.5 with nothing on a clock at all.
 
 **Bandwidth is compression-bound, not field-bound.** Snapshots are deflated with a
 shared context. Removing redundant fields buys almost nothing; digits do, because
