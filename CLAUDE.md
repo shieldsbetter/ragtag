@@ -1,7 +1,7 @@
-# ships
+# ragtag
 
-A naval-tactics RTS in space. Server-authoritative simulation over a WebSocket, drawn
-on a canvas as outlined polygons — Asteroids' look, an RTS's pace.
+A multiplayer naval-tactics roguelike. Server-authoritative simulation over a WebSocket,
+drawn on a canvas as outlined polygons — Asteroids' look, an RTS's pace.
 
 ```
 PORT=8123 npm run dev              # 8080 is usually taken on this machine

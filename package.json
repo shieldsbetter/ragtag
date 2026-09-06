@@ -1,9 +1,17 @@
 {
     "name": "@shieldsbetter/ragtag",
     "version": "0.1.0",
-    "description": "A naval-tactics RTS in space: server-authoritative simulation over a WebSocket, drawn on a canvas as outlined polygons.",
+    "description": "Multiplayer naval-tactics roguelike",
     "license": "ISC",
-    "author": "Hampton Smith",
+    "author": "Hampton Smith <1743291+hamptonsmith@users.noreply.github.com>",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/shieldsbetter/ragtag.git"
+    },
+    "bugs": {
+        "url": "https://github.com/shieldsbetter/ragtag/issues"
+    },
+    "homepage": "https://github.com/shieldsbetter/ragtag#readme",
     "type": "module",
     "scripts": {
         "dev": "DEV=1 node --watch server.js",
