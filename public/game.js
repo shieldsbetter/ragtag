@@ -329,10 +329,22 @@ ws.onmessage = (e) => {
         }
         return;
     }
-    // The server says this ship has arrived somewhere it can be worked on.
+    // The server says this ship has arrived somewhere it can be worked on. A conversation
+    // may have sent it here, in which case that conversation is over.
     if (m.t === 'interact') {
+        closeTalk();
         if (m.kind === 'refit') openRefit(m.ship);
         if (m.kind === 'market') openMarket(m.ship);
+        return;
+    }
+    // One node of a conversation: what was said, and what may be said back. The client is
+    // never told what an option does -- it sends the number back and is told what happened.
+    if (m.t === 'talk') {
+        drawTalk(m);
+        return;
+    }
+    if (m.t === 'talk-end') {
+        closeTalk();
         return;
     }
     if (m.t === 'trade') {
@@ -1112,6 +1124,47 @@ function buildDetails(ships) {
 // A basket, not a till: nothing changes hands until CONFIRM, and then all of it does. The
 // running figure is a preview of what the server will work out for itself, which is the
 // same bargain the refit sheet makes.
+// ---- conversation ----
+//
+// The sheet has no way out of its own: a session is held in a conversation until an option
+// ends it. So there is no cancel button, and closing is something the server says.
+const talkEl = document.getElementById('talk');
+const talkSay = talkEl.querySelector('.say');
+const talkOptions = talkEl.querySelector('.options');
+
+function drawTalk(node) {
+    talkSay.textContent = node.say;
+    talkOptions.replaceChildren(
+        ...node.options.map((label, i) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.addEventListener('click', () => choose(i));
+            return b;
+        }),
+    );
+    talkEl.classList.remove('busy');
+    talkEl.hidden = false;
+}
+
+// Answered, and now waiting to hear what that meant. Every option is disabled rather than
+// removed: what you chose stays readable while the spinner runs, and a second tap on a
+// slow connection cannot answer the same node twice.
+function choose(i) {
+    if (talkEl.classList.contains('busy')) return;
+    talkEl.classList.add('busy');
+    for (const b of talkOptions.children) b.disabled = true;
+    if (ws.readyState === 1)
+        ws.send(JSON.stringify({ t: 'talk-choose', option: i }));
+}
+
+// The server has already let go of it -- either it ended the conversation or it handed the
+// session to another sheet -- so there is nothing to tell it here.
+function closeTalk() {
+    talkEl.hidden = true;
+    talkEl.classList.remove('busy');
+}
+
 const marketEl = document.getElementById('market');
 const marketCost = marketEl.querySelector('.cost b');
 const marketHave = marketEl.querySelector('.cost i');

@@ -280,6 +280,73 @@
         color: #55677d;
         align-self: center;
     }
+    /* A conversation wears the same overlay as the rest: what is said on top, what you may
+     say back underneath, and no way out that is not one of the options. */
+    #talk {
+        position: fixed;
+        inset: 0;
+        background: #060a10;
+        z-index: 40;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    #talk[hidden] {
+        display: none;
+    }
+    #talk .sheet {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        max-width: 640px;
+        padding: 16px 18px 20px;
+        gap: 18px;
+    }
+    #talk .say {
+        color: #cfe6ff;
+        line-height: 1.5;
+    }
+    #talk .options {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    /* Full width and thumb-high: an option is the only control on this sheet, so there is
+     no reason to make one small. */
+    #talk .options button {
+        background: #101a26;
+        color: #cfe6ff;
+        border: 1px solid #24384f;
+        padding: 12px 14px;
+        font: inherit;
+        text-align: left;
+        line-height: 1.4;
+        cursor: pointer;
+        touch-action: manipulation;
+    }
+    #talk .options button:disabled {
+        opacity: 0.3;
+    }
+    /* Shown while the server is deciding what the answer means. The options stay on screen
+     underneath it, greyed: what you chose should still be readable while you wait. */
+    #talk .waiting {
+        display: none;
+        align-self: center;
+        width: 22px;
+        height: 22px;
+        border: 2px solid #24384f;
+        border-top-color: #5ff0b0;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+    #talk.busy .waiting {
+        display: block;
+    }
+    @keyframes spin {
+        to {
+            transform: rotate(360deg);
+        }
+    }
     /* The market wears the refit sheet's clothes: same overlay, same header, same buttons. */
     #market {
         position: fixed;
@@ -680,6 +747,13 @@
 </style>
 <canvas id="c"></canvas>
 <div id="hud"></div>
+<div id="talk" hidden>
+    <div class="sheet">
+        <div class="say"></div>
+        <div class="options"></div>
+        <div class="waiting"></div>
+    </div>
+</div>
 <div id="market" hidden>
     <div class="sheet">
         <header>

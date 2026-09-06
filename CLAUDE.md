@@ -129,6 +129,16 @@ lay themselves out again, so discarding chunk files takes a biome's rock away fo
 ground somebody has already explored. `WALL_OLDEST` is the oldest still read, and fields
 added since default to empty.
 
+**A conversation is a tree the server walks and the client cannot read.** A node is a
+statement and a list of things you may say back; the client is handed one node at a time
+— the words and the labels, nothing else — and answers with the index it tapped. What an
+option _does_ never crosses the wire, which is what will let a later node turn on what
+you have done rather than on what you have been told. A session is held in a conversation
+until an option ends it: the sheet has no way out of its own, and the node is resent on
+reconnect, so a reload lands back on the same words. Handing off to another interaction
+_ends_ the conversation rather than suspending it — you walk the tree again if you want
+it back.
+
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
 an icon the marker carries itself. Tapping one sends the selection there _armed_; arriving

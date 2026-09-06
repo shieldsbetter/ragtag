@@ -683,10 +683,13 @@ function wallFrame(A, back = 20) {
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 3 };
+const SET_VERSION = { town: 4 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
+// Somebody to talk to, on the south wall opposite the market. The mark carries the root
+// of a tree; everything past it is decided as the tree is walked.
+const HARBOUR_A = Math.PI / 2;
 
 // The yard: staging built out from the cavern wall with two cranes over it.
 function townArt() {
@@ -824,10 +827,25 @@ function marketArt() {
 // itself -- the client is told what to draw rather than looking it up, the same bargain as
 // the art, so a new set piece can offer a new thing to do without the client learning
 // about it first. What the interaction *is* stays on the server.
+
 function townMarks() {
     const yard = wallFrame(YARD_A).inward(0, 280);
     const market = wallFrame(MARKET_A).inward(0, 300);
+    const harbour = wallFrame(HARBOUR_A).inward(0, 300);
     return [
+        {
+            key: 'town:harbour',
+            kind: 'talk',
+            node: 'harbour:hello',
+            x: +harbour[0].toFixed(1),
+            y: +harbour[1].toFixed(1),
+            r: 260,
+            // A speech bubble, on the same 24-unit grid the other marks use.
+            icon: [
+                'M21 11.5a8.4 8.4 0 0 1-9 8.4 9.5 9.5 0 0 1-2.6-.4L4 21l1.5-4.4' +
+                    'A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z',
+            ],
+        },
         {
             key: 'town:yard',
             kind: 'refit',
@@ -1735,6 +1753,11 @@ function armedArrivals() {
         if (p.busy) continue; // still inside the last one: wait, stay armed
         p.busy = m.key;
         s.arm = null;
+        if (m.kind === 'talk') {
+            p.talk = { node: m.node, ship: s.id };
+            sendTalk(p);
+            continue;
+        }
         p.ws.send(
             JSON.stringify({
                 t: 'interact',
@@ -2153,6 +2176,112 @@ function syncMotion(p, now) {
 
 const newMoving = () =>
     Object.fromEntries(MOVERS.map((m) => [m.kind, new Map()]));
+
+// ---- conversation ----
+//
+// A node is something somebody says and a list of things you may say back. Choosing one
+// tells the server what to do next: another node, a hand-off to some other interaction, or
+// the end of it. Only the server knows the tree -- a client is handed one node at a time
+// and cannot read ahead, which is what will let a later node depend on what you have done
+// rather than on what you have been told.
+//
+// A session is held in a conversation until it terminates. There is no way out of the
+// sheet except through an option, so a tree with no ending is an authoring bug and reads
+// like one.
+const TALKS = {
+    'harbour:hello': {
+        say:
+            'Harbourmaster leans on the rail. "New hull, is it? We do not get many ' +
+            'through here since the lanes closed. What do you want?"',
+        options: [
+            {
+                label: 'What is there to do around here?',
+                then: { talk: 'harbour:work' },
+            },
+            { label: 'I have ore to sell.', then: { open: 'town:market' } },
+            { label: 'My ship needs work.', then: { open: 'town:yard' } },
+            { label: 'Nothing. Good day.', then: { end: true } },
+        ],
+    },
+    'harbour:work': {
+        say:
+            '"Out there, mostly. Rock worth cutting, and nests worth clearing if you ' +
+            'have the guns for it. Bring back what you find -- the market pays, and the ' +
+            'yard will bolt it on."',
+        options: [
+            { label: 'Nests?', then: { talk: 'harbour:nests' } },
+            {
+                label: 'Then I will see to my ship.',
+                then: { open: 'town:yard' },
+            },
+            { label: 'Understood.', then: { end: true } },
+        ],
+    },
+    'harbour:nests': {
+        say:
+            '"Fighters standing over a cache. They come at you and they do not stop. ' +
+            'Whatever is in the cache is yours if you are still flying afterwards."',
+        options: [
+            {
+                label: 'Anything else worth knowing?',
+                then: { talk: 'harbour:work' },
+            },
+            { label: 'I will keep it in mind.', then: { end: true } },
+        ],
+    },
+};
+
+// What the client is told: the words, and the options as labels and nothing else. Which
+// node it is, and what any option does, stays here.
+function sendTalk(p) {
+    const node = TALKS[p.talk?.node];
+    if (!node) return endTalk(p);
+    p.ws.send(
+        JSON.stringify({
+            t: 'talk',
+            ship: p.talk.ship,
+            say: node.say,
+            options: node.options.map((o) => o.label),
+        }),
+    );
+}
+
+function endTalk(p) {
+    p.talk = null;
+    p.busy = null;
+    if (p.ws.readyState === 1) p.ws.send(JSON.stringify({ t: 'talk-end' }));
+}
+
+// Handing off ends the conversation rather than suspending it: the sheet you are sent to
+// is the interaction now, and it is reached by walking the tree again if you want it back.
+function talkChoose(p, i) {
+    const node = TALKS[p.talk?.node];
+    const opt = node?.options[i];
+    if (!opt) return;
+    const then = opt.then;
+    if (then.talk) {
+        p.talk.node = then.talk;
+        return sendTalk(p);
+    }
+    if (then.open) {
+        const mark = marks.get(then.open);
+        // Whatever it was pointing at is not loaded, or not there any more. Saying nothing
+        // would leave the sheet spinning, so the conversation simply ends.
+        if (!mark) return endTalk(p);
+        const ship = p.talk.ship;
+        p.talk = null;
+        p.busy = mark.key;
+        return p.ws.send(
+            JSON.stringify({
+                t: 'interact',
+                kind: mark.kind,
+                ship,
+                mark: mark.key,
+            }),
+        );
+    }
+    endTalk(p);
+}
 
 // ---- the market ----
 //
@@ -3998,6 +4127,7 @@ wss.on('connection', (ws) => {
                 ships: new Map(),
                 told: null,
                 busy: null,
+                talk: null, // where in a conversation tree, if it is in one
                 view: { x: 0, y: 0 },
             };
             players.set(id, p);
@@ -4009,7 +4139,9 @@ wss.on('connection', (ws) => {
         p.moving = newMoving();
         p.told = null;
         p.ships = new Map();
-        p.busy = null; // the interaction this session has open
+        // A conversation outlives the socket that started it: a session is held in one
+        // until it ends, so a reload drops you back where you were standing.
+        p.busy = p.talk ? p.busy : null; // the interaction this session has open
 
         // Returning players keep the fleet they left; a new commander is issued one. No ship
         // is special -- they are simply the ships this player owns.
@@ -4051,11 +4183,15 @@ wss.on('connection', (ws) => {
                     stops: ROT_STOPS,
                 },
                 market: { stock: forSale(), resale: RESALE },
+
                 prioMax: PRIO_MAX,
                 turretHp: TURRET_HP,
                 wreck: WRECK_DEPTH,
             }),
         );
+        // Held in the conversation it was in: a reload lands back on the same node rather
+        // than outside a sheet the server still believes is open.
+        if (p.talk) sendTalk(p);
     }
 
     ws.on('message', (raw) => {
@@ -4138,6 +4274,8 @@ wss.on('connection', (ws) => {
             }
         } else if (m.t === 'interact-done') {
             p.busy = null;
+        } else if (m.t === 'talk-choose' && Number.isInteger(m.option)) {
+            talkChoose(p, m.option);
         } else if (m.t === 'trade' && m.buy && m.sell) {
             for (const s of ships) {
                 if (s.owner !== p.id || s.id !== m.ship) continue;
