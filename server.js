@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -483,7 +484,10 @@ const WORLD_SEED = 20260903;
 const WALL_FORMAT = 7; // what is written
 const WALL_OLDEST = 5; // ...and the oldest that can still be read
 const MAX_BLOBS = 6; // per chunk, at density 1
-const WORLD_DIR = process.env.WORLD_DIR || path.join(__dirname, 'world');
+// Beside wherever it was started, not beside the code: installed globally, the code
+// lives in a directory shared by every world and often not writable. Run it where you
+// want the world, which in a checkout is the checkout.
+const WORLD_DIR = process.env.WORLD_DIR || path.join(process.cwd(), 'world');
 
 const MIME = {
     '.html': 'text/html',
@@ -4301,7 +4305,7 @@ seedBastions();
 
 server.listen(PORT, async () => {
     console.log(
-        `\nships ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
+        `\nragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
     );
     console.log(`  local   http://localhost:${PORT}`);
     const url = NGROK ? await openTunnel(PORT) : null;

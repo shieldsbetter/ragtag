@@ -12,6 +12,19 @@
         "url": "https://github.com/shieldsbetter/ragtag/issues"
     },
     "homepage": "https://github.com/shieldsbetter/ragtag#readme",
+    "bin": {
+        "ragtag": "server.js"
+    },
+    "files": [
+        "server.js",
+        "public"
+    ],
+    "engines": {
+        "node": ">=20"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
     "type": "module",
     "scripts": {
         "dev": "DEV=1 node --watch server.js",
