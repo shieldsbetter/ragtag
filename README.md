@@ -2,14 +2,6 @@
 
 Mobile-friendly multiplayer naval-tactics roguelike.
 
-Newtonian space, no drag: a ship that wants to stop has to turn and burn, and that
-takes real time. You command a bag of ships, none of them privileged, and you command
-position and facing — the turrets acquire and fire on their own, within the arcs they
-are mounted in. Half a second of latency must not matter.
-
-The phone is the target and the desktop is the phone with a mouse. Open the page,
-scan the QR, and anyone on your network is in the same world.
-
 > **Alpha.** It runs, it is multiplayer, and it is playable — but there is not much
 > _game_ here yet. Expect an unfinished world, sparse opposition, and changes that
 > break the save. The world directory is not a format anyone should rely on.
