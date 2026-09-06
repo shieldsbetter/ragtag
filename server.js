@@ -4242,13 +4242,31 @@ if (DEV) {
     });
 }
 
-// Whatever address a phone on the same network can actually reach; only used when
-// there is no tunnel, since a QR of localhost would point the phone at itself.
-function lanAddress() {
-    for (const list of Object.values(os.networkInterfaces()))
-        for (const a of list)
-            if (a.family === 'IPv4' && !a.internal) return a.address;
-    return null;
+// Every address something else could reach this on, named by the interface it belongs
+// to. Picking one and calling it "lan" was a guess: a box with Docker or a VPN has
+// several, and the first one the OS happens to list is as likely to be a bridge no phone
+// is on as the wifi. Printing all of them says what is true and lets the reader choose --
+// if there is more than one, they know why.
+function reachableAddresses() {
+    const found = [];
+    for (const [name, list] of Object.entries(os.networkInterfaces() ?? {}))
+        for (const a of list ?? [])
+            if (a.family === 'IPv4' && !a.internal)
+                found.push({ name, url: `http://${a.address}:${PORT}` });
+    return found;
+}
+
+// A title, the QR under it, then the link. The QR is what a phone is here for, so it goes
+// where a thumb-held camera finds it: between the name and the text it encodes.
+function announce(title, url, qr = true) {
+    console.log(`\n${title}`);
+    // Rendered to a string and trimmed: the library signs off with blank lines, which
+    // would put a gap between the code and the link it encodes.
+    if (qr)
+        qrcode.generate(url, { small: true }, (code) =>
+            console.log(code.replace(/\s+$/, '')),
+        );
+    console.log(`  ${url}`);
 }
 
 // An agent already tunnelling THIS port is worth adopting -- that is the --watch
@@ -4337,19 +4355,10 @@ server.listen(PORT, async () => {
     console.log(
         `\nragtag ${VERSION}${DEV ? '  [dev: auto-restart + client hot-reload]' : ''}`,
     );
-    console.log(`  local   http://localhost:${PORT}`);
-    const url = NGROK ? await openTunnel(PORT) : null;
-    if (url) {
-        console.log(`  public  ${url}`);
-        qrcode.generate(url, { small: true });
-    } else {
-        const lan = lanAddress();
-        if (lan) {
-            console.log(`  lan     http://${lan}:${PORT}`);
-            if (!NGROK) console.log('          (--ngrok for a public URL)');
-            qrcode.generate(`http://${lan}:${PORT}`, { small: true });
-        } else {
-            console.log('  (no network interface found -- localhost only)');
-        }
-    }
+    // No QR: a phone scanning this would be pointed at itself.
+    announce('this machine', `http://localhost:${PORT}`, false);
+    for (const { name, url } of reachableAddresses()) announce(name, url);
+    const tunnel = NGROK ? await openTunnel(PORT) : null;
+    if (tunnel) announce('ngrok', tunnel);
+    else if (!NGROK) console.log('\n(--ngrok for a public URL)');
 });
