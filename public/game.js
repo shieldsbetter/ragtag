@@ -1003,7 +1003,7 @@ function paintGuns(s) {
 
 function syncDetails() {
     document.body.classList.toggle('details-open', detailsOpen);
-    detailsToggle.textContent = detailsOpen ? '\u2715' : '\u2630';
+    detailsToggle.textContent = detailsOpen ? '\u203a' : '\u2630';
     if (!detailsOpen) return;
     // Nothing selected: say so, and drop whatever the last selection left behind rather
     // than leaving a stale fleet in a panel that no longer describes anything. Keyed like

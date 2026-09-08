@@ -64,28 +64,29 @@
      furniture in the game with room for a menu, and a menu you have to select a ship to
      reach is a menu nobody finds. */
 
-    /* The heading and the way into the menu share a line: the menu is a property of the
-     game, not of the selection, so it sits above the list rather than in it. */
-    #details header {
+    /* The way into the menu sits above everything else, right-aligned on its own line: the
+     menu is a property of the game rather than of the selection, so it opens above the
+     selection instead of inside it. */
+    #details .bar {
         display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 8px;
+        justify-content: flex-end;
     }
-    #details header button {
+    #details .bar button {
         font: inherit;
-        font-size: 15px;
+        letter-spacing: 0.18em;
         color: #4e8f7d;
         background: none;
         border: 0;
-        padding: 4px 10px;
+        padding: 4px 2px 4px 12px;
         cursor: pointer;
         touch-action: manipulation;
     }
     #menu {
         display: flex;
         flex-direction: column;
-        margin: 0 0 8px;
+        margin: 0 0 14px;
+    }
+    #menu button {
         border: 1px solid #1d3040;
     }
     /* An id selector beats the UA's [hidden] rule, so the panel has to say it itself --
@@ -97,7 +98,6 @@
         font: inherit;
         color: #7fe8c8;
         background: #0c1420;
-        border: 0;
         padding: 11px 12px;
         text-align: left;
         cursor: pointer;
@@ -832,8 +832,12 @@
             right 0.18s ease,
             bottom 0.18s ease;
     }
+    /* Open, the button closes the drawer, and the chevron points the way the drawer goes:
+     down on a phone held upright, right when the panel takes the side. Rotating the whole
+     button rather than swapping glyphs keeps it one character and no JS branch. */
     body.details-open #detailsToggle {
         bottom: calc(50vh + var(--edge));
+        transform: rotate(90deg);
     }
 
     /* Turned sideways there is no vertical room to give away, so it takes the right half
@@ -850,6 +854,7 @@
         body.details-open #detailsToggle {
             bottom: var(--edge);
             right: calc(50vw + var(--edge));
+            transform: none;
         }
     }
 
@@ -874,6 +879,7 @@
             top: var(--edge);
             bottom: auto;
             right: calc(var(--panel) + var(--edge));
+            transform: none;
         }
     }
 </style>
@@ -932,13 +938,14 @@
 </div>
 <button id="detailsToggle" type="button" aria-label="Details"></button>
 <aside id="details">
-    <header>
-        <h2>SELECTION</h2>
-        <button type="button" id="menuToggle" aria-label="Menu">⋯</button>
-    </header>
+    <div class="bar">
+        <button type="button" id="menuToggle">MENU</button>
+    </div>
     <nav id="menu" hidden>
+        <h2>MENU</h2>
         <button type="button" id="menuLicences">Open source licences</button>
     </nav>
+    <h2>SELECTION</h2>
     <div id="detailsBody"></div>
 </aside>
 <div id="licences" hidden>
