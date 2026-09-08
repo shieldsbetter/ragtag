@@ -13,7 +13,11 @@ import { command } from '@shieldsbetter/sbopts';
 import { stack, stringWidth, text } from '@shieldsbetter/termiflo';
 import { produce } from 'immer';
 import polygonClipping from 'polygon-clipping';
-import { portrait } from '@shieldsbetter/pixel-portraits';
+import {
+    CLOSED_EYES,
+    FANTASY_PARTS,
+    portrait,
+} from '@shieldsbetter/pixel-portraits';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -685,7 +689,7 @@ function wallFrame(A, back = 20) {
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 5 };
+const SET_VERSION = { town: 6 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
@@ -854,6 +858,11 @@ function townMarks() {
         {
             key: 'town:yard',
             kind: 'refit',
+            // A mark with a conversation on it opens with the conversation; the kind is
+            // still what it hands over to, so `open` on this same mark is the way through
+            // to the sheet.
+            who: 'foreman',
+            talk: ['yard', {}],
             x: +yard[0].toFixed(1),
             y: +yard[1].toFixed(1),
             r: 260,
@@ -866,6 +875,8 @@ function townMarks() {
         {
             key: 'town:market',
             kind: 'market',
+            who: 'trader',
+            talk: ['market', {}],
             x: +market[0].toFixed(1),
             y: +market[1].toFixed(1),
             r: 260,
@@ -1758,7 +1769,10 @@ function armedArrivals() {
         if (p.busy) continue; // still inside the last one: wait, stay armed
         p.busy = m.key;
         s.arm = null;
-        if (m.kind === 'talk') {
+        // Somebody to talk to first, if this mark has anybody -- and it is the frame that
+        // says so rather than the kind, so a yard or a market can put a word in front of
+        // its sheet without becoming a different sort of thing.
+        if (m.talk) {
             startTalk(p, s.id, m);
             continue;
         }
@@ -2291,9 +2305,22 @@ function folkFor(who) {
         const pick = (xs) => xs[Math.floor(rng() * xs.length)];
         const name = `${pick(GIVEN)} ${pick(FAMILY)}`;
         const gender = pick(GENDERS);
+        // The two renders have to be the same person, and the generator consumes whatever
+        // stream it is handed -- so each gets its own copy of one wound to the same place,
+        // rather than sharing a stream and drawing two different faces.
         folk.set(
             who,
-            portrait({ template: gender, rng }).then(
+            portrait({
+                template: gender,
+                // Nobody is drawn asleep, and nobody has horns: these are people in a
+                // harbour, and whether the setting has androids or elves in it is not a
+                // question a portrait generator gets to answer on its own.
+                exclude: [CLOSED_EYES, FANTASY_PARTS],
+                // Its own stream, rather than what is left of the one the name came out
+                // of, so that adding a draw to how somebody is named never silently
+                // redraws every face in the world.
+                rng: seeded(`${who}#face`),
+            }).then(
                 (img) => ({ name, gender, portrait: img }),
                 (e) => {
                     console.warn(`portrait: ${who}: ${e.message}`);
