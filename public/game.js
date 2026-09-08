@@ -856,11 +856,26 @@ const anchorOf = (s) => (s && s.dx !== undefined ? { x: s.dx, y: s.dy } : s);
 // ---- the details drawer ----
 // A place for controls that are lists and toggles rather than gestures -- target
 // priorities first. The canvas is for things you point at; this is for things you read.
-// It only exists while something is selected, since an empty selection is a real state
-// and not a gap to fill.
+// It is always here, empty or not: an empty selection is a real state and the panel says
+// so, and it is also the only furniture with a home for the menu.
 const details = document.getElementById('details');
 const detailsBody = document.getElementById('detailsBody');
 const detailsToggle = document.getElementById('detailsToggle');
+
+// The menu, and the one thing in it. It hangs off the panel rather than off the canvas
+// because it is not a gesture: the whole gesture budget is spent on the map.
+const menu = document.getElementById('menu');
+const licences = document.getElementById('licences');
+document.getElementById('menuToggle').addEventListener('click', () => {
+    menu.hidden = !menu.hidden;
+});
+document.getElementById('menuLicences').addEventListener('click', () => {
+    menu.hidden = true;
+    licences.hidden = false;
+});
+licences.querySelector('.cancel').addEventListener('click', () => {
+    licences.hidden = true;
+});
 
 // Wide screens have room for the panel beside the game, so it opens by default and the
 // button collapses it. Narrow screens do not, so the panel is a drawer over the board
@@ -987,10 +1002,29 @@ function paintGuns(s) {
 }
 
 function syncDetails() {
-    document.body.classList.toggle('has-selection', selection.size > 0);
     document.body.classList.toggle('details-open', detailsOpen);
     detailsToggle.textContent = detailsOpen ? '\u2715' : '\u2630';
-    if (!selection.size || !detailsOpen) return;
+    if (!detailsOpen) return;
+    // Nothing selected: say so, and drop whatever the last selection left behind rather
+    // than leaving a stale fleet in a panel that no longer describes anything. Keyed like
+    // every other rebuild, because this runs every frame.
+    if (!selection.size) {
+        if (builtKey !== 'empty') {
+            builtKey = 'empty';
+            openShip = null;
+            statusEls.clear();
+            gunEls = null;
+            gunShip = null;
+            cargoEl = null;
+            detailsBody.replaceChildren(
+                Object.assign(document.createElement('div'), {
+                    className: 'nosel',
+                    textContent: 'Nothing selected.',
+                }),
+            );
+        }
+        return;
+    }
     const ships = [...selection]
         .map((id) => fleet.find((s) => s.id === id))
         .filter(Boolean);
@@ -1131,8 +1165,16 @@ function buildDetails(ships) {
 const talkEl = document.getElementById('talk');
 const talkSay = talkEl.querySelector('.say');
 const talkOptions = talkEl.querySelector('.options');
+const talkFace = talkEl.querySelector('.who img');
+const talkName = talkEl.querySelector('.who b');
 
 function drawTalk(node) {
+    // The face arrives with every node rather than being remembered, so there is nothing
+    // to invalidate when the conversation moves to somebody else. A node with no portrait
+    // -- one the server could not draw -- still has a name.
+    if (node.portrait) talkFace.src = node.portrait;
+    else talkFace.removeAttribute('src');
+    talkName.textContent = node.name ?? '';
     talkSay.textContent = node.say;
     talkOptions.replaceChildren(
         ...node.options.map((label, i) => {

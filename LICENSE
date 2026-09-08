@@ -13,3 +13,25 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+## Third-party
+
+### Pixel portrait sprites — CC BY 4.0
+
+The character portraits are rendered from a sprite set that is the work of
+**Viktor Hahn**, from https://github.com/V-ktor/pixel-art-portraits, licensed
+under Creative Commons Attribution 4.0 International
+(https://creativecommons.org/licenses/by/4.0/). The sprites are unmodified.
+
+```
+Pixel portrait sprites
+  Viktor Hahn — github.com/V-ktor/pixel-art-portraits
+  CC BY 4.0 — creativecommons.org/licenses/by/4.0/
+  Unmodified.
+```
+
+They reach this project through @shieldsbetter/pixel-portraits, whose own code
+is ISC; its sprite compositor is a re-implementation of upstream Godot code that
+is MIT (© 2021 Viktor).

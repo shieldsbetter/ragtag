@@ -36,6 +36,7 @@
         "start": "node server.js"
     },
     "dependencies": {
+        "@shieldsbetter/pixel-portraits": "^0.1.0",
         "@shieldsbetter/sbopts": "^0.1.0",
         "@shieldsbetter/termiflo": "^0.1.0",
         "immer": "^11.1.18",

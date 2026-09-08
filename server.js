@@ -13,6 +13,7 @@ import { command } from '@shieldsbetter/sbopts';
 import { stack, stringWidth, text } from '@shieldsbetter/termiflo';
 import { produce } from 'immer';
 import polygonClipping from 'polygon-clipping';
+import { portrait } from '@shieldsbetter/pixel-portraits';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -684,7 +685,7 @@ function wallFrame(A, back = 20) {
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 4 };
+const SET_VERSION = { town: 5 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
@@ -2215,6 +2216,95 @@ const CONVERSATIONS = await (async () => {
 const whoId = (mark) =>
     `/setpieces/${mark.src ?? 'world'}/conversationalists/${mark.who}`;
 
+// Who somebody is -- a name, a gender and a face -- worked out from that id rather than
+// stored anywhere. The id already carries the site that laid them down, so one town's
+// harbourmaster is the same person on every restart while the next town's is somebody
+// else, and there is nothing to persist, migrate or invalidate. One pool of given names
+// for all three genders: a name is not a second place to say what somebody is.
+const GIVEN = [
+    'Vela',
+    'Tam',
+    'Orsa',
+    'Bex',
+    'Corran',
+    'Mire',
+    'Hask',
+    'Juno',
+    'Pell',
+    'Sable',
+    'Rook',
+    'Ines',
+    'Calder',
+    'Wen',
+    'Absalom',
+    'Nix',
+    'Toma',
+    'Greer',
+    'Isolde',
+    'Vash',
+];
+const FAMILY = [
+    'Orsk',
+    'Ridd',
+    'Vantry',
+    'Kell',
+    'Marrow',
+    'Thane',
+    'Bell',
+    'Cordage',
+    'Slate',
+    'Hollow',
+    'Ferris',
+    'Quill',
+    'Ashgrove',
+    'Draper',
+    'Munro',
+    'Stave',
+    'Halloran',
+    'Perch',
+    'Vane',
+    'Wick',
+];
+const GENDERS = ['female', 'genderqueer', 'male'];
+
+// mulberry32, seeded off the id. The portrait generator takes any Math.random-shaped
+// function, so name, gender and face all come out of one stream drawn in a fixed order --
+// which is the whole of "derived, not stored".
+function seeded(str) {
+    let a = crypto.createHash('sha1').update(str).digest().readUInt32LE(0);
+    return () => {
+        a = (a + 0x6d2b79f5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+// Compositing the sprites is the only part worth keeping, so the promise is the cache: it
+// is created once, on the first word anybody exchanges with them, and never rejects -- a
+// portrait that would not draw degrades to a nameplate with no face, not to a broken
+// conversation.
+const folk = new Map(); // conversationalist id -> promise of { name, gender, portrait }
+function folkFor(who) {
+    if (!folk.has(who)) {
+        const rng = seeded(who);
+        const pick = (xs) => xs[Math.floor(rng() * xs.length)];
+        const name = `${pick(GIVEN)} ${pick(FAMILY)}`;
+        const gender = pick(GENDERS);
+        folk.set(
+            who,
+            portrait({ template: gender, rng }).then(
+                (img) => ({ name, gender, portrait: img }),
+                (e) => {
+                    console.warn(`portrait: ${who}: ${e.message}`);
+                    return { name, gender, portrait: null };
+                },
+            ),
+        );
+    }
+    return folk.get(who);
+}
+
 // Per player: two people may be mid-sentence with the same person and neither should see
 // the other's half of it. The bottom frame is seeded from what the set piece authored, so
 // "the world decides the default, the player owns the interrupts" holds without the two
@@ -2272,7 +2362,13 @@ function nextStep(p, who, choice, start) {
 }
 
 // One step, turned into whatever the client should be looking at.
-function playTalk(p, step) {
+//
+// Async only because the first word anybody has with somebody draws their face; every step
+// after that is awaiting a promise that has already settled. The face rides along with
+// every node rather than being sent once and remembered: it is 2.3KB against a channel
+// that carries nothing at all while a sheet is open, and the client stays a thing that
+// draws what it was last told.
+async function playTalk(p, step) {
     if (step.open) {
         const mark = marks.get(step.open);
         // Whatever it pointed at is not loaded, or not there any more. Saying nothing
@@ -2290,11 +2386,15 @@ function playTalk(p, step) {
             }),
         );
     }
-    if (!step.say) return endTalk(p);
+    if (!step.say || !p.talk) return endTalk(p);
+    const { name, portrait: face } = await folkFor(p.talk.who);
+    if (p.ws.readyState !== 1) return;
     p.ws.send(
         JSON.stringify({
             t: 'talk',
             ship: p.talk?.ship,
+            name,
+            portrait: face,
             say: step.say,
             options: step.options ?? [],
         }),

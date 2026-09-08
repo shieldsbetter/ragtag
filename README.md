@@ -28,3 +28,10 @@ ragtag --help
 ## Licence
 
 ISC. See [LICENSE](LICENSE).
+
+## Credits
+
+Character portraits are rendered from **Viktor Hahn**'s sprite set,
+[V-ktor/pixel-art-portraits](https://github.com/V-ktor/pixel-art-portraits), licensed
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and unmodified. The same credit
+is in the game, under the drawer's menu.
