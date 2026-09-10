@@ -48,6 +48,14 @@ it is how a fleet is put down without ordering it somewhere by accident. A featu
 modifier key. Feedback is sized in screen pixels, never world units, because a thumb is
 the same size at every zoom and covers roughly 45px of whatever is under it.
 
+**A fleet retires with its commander.** The world outlives a session — the mesh, the
+rock you cut, what you were told — but a player's ships do not stand in it while nobody is
+flying them. They are kept where they were left for `LOGOFF_GRACE`, two minutes, so a
+dropped connection is not a lost battle and quitting a fight is not a way to save a hull;
+after that they go into the player's record and come back at the origin next time. Leaving
+them standing is not a kindness: a crewed hull is what makes terrain, so every fleet that
+ever existed would hold ground resident from boot.
+
 **One game on every screen.** Phone and desktop show the same thing. Platform-specific
 rendering tricks are a bug, not an optimisation, and platform-specific _feedback_ may
 only ever be a bonus on top of something that works everywhere.
@@ -65,7 +73,6 @@ only ever be a bonus on top of something that works everywhere.
   undecided.
 - Whether players can fight each other. All humans share one team today; per-player
   teams would make it PvP, and the machinery already supports it.
-- Whether ships ever retire. The world outlives its players and nothing removes ships.
 
 **Not requirements** — do not reason from these, and do not reintroduce them as
 justifications:
@@ -268,6 +275,16 @@ than its site suggests, and a fixed cull let a site 25,000 units away quietly st
 what it is looking at so nothing vanishes in front of you, but it may never call anything
 into being: otherwise a finger on the map drags the world into existence for as far as
 anyone cares to scroll, deciding biomes for ground nobody has been near.
+
+**A player is world state, and the session is their name.** `players.json` holds what
+cannot be worked out again: the fleet, the score, and where they are up to with everybody
+they have spoken to, including the conversation they were in the middle of. It is keyed by
+the session string the client keeps in localStorage — a bearer token and nothing more,
+which is the right weight for a game with no accounts. Ids are one counter shared by
+players, ships, rocks and ore, so it is saved with them: a restored ship keeps its id,
+because a conversation held mid-sentence names the ship that started it. What is _not_
+saved is everything the world makes for itself — rocks, ore, fighters, the settlement's own
+guns — which is the same bargain the mesh makes.
 
 **Nothing rock-shaped arrives in sight.** Asteroids are stocked and culled across the
 whole area of interest rather than a small disc: they appear only in a thin band just

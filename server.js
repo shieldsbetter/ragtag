@@ -1762,7 +1762,7 @@ function armedArrivals() {
         }
         if (Math.hypot(s.x - m.x, s.y - m.y) > m.r) continue;
         const p = players.get(s.owner);
-        if (!p || p.ws.readyState !== 1) {
+        if (!p || p.ws?.readyState !== 1) {
             s.arm = null;
             continue;
         }
@@ -4263,35 +4263,200 @@ const wss = new WebSocketServer({
 // weight for a game with no accounts.
 const sessions = new Map(); // session id -> player id
 
+// ---- players on disk ----
+//
+// A player is world state like the mesh is: the ships they own, what they have been told,
+// and where they are up to with everybody they have spoken to. Written to one file rather
+// than one apiece -- there are a handful of them against thousands of chunks -- and keyed
+// by the session, because that is the name the client actually holds.
+//
+// The fleet is only in the file while its commander is away. While they are here the world
+// holds the ships and the file holds what was true at the last save.
+const playerFile = () => path.join(WORLD_DIR, 'players.json');
+let playersDirty = false;
+
+// How long a fleet stays in the world after its commander goes. It is a grace against a
+// dropped connection and a tax on quitting a fight: the hulls sit where they were left,
+// and anything that was shooting at them still is.
+const LOGOFF_GRACE = 120; // seconds
+
+// Everything about a ship that is not where it happens to be standing. Damage is per gun,
+// so the loadout and what is left of it are one list.
+const shipRec = (s) => ({
+    id: s.id,
+    h: hullKey(s.hull),
+    ore: s.ore,
+    hold: s.hold,
+    prio: s.prio,
+    ft: s.turrets.map((t) => [t.install, t.type, t.rot, t.hp]),
+});
+
+// Put a saved fleet back in the world. It arrives at the origin rather than where it was
+// left: a hull that reappears in the middle of a nest its owner logged out of is a worse
+// bargain than a walk back out. Ids are kept, because a conversation held mid-sentence
+// names the ship that started it.
+function restoreFleet(p) {
+    const fleet = [];
+    for (const rec of p.fleet ?? []) {
+        const lead = fleet[0];
+        const s = newShip(
+            p.id,
+            PLAYER_TEAM,
+            lead ? { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP } : {},
+            HULLS[rec.h] ?? CARRIER,
+        );
+        s.id = rec.id; // the id newShip just handed out is spent; the saved one is the ship
+        s.ore = rec.ore ?? 0;
+        s.hold = rec.hold ?? {};
+        s.prio = rec.prio ?? defaultPrio();
+        const saved = rec.ft ?? [];
+        s.turrets = fitTurrets(
+            s.hull,
+            saved.map(([install, type, rot]) => ({ install, type, rot })),
+        );
+        for (const t of s.turrets) {
+            const was = saved.find((f) => f[0] === t.install);
+            if (was && Number.isFinite(was[3])) t.hp = was[3];
+        }
+        fleet.push(s);
+    }
+    p.fleet = null;
+    return fleet;
+}
+
+// The shape every player has, whether they have just arrived or just been read off disk.
+// One place, so a loaded player cannot be missing a field that something iterating players
+// expects to find.
+function newPlayer(id, session) {
+    return {
+        id,
+        session,
+        ws: null,
+        name: `ship-${id}`,
+        score: 0,
+        walls: new Map(),
+        art: new Set(),
+        marks: new Set(),
+        moving: newMoving(),
+        ships: new Map(),
+        told: null,
+        busy: null,
+        talk: null, // who it is talking to, if it is talking to anybody
+        talks: {}, // conversationalist id -> stack of [module, state]
+        view: { x: 0, y: 0 },
+        left: null, // when their socket went, if they are away
+        fleet: null, // their ships, while the world is not holding them
+    };
+}
+
+function savePlayers() {
+    const live = [...players.values()].some((q) => q.ws?.readyState === 1);
+    if (!live && !playersDirty) return;
+    playersDirty = false;
+    const out = [];
+    for (const p of players.values()) {
+        if (!p.session) continue; // never named itself; nothing to come back to
+        const inWorld = [...ships].filter((s) => s.owner === p.id);
+        out.push({
+            session: p.session,
+            id: p.id,
+            name: p.name,
+            score: p.score,
+            // Mid-sentence is a place to be, and coming back to the same words is the
+            // whole of why the stack is plain JSON.
+            talk: p.talk,
+            busy: p.busy,
+            talks: p.talks,
+            fleet: inWorld.length ? inWorld.map(shipRec) : (p.fleet ?? []),
+        });
+    }
+    try {
+        fs.mkdirSync(WORLD_DIR, { recursive: true });
+        fs.writeFileSync(
+            playerFile(),
+            JSON.stringify({ v: 1, nextId, players: out }),
+        );
+    } catch {
+        /* unwritable store: the game runs, it just will not survive a restart */
+    }
+}
+
+function loadPlayers() {
+    let d;
+    try {
+        d = JSON.parse(fs.readFileSync(playerFile(), 'utf8'));
+    } catch {
+        return; // no file, or nothing readable in it: everybody is new
+    }
+    if (d.v !== 1)
+        return console.warn('players.json: unknown version; ignored');
+    // Ids are one counter shared by players, ships, rocks and ore. A restored ship keeps
+    // its id, so the counter has to start past every id this world has ever issued.
+    nextId = Math.max(nextId, d.nextId | 0);
+    for (const rec of d.players ?? []) {
+        const p = newPlayer(rec.id, rec.session);
+        p.name = rec.name ?? p.name;
+        p.score = rec.score ?? 0;
+        p.talks = rec.talks ?? {};
+        p.talk = rec.talk ?? null;
+        p.busy = rec.busy ?? null;
+        p.fleet = rec.fleet ?? [];
+        players.set(p.id, p);
+        sessions.set(p.session, p.id);
+    }
+}
+
+// Anybody whose grace has run out: their fleet goes into their record and out of the
+// world. Nothing owned by somebody who is not here may stay, because a crewed hull is what
+// makes terrain -- leaving them would hold every chunk any player had ever stood in
+// resident from boot, and the world would grow without bound.
+function sweepAbsent() {
+    const now = Date.now();
+    for (const p of players.values()) {
+        if (!p.left || now - p.left < LOGOFF_GRACE * 1000) continue;
+        p.left = null; // dealt with: from here the record is all there is of them
+        const fleet = [...ships].filter((s) => s.owner === p.id);
+        if (!fleet.length) continue;
+        p.fleet = fleet.map(shipRec);
+        for (const s of fleet) {
+            ships.delete(s);
+            if (s.enc) s.enc.members.delete(s);
+            // A grain held by a beam that no longer exists is a grain nobody can ever pick
+            // up again.
+            for (const o of ore)
+                if (o.held === s.id) {
+                    o.held = null;
+                    o.stamp = (o.stamp | 0) + 1;
+                }
+        }
+        playersDirty = true;
+    }
+}
+
+loadPlayers();
+setInterval(sweepAbsent, 1000);
+setInterval(savePlayers, 5000);
+
 wss.on('connection', (ws) => {
     let p = null;
 
     function join(session) {
         p = players.get(sessions.get(session));
         if (p) {
-            if (p.ws !== ws && p.ws.readyState === 1) p.ws.close(); // one socket per session
+            // A player read off disk has no socket at all, and a returning one may have a
+            // dead socket still hanging off them: only a live other socket is displaced.
+            if (p.ws !== ws && p.ws?.readyState === 1) p.ws.close();
             p.ws = ws;
         } else {
             const id = nextId++;
-            p = {
-                id,
-                ws,
-                name: `ship-${id}`,
-                score: 0,
-                walls: new Map(),
-                art: new Set(),
-                marks: new Set(),
-                moving: newMoving(),
-                ships: new Map(),
-                told: null,
-                busy: null,
-                talk: null, // who it is talking to, if it is talking to anybody
-                talks: {}, // conversationalist id -> stack of [module, state]
-                view: { x: 0, y: 0 },
-            };
+            p = newPlayer(id, session);
+            p.ws = ws;
             players.set(id, p);
             sessions.set(session, id);
         }
+        // Back within the grace, or back a week later -- either way they are here now.
+        p.left = null;
+        playersDirty = true;
         p.walls = new Map(); // a new socket has been sent no terrain yet
         p.art = new Set();
         p.marks = new Set();
@@ -4302,9 +4467,12 @@ wss.on('connection', (ws) => {
         // until it ends, so a reload drops you back where you were standing.
         p.busy = p.talk ? p.busy : null; // the interaction this session has open
 
-        // Returning players keep the fleet they left; a new commander is issued one. No ship
-        // is special -- they are simply the ships this player owns.
+        // Returning players keep the fleet they left -- still in the world if they were
+        // quick, put back at the origin from their record if they were not -- and a new
+        // commander is issued one. No ship is special: they are simply the ships this
+        // player owns.
         let fleet = [...ships].filter((s) => s.owner === p.id);
+        if (!fleet.length && p.fleet?.length) fleet = restoreFleet(p);
         if (!fleet.length)
             for (let i = 0; i < FLEET_SIZE; i++) {
                 // The rest of the fleet forms up on the first ship rather than being scattered
@@ -4353,6 +4521,15 @@ wss.on('connection', (ws) => {
         // rather than replayed, because the frame's own state is where it was up to.
         if (p.talk) playTalk(p, nextStep(p, p.talk.who, null, false));
     }
+
+    // Gone. Not necessarily for good: the fleet stays in the world until the grace runs
+    // out. A socket that is no longer this player's has already been replaced by a newer
+    // one, and its closing is not a departure.
+    ws.on('close', () => {
+        if (!p || p.ws !== ws) return;
+        p.left = Date.now();
+        playersDirty = true;
+    });
 
     ws.on('message', (raw) => {
         let m;
@@ -4548,7 +4725,7 @@ if (DEV) {
         pending = setTimeout(() => {
             console.log(`reload: ${file}`);
             for (const p of players.values())
-                if (p.ws.readyState === 1)
+                if (p.ws?.readyState === 1)
                     p.ws.send(JSON.stringify({ t: 'reload' }));
         }, 120);
     });
@@ -4685,6 +4862,7 @@ process.on('exit', stopTunnel);
 for (const sig of ['SIGINT', 'SIGTERM'])
     process.on(sig, () => {
         stopTunnel();
+        savePlayers();
         process.exit(0);
     });
 
