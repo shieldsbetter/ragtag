@@ -1748,10 +1748,11 @@ function rebuildWalls() {
 const pendingNests = [];
 
 // A ship sent to a marker carries the arming with it, and keeps it until it arrives or is
-// told to do something else. Arriving is not enough on its own: a session may have only one
-// interaction open at a time, so a second ship that gets there while the first is still
-// inside stays armed and triggers when the way is clear. Which is how one tap can yield two
-// interactions if you close the first quickly -- an oddity, and a fair one.
+// told to do something else. Arriving fires it, once, and clears it -- but a session shows
+// one sheet at a time, so firing into a session that already has one up does nothing.
+// Nothing is queued and closing the first does not let the second in: a sheet that opens by
+// itself, minutes later, because of a tap you have forgotten making, is worse than one that
+// never opens.
 function armedArrivals() {
     for (const s of ships) {
         if (!s.arm) continue;
@@ -1766,9 +1767,13 @@ function armedArrivals() {
             s.arm = null;
             continue;
         }
-        if (p.busy) continue; // still inside the last one: wait, stay armed
-        p.busy = m.key;
+        // Arriving is what fires the armed action, and it fires exactly once whatever
+        // comes of it. Opening the sheet is the part that can do nothing: a session shows
+        // one at a time, so a second ship that gets here while one is up has fired into a
+        // session that has no room for it.
         s.arm = null;
+        if (p.busy) continue;
+        p.busy = m.key;
         // Somebody to talk to first, if this mark has anybody -- and it is the frame that
         // says so rather than the kind, so a yard or a market can put a word in front of
         // its sheet without becoming a different sort of thing.

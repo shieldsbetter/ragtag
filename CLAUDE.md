@@ -172,9 +172,11 @@ player, because two people may be mid-sentence with the same person.
 matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
 an icon the marker carries itself. Tapping one sends the selection there _armed_; arriving
 inside the reach fires the interaction, and the server tells the client what to open. A
-session holds one interaction at a time, so a second ship arriving while the first is still
-inside stays armed and fires when the way clears — which is why one tap can yield two
-interactions if the first is closed quickly. Being ordered anywhere else disarms.
+Arriving fires the armed action once and clears it, whatever comes of it — but a session
+shows one sheet at a time, so a second ship arriving while the first is still up fires into
+a session with no room for it and nothing happens. Nothing is queued, and closing the first
+does not let the second in: a sheet that opens by itself long after the tap that armed it is
+worse than one that never opens. Being ordered anywhere else disarms.
 
 **Materials are ranked, and the higher one keeps the ground.** Matter of different kinds
 never merges, so where two kinds meet their outlines would otherwise cross in mid-air. The
