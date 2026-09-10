@@ -6,7 +6,7 @@ const OPTIONS = [
     ['Never mind.', { exit: true }],
 ];
 
-export default (draft, { choice }) => {
+export default (params, player, { choice }) => {
     if (choice !== null) return OPTIONS[choice]?.[1] ?? { exit: true };
     return { say: SAY, options: OPTIONS.map((o) => o[0]) };
 };

@@ -2341,6 +2341,38 @@ function stackFor(p, who, seed) {
     return p.talks[who];
 }
 
+// What a conversation knows about a player, which a frame's own bag cannot hold: that dies
+// when the frame pops, and the whole point of knowing something is to outlive the exchange
+// it was learned in.
+//
+// Keyed by (conversation, player) -- the module's name, not the conversationalist's id --
+// so every harbourmaster in the world reads and writes the one bag. That is the point
+// rather than a compromise: it is how one of them knows what you told another, and a
+// conversation that wants to remember something about a particular person can say so by
+// putting the id in the key it chooses.
+//
+// Small on purpose. It is a bag of flags and counts to branch on, not a place to keep a
+// player's business: ten keys is enough for what one conversation needs to know about you,
+// and a limit nobody reaches is a limit that never had to be explained.
+const STORE_KEYS = 10;
+const STORE_KEY = 50;
+const storeOk = (name, bag) => {
+    const keys = Object.keys(bag);
+    let why = null;
+    if (keys.length > STORE_KEYS) why = `over ${STORE_KEYS} keys`;
+    for (const k of keys) {
+        const v = bag[k];
+        if (k.length > STORE_KEY)
+            why = `key over ${STORE_KEY} characters: ${k}`;
+        else if (typeof v !== 'boolean' && !Number.isFinite(v))
+            why = `${k} is neither a boolean nor a number`;
+    }
+    // Dropped whole rather than trimmed. Half a write is a state nobody authored, and a
+    // conversation that quietly forgets is easier to find than one that half-remembers.
+    if (why) console.warn(`conversation store ${name}: ${why}; write dropped`);
+    return !why;
+};
+
 // Ask the stack what happens next. Walks down through frames with nothing to say, so a
 // pop is invisible to the client: it sees the first frame that actually speaks.
 //
@@ -2368,18 +2400,23 @@ function nextStep(p, who, choice, start) {
             fresh = true;
             continue;
         }
-        let step;
-        // immer: the holder mutates its own state and returns the step. What comes back
-        // from produce is the next state, replacing the frame's if anything changed.
-        frame[1] = produce(frame[1], (draft) => {
-            step = hold(draft, {
-                who,
-                player: p.id,
-                ship: p.talk?.ship,
-                choice: input,
-                start: fresh,
+        let step, store;
+        // immer, twice: the holder mutates its own frame's bag and what this conversation
+        // knows about this player, and returns the step. What comes back from each produce
+        // is the next state, replacing what was there if anything changed.
+        const name = frame[0];
+        frame[1] = produce(frame[1], (params) => {
+            store = produce(p.store[name] ?? {}, (player) => {
+                step = hold(params, player, {
+                    who,
+                    ship: p.talk?.ship,
+                    choice: input,
+                    start: fresh,
+                });
             });
         });
+        if (store !== p.store[name] && storeOk(name, store))
+            p.store[name] = store;
         if (!step?.pop) return step ?? { exit: true };
         stack.pop();
         input = null; // whoever is underneath is starting, not answering
@@ -4343,6 +4380,7 @@ function newPlayer(id, session) {
         busy: null,
         talk: null, // who it is talking to, if it is talking to anybody
         talks: {}, // conversationalist id -> stack of [module, state]
+        store: {}, // conversation name -> what that conversation knows about them
         view: { x: 0, y: 0 },
         left: null, // when their socket went, if they are away
         fleet: null, // their ships, while the world is not holding them
@@ -4367,6 +4405,7 @@ function savePlayers() {
             talk: p.talk,
             busy: p.busy,
             talks: p.talks,
+            store: p.store,
             fleet: inWorld.length ? inWorld.map(shipRec) : (p.fleet ?? []),
         });
     }
@@ -4398,6 +4437,7 @@ function loadPlayers() {
         p.name = rec.name ?? p.name;
         p.score = rec.score ?? 0;
         p.talks = rec.talks ?? {};
+        p.store = rec.store ?? {};
         p.talk = rec.talk ?? null;
         p.busy = rec.busy ?? null;
         p.fleet = rec.fleet ?? [];

@@ -1,9 +1,10 @@
 // The harbourmaster: the default frame under everybody's stack at the starting town.
 //
-// A conversation holder is one function. It is handed a draft of its own frame state --
-// immer's, so mutate it freely -- and returns the next step. Where it is in its own tree
-// is state like anything else, which is what makes resuming after a reconnect free: the
-// frame already knows.
+// A conversation holder is one function. It is handed two immer drafts -- `params`, its
+// own frame's state, and `player`, the little the person it belongs to remembers about
+// this player -- and returns the next step. Mutate either freely. Where it is in its own
+// tree is state like anything else, which is what makes resuming after a reconnect free:
+// the frame already knows. What outlives the frame goes in `player` instead.
 const NODES = {
     hello: {
         say:
@@ -38,18 +39,18 @@ const NODES = {
     },
 };
 
-export default (draft, { choice, start }) => {
+export default (params, player, { choice, start }) => {
     // Taken up -- walked up to, or uncovered by whatever was above popping -- so begin at
     // the top rather than in the middle of an exchange nobody remembers having. A
     // reconnect is not this: it arrives with start false and gets the node it was on.
-    if (start) draft.at = 'hello';
+    if (start) params.at = 'hello';
     else if (choice !== null) {
-        const opt = NODES[draft.at]?.options[choice];
+        const opt = NODES[params.at]?.options[choice];
         if (!opt) return { exit: true };
         if (opt[1].open || opt[1].exit) return opt[1];
-        draft.at = opt[1].at;
+        params.at = opt[1].at;
     }
-    const node = NODES[draft.at];
+    const node = NODES[params.at];
     if (!node) return { pop: true };
     return { say: node.say, options: node.options.map((o) => o[0]) };
 };
