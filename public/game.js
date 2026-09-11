@@ -560,11 +560,23 @@ canvas.addEventListener(
 const pointers = new Map();
 let dragged = 0,
     pressedAt = 0,
-    pinch = null;
+    pinch = null,
+    // Set the moment a second finger lands and held until the last one leaves. A pinch is
+    // one gesture from the first finger to the last, and nothing that happened along the
+    // way was a press: the hold armed by the first finger has to be called off, and the
+    // second finger coming up is not a tap.
+    pinched = false;
 
 canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size > 1) {
+        pinched = true;
+        // The hold was armed by the first finger and would otherwise mature under the
+        // pinch and clear the selection out from under it.
+        cancelHold();
+        pressedControl = null;
+    }
     if (pointers.size === 1) {
         dragged = 0;
         pressedAt = performance.now();
@@ -3040,6 +3052,20 @@ function release(e) {
     if (pointers.size < 2) pinch = null;
     if (!wasSingle) return;
     cancelHold();
+    // The end of a pinch, whatever the fingers did in between. Nothing about it is a tap,
+    // so the fleet is not ordered anywhere and the selection is left alone.
+    if (pinched) {
+        pinched = false;
+        pressedControl = null;
+        longFired = false;
+        dragged = 0;
+        if (rotating) {
+            sendFace(dragHeading, true);
+            rotating = false;
+            dragHeading = null;
+        }
+        return;
+    }
     if (BUZZ_TEST) haptic(200);
     if (pressedControl) {
         const ctl = pressedControl;
