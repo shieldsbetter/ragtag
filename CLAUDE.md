@@ -32,8 +32,12 @@ sluggishness is the game, not an obstacle to it.
 **Ships fight themselves.** Turrets acquire, lead and fire without orders, within their
 mounted arcs and line of sight. The player commands position and facing — where the
 guns point is a consequence of where the ship is, which is what makes positioning the
-skill. Gunnery is currently exact; imprecision is meant to be added deliberately, as a
-tunable, not inherited from sloppy maths.
+skill. Shellfire is exact; imprecision is added deliberately, as a tunable, and never
+inherited from sloppy maths. The first of it is the flak, which fires too fast to be
+modelling shells and does not try: the shot is resolved the moment it leaves, hit or miss
+on a roll against range, and what is drawn is a line that is gone again. A mount may also
+refuse everything but one kind of target — a property of the gun, not a preference, so it
+sits in the module and not in the priorities.
 
 **Terrain is the board.** Walls are obstacles ships cannot cross, and the eventual
 intent is biomes: open space with occasional structures at one extreme, narrow tunnels
@@ -146,7 +150,8 @@ is state like anything else, which is what makes resuming after a reconnect free
 **Frames are asked from the top, and one with nothing to say pops itself.** The bottom
 frame is authored by whatever offers the conversation; everything above it is an interrupt
 — something to be dealt with before the usual business. A step is `{say, options}`,
-`{pop}` (drop me, ask the next one down), `{exit}` (it ends, I stay) or `{open: markKey}`
+`{pop}` (drop me, ask the next one down), `{exit}` (it ends, I stay), `{push: name}` (put
+that conversation on top of me and ask it — how work is taken on) or `{open: markKey}`
 (hand off, and it ends). A quest finished somewhere else pops its own frame the next time
 it is asked, so nothing has to reach in and remove it, and the client never learns it was
 there. A module this build does not have is dropped with a warning rather than refusing
@@ -188,6 +193,26 @@ is the day it is a save file. A bag that breaks a rule is dropped whole with a w
 naming it, so a bad write costs the good writes made in the same breath — half a write is
 a state nobody authored. A generator's declaration is held to the same rules: it is author
 code too.
+
+**Work is a conversation with two more exports, and that is the whole of the difference.**
+`offer({from, src, player, place, kills, quests})` says whether it is on the table;
+`describe(quest, {kills})` writes the line it reads as in the quest sheet, so "(2
+remaining)" is worked out when it is asked rather than kept up to date by somebody. A
+conversation node reaches the rest with `gatherWork()`, which runs every predicate and
+drops anything already on this conversationalist's stack — so "you have that one already"
+is answered by the stack rather than by a flag. A predicate that throws says no: a mistake
+in one piece of work must not take down the conversation it was offered in. The giver puts
+it on the stack with `{push}` and says nothing more.
+
+**A quest is a thing in the world, not a note on a player.** They live in one bag in
+`quests.json` beside the mesh — `{id, kind, who, src, state, done}` — and `who` is a player
+today because that is the seam a shared quest widens: something a group is working on wants
+one record, not one apiece. What a quest _means_ stays in the module that gave it; the
+record only carries where it was taken and whatever state the giver put in it. Finished
+ones are kept rather than deleted, which is what lets `offer` answer "not twice at this
+yard" with no flag anywhere — and what makes "Any work?" the way to hand work in as well as
+to take it on. What a player has destroyed is tallied separately, on the player, by what it
+was and what it was part of (`kills.cache.nest`): a quest reads that, it does not own it.
 
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
