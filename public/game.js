@@ -965,7 +965,36 @@ const mapWho = mapEl.querySelector('.who');
 let atlas = null; // { grid, chunk, mats, tiles, art, places }
 // Zoomed in enough that two hulls of a squadron are further apart than a label is long.
 const MAP_LABEL_AT = 0.06;
-let mapCam = { x: 0, y: 0, k: 0.05 }; // world units -> pixels
+const MAP_K0 = 0.05; // the zoom it opens at
+let mapCam = { x: 0, y: 0, k: MAP_K0 }; // world units -> pixels
+
+// A grid, so a distance on the map is a distance you can name. One cell is a screen --
+// 1732 units, which is what is visible on every device however wide it is -- at the zoom
+// the map opens at. Cells step by tens from there: zoom in and the decade below fades up
+// while this one fades out, so whatever is under the eye is always about the size a cell
+// started at, and the number it stands for is always a round one.
+const MAP_CELL = 1732;
+const MAP_GRID_RGB = '86,124,160';
+
+// How big a cell would be on screen if it were exactly a screen across: what every level
+// is faded towards.
+function gridLevels(k) {
+    const f = Math.log10(MAP_K0 / k);
+    const n = Math.floor(f),
+        part = f - n;
+    // The two decades either side of the ideal, crossfading. At a round zoom one of them
+    // is exactly right and the other is invisible.
+    return [
+        [MAP_CELL * Math.pow(10, n), 1 - part],
+        [MAP_CELL * Math.pow(10, n + 1), part],
+    ];
+}
+
+// Round numbers read as round numbers: 1.7k rather than 1732.
+const gridLabel = (v) =>
+    v >= 1e6 ? `${+(v / 1e6).toPrecision(2)}M`
+    : v >= 1000 ? `${+(v / 1000).toPrecision(2)}k`
+    : `${Math.round(v)}`;
 
 function openMap() {
     mapEl.hidden = false;
@@ -1058,6 +1087,33 @@ function drawMap() {
         );
     }
     mapCtx.imageSmoothingEnabled = true;
+
+    // Over the ground and under everything that means something: the grid is for measuring
+    // by, not for looking at.
+    let strongest = MAP_CELL;
+    for (const [step, alpha] of gridLevels(k)) {
+        if (alpha > 0.5) strongest = step;
+        if (alpha <= 0.02 || step * k < 4) continue;
+        mapCtx.strokeStyle = `rgba(${MAP_GRID_RGB},${(alpha * 0.35).toFixed(3)})`;
+        mapCtx.lineWidth = 1;
+        mapCtx.beginPath();
+        const left = mapCam.x - w / 2 / k,
+            right = mapCam.x + w / 2 / k;
+        const top = mapCam.y - h / 2 / k,
+            bottom = mapCam.y + h / 2 / k;
+        for (let gx = Math.ceil(left / step) * step; gx <= right; gx += step) {
+            // Half a pixel, so a one-pixel line lands on a pixel rather than across two.
+            const px = Math.round(ox + gx * k) + 0.5;
+            mapCtx.moveTo(px, 0);
+            mapCtx.lineTo(px, h);
+        }
+        for (let gy = Math.ceil(top / step) * step; gy <= bottom; gy += step) {
+            const py = Math.round(oy + gy * k) + 0.5;
+            mapCtx.moveTo(0, py);
+            mapCtx.lineTo(w, py);
+        }
+        mapCtx.stroke();
+    }
     mapCtx.font = '12px ui-monospace, Menlo, Consolas, monospace';
     mapCtx.textBaseline = 'middle';
 
@@ -1102,7 +1158,10 @@ function drawMap() {
         mapCtx.fillStyle = '#cfeee2';
         mapCtx.fillText(q.name, x + 9, y);
     }
-    mapWho.textContent = `${Object.keys(atlas.tiles).length} chunks seen`;
+    // A grid nobody can put a number to is decoration, so the cell says what it is worth.
+    mapWho.textContent =
+        `${gridLabel(strongest)} grid \u00b7 ` +
+        `${Object.keys(atlas.tiles).length} chunks seen`;
 }
 
 mapEl.querySelector('.cancel').addEventListener('click', () => {
