@@ -373,12 +373,25 @@ Density is what is preserved, not the count — the same rock per unit of space 
 area twenty times larger, about 500 a ship. The band has to sit _inside_ the radius the
 stocking counts over, or rocks spawn where they are never counted and the field grows
 without bound. Ore is exempt on purpose: it comes and goes near the ship, because it
-is meant to be noticed. Nests are placed outside `AOI_R` entirely — in the skirt, never
-within the active radius — and build their ships at `NEST_R`, which is well past the 2200
-the widest screen can reach. Measured: built 2888 out, first visible 40 seconds later at 1273. Found at the rim, a nest was always there and you sailed up to it; the fighters were
-already flying when you came over the horizon. `ENC_KEEP` has to stay above `NEST_R` with
-room to spare, or a ship hovering between the two builds a nest, drops it for being
-unwatched, and builds it again for ever.
+is meant to be noticed.
+
+**An encounter declares how often and how far apart, and nothing else about where it
+goes.** `place: { per, apart }` on a script in `SCRIPTS` — how many of it a newly loaded
+chunk is worth, and how near another of its own kind it may stand — and the world does the
+rest: the roll, keeping the spot outside `AOI_R`, the spacing, not landing on a ship,
+giving up after a few tries, and the radius it builds at. `sd` is there for a kind that
+should arrive in clumps; left out, the count per chunk is Poisson, which is as steady as
+independent rolls get, and steadier than that is not on offer. The point of the block is
+that the next kind of opposition gets all of this right without knowing any of it exists.
+
+**Opposition is found, never delivered.** Everything is placed outside `AOI_R` — in the
+skirt, never within the active radius — and builds its ships at `ENC_BUILD`, which is well
+past the 2200 the widest screen can reach. Measured: built 2888 out, first visible forty
+seconds later at 1273. Found at the rim, a nest was always there and you sailed up to it;
+the fighters were already flying when you came over the horizon. `ENC_KEEP` has to stay
+above `ENC_BUILD` with room to spare, or a ship hovering between the two builds a nest,
+drops it for being unwatched, and builds it again for ever. Spacing rather than the roll is
+what governs density: most rolls land too near something and are dropped.
 
 **A "screen" is 1732 world units, and it is the unit to design against.** At full
 zoom-out the visible rectangle's half-diagonal is always `MAX_VIEW` (2200) on every
