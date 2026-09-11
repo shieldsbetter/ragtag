@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { performance } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -760,13 +761,10 @@ const placeName = (rng) => `${pick(PLACE_HEAD, rng)} ${pick(PLACE_TAIL, rng)}`;
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 8 };
+const SET_VERSION = { town: 9 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
-// Somebody to talk to, on the south wall opposite the market. The mark carries the root
-// of a tree; everything past it is decided as the tree is walked.
-const HARBOUR_A = Math.PI / 2;
 
 // The yard: staging built out from the cavern wall with two cranes over it.
 function townArt() {
@@ -905,10 +903,9 @@ function marketArt() {
 // the art, so a new set piece can offer a new thing to do without the client learning
 // about it first. What the interaction *is* stays on the server.
 
-// What the town knows about itself, shared by the harbourmaster, the foreman and whoever
-// is minding the stall. Declared here rather than written by whoever speaks first, because
-// it is true of the place before anybody has walked up to it: the harbourmaster's greeting
-// already says the lanes are closed, and this is that fact where all three can read it.
+// What the town knows about itself, shared by the foreman and whoever is minding the stall.
+// Declared here rather than written by whoever speaks first, because it is true of the place
+// before anybody has walked up to it.
 // Only keys the place does not already have are filled in, so a later version of the town
 // can add a fact without unlearning what has happened here -- and so a town that has
 // already been named keeps the name it has.
@@ -917,24 +914,7 @@ const townPlace = (rng) => ({ name: placeName(rng), lanesOpen: false });
 function townMarks() {
     const yard = wallFrame(YARD_A).inward(0, 280);
     const market = wallFrame(MARKET_A).inward(0, 300);
-    const harbour = wallFrame(HARBOUR_A).inward(0, 300);
     return [
-        {
-            key: 'town:harbour',
-            kind: 'talk',
-            // The role, and the frame that sits under everybody's stack. The module is
-            // named, not imported: this is data, and it ends up in save files.
-            who: 'harbourmaster',
-            talk: ['harbour', {}],
-            x: +harbour[0].toFixed(1),
-            y: +harbour[1].toFixed(1),
-            r: 260,
-            // A speech bubble, on the same 24-unit grid the other marks use.
-            icon: [
-                'M21 11.5a8.4 8.4 0 0 1-9 8.4 9.5 9.5 0 0 1-2.6-.4L4 21l1.5-4.4' +
-                    'A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z',
-            ],
-        },
         {
             key: 'town:yard',
             kind: 'refit',
@@ -2333,16 +2313,16 @@ const CONVERSATIONS = await (async () => {
     return found;
 })();
 
-// Each conversationalist is an instance, not a role: one town has one harbourmaster, but
-// the same set piece stamped somewhere else has its own. The set piece instance is the
+// Each conversationalist is an instance, not a role: one town has one foreman, but the
+// same set piece stamped somewhere else has its own. The set piece instance is the
 // site that laid it down, which is already how one cell's rock is told from a neighbour's.
 const whoId = (mark) =>
     `/setpieces/${mark.src ?? 'world'}/conversationalists/${mark.who}`;
 
 // Who somebody is -- a name, a gender and a face -- worked out from that id rather than
 // stored anywhere. The id already carries the site that laid them down, so one town's
-// harbourmaster is the same person on every restart while the next town's is somebody
-// else, and there is nothing to persist, migrate or invalidate. One pool of given names
+// foreman is the same person on every restart while the next town's is somebody else, and
+// there is nothing to persist, migrate or invalidate. One pool of given names
 // for all three genders: a name is not a second place to say what somebody is.
 const GIVEN = [
     'Vela',
@@ -2462,7 +2442,7 @@ function stackFor(p, who, mark) {
 // it was learned in.
 //
 // Keyed by (conversation, player) -- the module's name, not the conversationalist's id --
-// so every harbourmaster in the world reads and writes the one bag. That is the point
+// so every yard foreman in the world reads and writes the one bag. That is the point
 // rather than a compromise: it is how one of them knows what you told another, and a
 // conversation that wants to remember something about a particular person can say so by
 // putting the id in the key it chooses.
@@ -2511,6 +2491,161 @@ const siteBySrc = (src) =>
 // already" is answered by the stack rather than by a flag somebody has to remember to set.
 // A predicate that throws is a predicate that says no: an authoring mistake in one piece of
 // work must not take the conversation it was offered in down with it.
+// ---- the map ----
+//
+// What a player has seen, remembered as a picture rather than as the world. A wall only
+// exists while its chunk is loaded and merged, so a map of everywhere you have been cannot
+// be made of walls: it is sampled instead, MAP_GRID by MAP_GRID per chunk, and what is kept
+// is one bit per cell. Bounded however far anybody flies -- eight bytes a chunk, about 4KB
+// for twenty thousand units square -- and it costs nothing to send or to draw.
+//
+// Sampled again every time you come back, which is what makes a wall somebody blew a hole
+// in show the hole: the map is as old as your last visit and says nothing about what has
+// happened since.
+const MAP_GRID = 8; // samples across a chunk: 900/8 = 112 units a cell
+// A byte a cell, so the map can tell one kind of matter from another and will not have to
+// be widened again when there are twenty kinds: the town's blocking wall is not the same
+// thing as the rock around it, and a map that drew them alike would be hiding the one piece
+// of ground that behaves differently. Sixty-four bytes a chunk before it is stored, which
+// is the wrong number to care about -- see below.
+const MAP_MATS = ['rock', 'block']; // index + 1 is what goes in the cell; 0 is empty
+
+// A tile is stored once for everybody, under the hash of what it says. Two players who
+// have stood in the same place have seen the same ground, and an unexplored chunk is the
+// same sixty-four zero bytes for all of them -- so a player's map is a list of names, and
+// the pictures behind the names are world state like the mesh. Deflated on the way to disk,
+// where a tile is mostly one repeated byte; sent raw, because the socket deflates the whole
+// message anyway and a browser that had to inflate this would need a decompression stream
+// nobody else here depends on.
+const tiles = new Map(); // hash -> raw bytes
+let tilesDirty = false;
+const tileFile = () => path.join(WORLD_DIR, 'tiles.json');
+// Twelve hex characters: a thousand million tiles collide with probability around 1e-7,
+// and the whole point of the name is to be shorter than the thing it names.
+const tileName = (bytes) =>
+    crypto.createHash('sha1').update(bytes).digest('hex').slice(0, 12);
+
+function keepTile(bytes) {
+    const name = tileName(bytes);
+    if (!tiles.has(name)) {
+        tiles.set(name, bytes);
+        tilesDirty = true;
+    }
+    return name;
+}
+
+function saveTiles() {
+    if (!tilesDirty) return;
+    tilesDirty = false;
+    const out = {};
+    for (const [name, bytes] of tiles)
+        out[name] = zlib.deflateRawSync(bytes, { level: 9 }).toString('base64');
+    try {
+        fs.mkdirSync(WORLD_DIR, { recursive: true });
+        fs.writeFileSync(tileFile(), JSON.stringify({ v: 1, tiles: out }));
+    } catch {
+        /* unwritable store: the game runs, it just will not survive a restart */
+    }
+}
+
+function loadTiles() {
+    let d;
+    try {
+        d = JSON.parse(fs.readFileSync(tileFile(), 'utf8'));
+    } catch {
+        return; // no file: nobody has been anywhere yet
+    }
+    if (d.v !== 1) return console.warn('tiles.json: unknown version; ignored');
+    for (const [name, b64] of Object.entries(d.tiles ?? {}))
+        try {
+            tiles.set(name, zlib.inflateRawSync(Buffer.from(b64, 'base64')));
+        } catch {
+            /* one unreadable tile is one chunk drawn as unvisited */
+        }
+}
+const MAP_REACH = 2; // chunks either side of the one a hull is in, so about what it saw
+const MAP_PER_TICK = 2; // chunks sampled a tick, to keep a long jump off the tick budget
+const mapWork = []; // [player, cx, cy], drained a couple at a time
+
+// Where a hull has just arrived, and the ground around it. Queued on entering a chunk
+// rather than watched continuously: a ship sitting still has nothing new to show anybody,
+// and one under way crosses a chunk about every six seconds.
+function mapSweep() {
+    for (const s of ships) {
+        if (!crewed(s)) continue;
+        const p = players.get(s.owner);
+        if (!p) continue;
+        const key = chunkKey(chunkOf(s.x), chunkOf(s.y));
+        if (s.mapAt === key) continue;
+        s.mapAt = key;
+        const cx = chunkOf(s.x),
+            cy = chunkOf(s.y);
+        for (let dx = -MAP_REACH; dx <= MAP_REACH; dx++)
+            for (let dy = -MAP_REACH; dy <= MAP_REACH; dy++)
+                mapWork.push([p, cx + dx, cy + dy]);
+        // Somewhere with a name, near enough to have been read off the hull. Only set
+        // pieces have one, so this is a handful of sites rather than the whole mesh.
+        for (const q of sites) {
+            if (!q.bag?.name) continue;
+            if (Math.hypot(q.x - s.x, q.y - s.y) > CHUNK * (MAP_REACH + 0.5))
+                continue;
+            if (p.places.some((r) => r.name === q.bag.name && r.x === q.x))
+                continue;
+            p.places.push({
+                x: Math.round(q.x),
+                y: Math.round(q.y),
+                name: q.bag.name,
+            });
+            playersDirty = true;
+        }
+    }
+    for (let i = 0; i < MAP_PER_TICK && mapWork.length; i++) {
+        const [p, cx, cy] = mapWork.shift();
+        sampleChunk(p, cx, cy);
+    }
+    flushMapNews();
+}
+
+// One chunk, as a grid of "is there matter here". `ensure` false throughout: the map may
+// only ever record ground that already exists, or looking at it would call the world into
+// being ahead of anybody going there.
+function sampleChunk(p, cx, cy) {
+    const bytes = Buffer.alloc(MAP_GRID * MAP_GRID);
+    const step = CHUNK / MAP_GRID;
+    for (let gy = 0; gy < MAP_GRID; gy++)
+        for (let gx = 0; gx < MAP_GRID; gx++) {
+            const x = cx * CHUNK + (gx + 0.5) * step,
+                y = cy * CHUNK + (gy + 0.5) * step;
+            const mat = matterAt(x, y);
+            bytes[gy * MAP_GRID + gx] = mat ? MAP_MATS.indexOf(mat) + 1 : 0;
+        }
+    const key = chunkKey(cx, cy);
+    const was = p.map[key];
+    const name = keepTile(bytes);
+    if (was === name) return; // the ground has not changed since last time
+    p.map[key] = name;
+    playersDirty = true;
+    // Somebody with the map open is watching this happen. Sent as it is sampled rather
+    // than fetched again: a flight reveals a handful of chunks at a time, and asking for
+    // the whole atlas every few seconds to learn about four of them is the wrong trade.
+    if (p.mapOn) (p.mapNew ??= new Map()).set(key, name);
+}
+
+// Whatever has been sampled since the last tick, for the people looking at it.
+function flushMapNews() {
+    for (const p of players.values()) {
+        if (!p.mapNew?.size || p.ws?.readyState !== 1) continue;
+        const fresh = Object.fromEntries(p.mapNew);
+        p.mapNew = null;
+        const art = {};
+        for (const name of new Set(Object.values(fresh))) {
+            const bytes = tiles.get(name);
+            if (bytes) art[name] = bytes.toString('base64');
+        }
+        p.ws.send(JSON.stringify({ t: 'map+', tiles: fresh, art }));
+    }
+}
+
 // ---- quests ----
 //
 // A quest is a thing in the world rather than a note on a player: one bag of them, keyed by
@@ -2861,6 +2996,58 @@ function trade(s, buy, sell) {
     for (const [t, n] of Object.entries(buying))
         s.hold[t] = (s.hold[t] || 0) + n;
     for (const t of Object.keys(s.hold)) if (!s.hold[t]) delete s.hold[t];
+    return null;
+}
+
+// Cargo goes between two hulls of your own, both ways at once, and costs nothing: it is all
+// yours already. They have to be alongside each other, though -- a fleet whose holds are one
+// pool wherever the hulls are is a fleet that never has to sail anything home, and the walk
+// back with a full hold is most of what a hold is for.
+// Alongside, give or take: a squadron in loose formation can pass cargo without being
+// nudged into each other, and it is still a rendezvous rather than a fleet-wide pool. With
+// the camera between them, two hulls this far apart are each 450 from the centre and so
+// well inside the 866 that is on screen on every device -- you can watch both ends of the
+// transfer at once, whatever you are playing on.
+const TRANSFER_REACH = 900;
+
+function moveCargo(a, b, give, take) {
+    if (!a || !b || a === b) return 'no such ship';
+    if (Math.hypot(a.x - b.x, a.y - b.y) > TRANSFER_REACH)
+        return 'too far apart';
+    const count = (o) => {
+        const out = {};
+        for (const [t, n] of Object.entries(o || {})) {
+            const k = Math.floor(Number(n));
+            if (!Number.isFinite(k) || k < 0 || k > 99999) return null;
+            // Ore is not a module and is carried as a number, but it moves like one.
+            if (k && t !== 'ore' && !MODULES[t]) return null;
+            if (k) out[t] = k;
+        }
+        return out;
+    };
+    const out = count(give),
+        back = count(take);
+    if (!out || !back) return 'bad basket';
+    const has = (q, t) => (t === 'ore' ? q.ore : q.hold[t] || 0);
+    for (const [t, n] of Object.entries(out))
+        if (has(a, t) < n) return `no ${n} ${t} aboard`;
+    for (const [t, n] of Object.entries(back))
+        if (has(b, t) < n) return `no ${n} ${t} aboard`;
+
+    const shift = (from, to, what) => {
+        for (const [t, n] of Object.entries(what)) {
+            if (t === 'ore') {
+                from.ore -= n;
+                to.ore += n;
+                continue;
+            }
+            from.hold[t] = (from.hold[t] || 0) - n;
+            to.hold[t] = (to.hold[t] || 0) + n;
+            if (!from.hold[t]) delete from.hold[t];
+        }
+    };
+    shift(a, b, out);
+    shift(b, a, back);
     return null;
 }
 
@@ -3242,6 +3429,23 @@ function nearbyWalls(x, y, ensure = false) {
                     out.push(w.rings);
                 }
     return out;
+}
+
+// What kind of matter is standing at a point, or null. Ranked, so where two kinds abut the
+// harder one is what the map records -- the town's own wall should not read as rock because
+// a boulder is leaning on it.
+function matterAt(x, y) {
+    let best = null;
+    if (wallsDirty) rebuildWalls();
+    const cx0 = chunkOf(x),
+        cy0 = chunkOf(y);
+    for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
+        for (let cy = cy0 - 1; cy <= cy0 + 1; cy++)
+            for (const w of wallBins.get(chunkKey(cx, cy)) || []) {
+                if (best && MAT_RANK[w.mat] <= MAT_RANK[best]) continue;
+                if (pointInWall(w.rings, x, y)) best = w.mat;
+            }
+    return best;
 }
 
 // Blocking matter near a point: the walls asteroids cannot pass. Everything collides with
@@ -4483,6 +4687,7 @@ function step(dt) {
     // the next tick rather than extending this one.
     for (const [cx, cy] of pendingNests.splice(0)) trySpawnNest(cx, cy);
     armedArrivals();
+    mapSweep();
     manageEncounters(dt);
     bleed(dt);
     for (const s of ships) {
@@ -4786,6 +4991,10 @@ function newPlayer(id, session) {
         talks: {}, // conversationalist id -> stack of [module, state]
         store: {}, // conversation name -> what that conversation knows about them
         kills: {}, // what they have destroyed: hull -> encounter kind -> how many
+        map: {}, // chunk key -> what the ground there looked like when last seen
+        mapOn: false, // looking at it right now, so worth telling about changes
+        mapNew: null, // ...and what has changed since we last did
+        places: [], // named set pieces they have been near
         view: { x: 0, y: 0 },
         left: null, // when their socket went, if they are away
         fleet: null, // their ships, while the world is not holding them
@@ -4812,6 +5021,8 @@ function savePlayers() {
             talks: p.talks,
             store: p.store,
             kills: p.kills,
+            map: p.map,
+            places: p.places,
             fleet: inWorld.length ? inWorld.map(shipRec) : (p.fleet ?? []),
         });
     }
@@ -4845,6 +5056,8 @@ function loadPlayers() {
         p.talks = rec.talks ?? {};
         p.store = rec.store ?? {};
         p.kills = rec.kills ?? {};
+        p.map = rec.map ?? {};
+        p.places = rec.places ?? [];
         p.talk = rec.talk ?? null;
         p.busy = rec.busy ?? null;
         p.fleet = rec.fleet ?? [];
@@ -4882,9 +5095,11 @@ function sweepAbsent() {
 
 loadPlayers();
 loadQuests();
+loadTiles();
 setInterval(sweepAbsent, 1000);
 setInterval(savePlayers, 5000);
 setInterval(saveQuests, 5000);
+setInterval(saveTiles, 5000);
 
 wss.on('connection', (ws) => {
     let p = null;
@@ -4965,6 +5180,7 @@ wss.on('connection', (ws) => {
                 // What a shell does, which is the one thing about a gun that is not in the
                 // module table: the readout would otherwise have to guess at it.
                 shellDamage: BULLET_DAMAGE,
+                transferReach: TRANSFER_REACH,
                 wreck: WRECK_DEPTH,
             }),
         );
@@ -5079,6 +5295,49 @@ wss.on('connection', (ws) => {
                     }),
                 );
             }
+        } else if (m.t === 'transfer' && m.give && m.take) {
+            const a = [...ships].find(
+                (s) => s.owner === p.id && s.id === m.ship,
+            );
+            const b = [...ships].find(
+                (s) => s.owner === p.id && s.id === m.with,
+            );
+            // Answered on the market's own channel: the sheet is the market's, and what it
+            // does with a yes -- empty the basket and stay open -- is what this wants too.
+            const why = moveCargo(a, b, m.give, m.take);
+            ws.send(
+                JSON.stringify({
+                    t: 'trade',
+                    ship: m.ship,
+                    ok: !why,
+                    ...(why ? { why } : {}),
+                }),
+            );
+        } else if (m.t === 'map-off') {
+            p.mapOn = false;
+            p.mapNew = null;
+        } else if (m.t === 'map') {
+            // Only while it is open: the increments are worth nothing to a client that is
+            // not drawing them, and it will ask for the whole thing again when it is.
+            p.mapOn = true;
+            // Asked for rather than pushed: it is a few kilobytes that only matter when
+            // somebody is looking at it, and it does not change while they are.
+            const art = {};
+            for (const name of new Set(Object.values(p.map))) {
+                const bytes = tiles.get(name);
+                if (bytes) art[name] = bytes.toString('base64');
+            }
+            ws.send(
+                JSON.stringify({
+                    t: 'map',
+                    grid: MAP_GRID,
+                    mats: MAP_MATS,
+                    chunk: CHUNK,
+                    tiles: p.map, // chunk -> the name of what was seen there
+                    art, // and the pictures those names stand for
+                    places: p.places,
+                }),
+            );
         } else if (m.t === 'face' && Number.isFinite(m.a)) {
             for (const s of ships)
                 if (s.owner === p.id && s.id === m.ship) s.heading = m.a;
@@ -5318,6 +5577,7 @@ for (const sig of ['SIGINT', 'SIGTERM'])
         stopTunnel();
         savePlayers();
         saveQuests();
+        saveTiles();
         process.exit(0);
     });
 

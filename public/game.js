@@ -287,6 +287,7 @@ ws.onmessage = (e) => {
         if (m.prioMax) prioMax = m.prioMax;
         if (m.wreck) wreckDepth = m.wreck;
         if (m.shellDamage) shellDamage = m.shellDamage;
+        if (m.transferReach) transferReach = m.transferReach;
         return;
     }
     if (m.t === 'reload') {
@@ -350,6 +351,35 @@ ws.onmessage = (e) => {
     }
     // Said when it changes and not otherwise: taking work, finishing it, or killing the
     // thing it was about.
+    if (m.t === 'map') {
+        atlas = {
+            grid: m.grid,
+            chunk: m.chunk,
+            mats: m.mats,
+            tiles: m.tiles, // chunk -> the name of what was seen there
+            // Decoded once on arrival rather than per repaint: the same handful of
+            // pictures stands behind hundreds of chunks.
+            art: Object.fromEntries(
+                Object.entries(m.art || {}).map(([k, v]) => [k, atob(v)]),
+            ),
+            places: m.places,
+        };
+        tileArt.clear(); // a new build could mean new colours for the same names
+        drawMap();
+        return;
+    }
+    // Ground sampled while the map is open, which is most of the reason to have it open on
+    // the way somewhere. Merged rather than replacing: a name means one picture forever, so
+    // nothing already drawn can have gone stale.
+    if (m.t === 'map+') {
+        if (atlas) {
+            Object.assign(atlas.tiles, m.tiles || {});
+            for (const [k, v] of Object.entries(m.art || {}))
+                atlas.art[k] = atob(v);
+            drawMap();
+        }
+        return;
+    }
     if (m.t === 'quests') {
         questLines = m.list || [];
         drawQuests();
@@ -887,8 +917,16 @@ const questsToggle = document.getElementById('questsToggle');
 let questLines = [];
 
 function drawQuests() {
-    questsToggle.hidden = !questLines.length;
-    if (!questLines.length) questsEl.hidden = true; // the last one finished while it was open
+    // Always there, empty or not. A button that comes and goes is a button you cannot learn
+    // the position of, and "have I anything in hand?" is a question the log should answer
+    // rather than one you answer by noticing the way in has disappeared.
+    if (!questLines.length) {
+        const none = document.createElement('li');
+        none.className = 'none';
+        none.textContent = 'You currently have no quests.';
+        questsList.replaceChildren(none);
+        return;
+    }
     questsList.replaceChildren(
         ...questLines.map((q) => {
             const li = document.createElement('li');
@@ -901,6 +939,242 @@ function drawQuests() {
 questsToggle.addEventListener('click', () => {
     questsEl.hidden = false;
 });
+
+// ---- the map ----
+//
+// Everywhere you have been, and nothing else. The server samples the ground as a hull flies
+// over it and keeps one bit a cell; what arrives here is that picture, not the world, so a
+// wall somebody has since blown a hole in is drawn whole until you go back and look. Fog is
+// not drawn: it is simply the ground that was never sampled, and the background it leaves.
+const mapEl = document.getElementById('map');
+const mapCanvas = mapEl.querySelector('canvas');
+const mapCtx = mapCanvas.getContext('2d', { willReadFrequently: true });
+const mapWho = mapEl.querySelector('.who');
+let atlas = null; // { grid, chunk, mats, tiles, art, places }
+// Zoomed in enough that two hulls of a squadron are further apart than a label is long.
+const MAP_LABEL_AT = 0.06;
+let mapCam = { x: 0, y: 0, k: 0.05 }; // world units -> pixels
+
+function openMap() {
+    mapEl.hidden = false;
+    // Centred on the fleet, because a map that opens on the origin is a map you have to
+    // find yourself on before it is worth anything.
+    const lead = (fleet || [])[0];
+    if (lead) mapCam = { ...mapCam, x: lead.x, y: lead.y };
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'map' }));
+    sizeMap();
+}
+
+function sizeMap() {
+    const r = mapCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    mapCanvas.width = Math.max(1, Math.round(r.width * dpr));
+    mapCanvas.height = Math.max(1, Math.round(r.height * dpr));
+    mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawMap();
+}
+
+// One colour a material. Ground that was looked at and found empty is drawn too, a shade up
+// from the fog: having been somewhere and found nothing is knowing something.
+const MAP_SEEN = '#0b1422';
+const MAP_MAT = { rock: '#2f5f7d', block: '#7a6a4a' };
+
+// A tile is painted once and kept under its name. The name is the hash of what it says, so
+// two chunks that name the same picture are the same picture -- one small canvas serves
+// every chunk that has ever looked like that, and it stays valid for the life of the page
+// because a different picture would have a different name.
+//
+// Drawing the map is then one drawImage a chunk rather than sixty-four fills, which is what
+// makes panning and zooming cost nothing: the earlier version repainted every cell on every
+// frame of a drag.
+const tileArt = new Map(); // name -> an 8x8 canvas, one pixel a cell
+
+function tileCanvas(name) {
+    const had = tileArt.get(name);
+    if (had) return had;
+    const bin = atlas.art[name];
+    if (!bin) return null;
+    const grid = atlas.grid;
+    const c = document.createElement('canvas');
+    c.width = c.height = grid;
+    const g = c.getContext('2d');
+    // Ground that was looked at and found empty is painted too, a shade up from the fog:
+    // having been somewhere and found nothing is knowing something.
+    g.fillStyle = MAP_SEEN;
+    g.fillRect(0, 0, grid, grid);
+    for (let i = 0; i < grid * grid; i++) {
+        const v = bin.charCodeAt(i);
+        if (!v) continue;
+        g.fillStyle = MAP_MAT[(atlas.mats || [])[v - 1]] || MAP_MAT.rock;
+        g.fillRect(i % grid, (i / grid) | 0, 1, 1);
+    }
+    tileArt.set(name, c);
+    return c;
+}
+
+function drawMap() {
+    if (mapEl.hidden) return;
+    const w = mapCanvas.width / (window.devicePixelRatio || 1),
+        h = mapCanvas.height / (window.devicePixelRatio || 1);
+    mapCtx.fillStyle = '#060a10';
+    mapCtx.fillRect(0, 0, w, h);
+    if (!atlas) return;
+    const k = mapCam.k;
+    const ox = w / 2 - mapCam.x * k,
+        oy = h / 2 - mapCam.y * k;
+    const span = atlas.chunk * k;
+    // Nearest-neighbour, because a cell is a fact and not a gradient: smoothed, the map
+    // would imply a boundary nobody sampled.
+    mapCtx.imageSmoothingEnabled = false;
+    for (const [key, name] of Object.entries(atlas.tiles)) {
+        const [cx, cy] = key.split(',').map(Number);
+        const dx = ox + cx * span,
+            dy = oy + cy * span;
+        if (dx > w || dy > h || dx + span < 0 || dy + span < 0) continue;
+        const art = tileCanvas(name);
+        if (!art) continue;
+        // Rounded out rather than laid down at fractions: neighbouring chunks share an
+        // edge, and half a pixel of rounding either side of it is a visible seam.
+        const x0 = Math.floor(dx),
+            y0 = Math.floor(dy);
+        mapCtx.drawImage(
+            art,
+            x0,
+            y0,
+            Math.ceil(dx + span) - x0,
+            Math.ceil(dy + span) - y0,
+        );
+    }
+    mapCtx.imageSmoothingEnabled = true;
+    mapCtx.font = '12px ui-monospace, Menlo, Consolas, monospace';
+    mapCtx.textBaseline = 'middle';
+
+    // Hulls, as they are this instant. Only what the client has been told about, which is
+    // your own fleet wherever it is and anybody else's near enough to be streamed -- the
+    // map shows what you know, not what is there.
+    for (const s of allShips || []) {
+        const own = s.owner === myId;
+        const x = ox + s.x * k,
+            y = oy + s.y * k;
+        // Whose side it is on, not whose it is -- the settlement's own guns belong to
+        // nobody and would otherwise be drawn in the colour reserved for the enemy, which
+        // is the same mistake the name labels made on the board.
+        mapCtx.fillStyle =
+            own ? '#7fe8c8'
+            : s.f ? '#9fd4ff'
+            : '#ff6b8a';
+        mapCtx.beginPath();
+        mapCtx.arc(x, y, own ? 4.5 : 2.5, 0, Math.PI * 2);
+        mapCtx.fill();
+        if (own) {
+            mapCtx.strokeStyle = '#060a10';
+            mapCtx.lineWidth = 1.5;
+            mapCtx.stroke();
+        }
+        // A name on your own hulls, once there is room between them for one to be read.
+        if (own && k > MAP_LABEL_AT) {
+            mapCtx.fillStyle = '#7fe8c8';
+            mapCtx.fillText(`ship ${s.id}`, x + 8, y);
+        }
+    }
+
+    // Somewhere with a name. A dot and the name beside it, in screen pixels: a label that
+    // scaled with the zoom would be unreadable at one end and cover the map at the other.
+    for (const q of atlas.places || []) {
+        const x = ox + q.x * k,
+            y = oy + q.y * k;
+        mapCtx.fillStyle = '#5ff0b0';
+        mapCtx.beginPath();
+        mapCtx.arc(x, y, 4, 0, Math.PI * 2);
+        mapCtx.fill();
+        mapCtx.fillStyle = '#cfeee2';
+        mapCtx.fillText(q.name, x + 9, y);
+    }
+    mapWho.textContent = `${Object.keys(atlas.tiles).length} chunks seen`;
+}
+
+mapEl.querySelector('.cancel').addEventListener('click', () => {
+    mapEl.hidden = true;
+    // Nothing to send while nobody is looking: the server only pushes what it samples to
+    // the people with it open.
+    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'map-off' }));
+});
+document.getElementById('mapToggle').addEventListener('click', openMap);
+window.addEventListener('resize', () => {
+    if (!mapEl.hidden) sizeMap();
+});
+
+// Drag to scroll, wheel or pinch to zoom -- the board's gestures, on the board's terms, so
+// there is nothing new to learn for a second thing that is a map.
+let mapDrag = null;
+const mapPoints = new Map();
+mapCanvas.addEventListener('pointerdown', (e) => {
+    mapCanvas.setPointerCapture(e.pointerId);
+    mapPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    mapDrag = { x: e.clientX, y: e.clientY };
+});
+mapCanvas.addEventListener('pointermove', (e) => {
+    if (!mapPoints.has(e.pointerId)) return;
+    const was = [...mapPoints.values()];
+    mapPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const now = [...mapPoints.values()];
+    if (now.length >= 2) {
+        const span = (a) => Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y);
+        const from = span(was),
+            to = span(now);
+        if (from > 8 && to > 8) {
+            const r = mapCanvas.getBoundingClientRect();
+            mapZoomAt(
+                (now[0].x + now[1].x) / 2 - r.left,
+                (now[0].y + now[1].y) / 2 - r.top,
+                to / from,
+            );
+        }
+        mapDrag = null;
+        drawMap();
+        return;
+    }
+    if (!mapDrag) return;
+    mapCam.x -= (e.clientX - mapDrag.x) / mapCam.k;
+    mapCam.y -= (e.clientY - mapDrag.y) / mapCam.k;
+    mapDrag = { x: e.clientX, y: e.clientY };
+    drawMap();
+});
+const mapUp = (e) => {
+    mapPoints.delete(e.pointerId);
+    if (!mapPoints.size) mapDrag = null;
+};
+mapCanvas.addEventListener('pointerup', mapUp);
+mapCanvas.addEventListener('pointercancel', mapUp);
+mapCanvas.addEventListener(
+    'wheel',
+    (e) => {
+        e.preventDefault();
+        const r = mapCanvas.getBoundingClientRect();
+        // The board's own law, so a wheel means the same thing in both places: scaled by
+        // how far the wheel actually turned rather than a fixed step a notch, which on a
+        // trackpad is twenty notches and a map that has flown off.
+        mapZoomAt(
+            e.clientX - r.left,
+            e.clientY - r.top,
+            Math.exp(-e.deltaY * 0.0015),
+        );
+        drawMap();
+    },
+    { passive: false },
+);
+
+// Zoom about a point, so what is under the finger stays under the finger. Far enough out
+// to see a morning's flying, close enough in to read a tunnel.
+function mapZoomAt(px, py, by) {
+    const w = mapCanvas.width / (window.devicePixelRatio || 1),
+        h = mapCanvas.height / (window.devicePixelRatio || 1);
+    const wx = mapCam.x + (px - w / 2) / mapCam.k,
+        wy = mapCam.y + (py - h / 2) / mapCam.k;
+    mapCam.k = Math.max(0.004, Math.min(0.6, mapCam.k * by));
+    mapCam.x = wx - (px - w / 2) / mapCam.k;
+    mapCam.y = wy - (py - h / 2) / mapCam.k;
+}
 questsEl.querySelector('.cancel').addEventListener('click', () => {
     questsEl.hidden = true;
 });
@@ -969,7 +1243,8 @@ const PANELS = [
 let openTab = 0;
 let prioMax = 8,
     wreckDepth = 150,
-    shellDamage = 20;
+    shellDamage = 20,
+    transferReach = 900;
 
 let builtKey = '';
 let gunEls = null,
@@ -1023,6 +1298,26 @@ function paintGuns(s) {
         // A class, not the hidden attribute: the UA stylesheet's [hidden] rule does not
         // reach into SVG, so the wrench stayed on every row while claiming to be hidden.
         g.cell.classList.toggle('fixing', s.rp === g.i);
+    }
+}
+
+// Which of the fleet is close enough to hand anything to, refreshed rather than rebuilt:
+// the panel is only rebuilt when its shape changes, and where the ships are is not part of
+// its shape -- so a list built once said "too far" long after they had closed up, and
+// worse, said nothing long after they had drifted.
+function syncPicks() {
+    for (const pick of detailsBody.querySelectorAll('.pick')) {
+        const from = (fleet || []).find((q) => q.id === +pick.dataset.from);
+        for (const b of pick.children) {
+            const to = (fleet || []).find((q) => q.id === +b.dataset.to);
+            const far =
+                !from ||
+                !to ||
+                Math.hypot(to.x - from.x, to.y - from.y) > transferReach;
+            if (b.disabled === far) continue;
+            b.disabled = far;
+            b.textContent = `ship ${b.dataset.to}${far ? ' \u2014 too far' : ''}`;
+        }
     }
 }
 
@@ -1145,6 +1440,44 @@ function buildDetails(ships) {
                 cargoEl = hold.querySelector('b');
                 gunShip = s.id;
                 body.append(hold);
+                // A way to move cargo to another hull, on the line the cargo is listed
+                // under. Only when there is another hull to move it to: one ship is a fleet
+                // with nothing to say to itself.
+                const rest = (fleet || []).filter((q) => q.id !== s.id);
+                if (rest.length) {
+                    const swap = document.createElement('button');
+                    swap.type = 'button';
+                    swap.className = 'swap';
+                    swap.setAttribute(
+                        'aria-label',
+                        'move cargo to another ship',
+                    );
+                    swap.textContent = '\u21c4';
+                    const pick = document.createElement('nav');
+                    pick.className = 'pick';
+                    pick.hidden = true;
+                    pick.dataset.from = s.id;
+                    for (const q of rest) {
+                        const b = document.createElement('button');
+                        b.type = 'button';
+                        // Cargo goes across a gap you could shout over, so a hull that is
+                        // not alongside is shown and refused rather than left out: "where
+                        // is my other ship" is a question the list should answer. Whether it
+                        // is alongside is decided every frame, not here.
+                        b.dataset.to = q.id;
+                        b.textContent = `ship ${q.id}`;
+                        b.addEventListener('click', () => {
+                            pick.hidden = true;
+                            openTransfer(s.id, q.id);
+                        });
+                        pick.append(b);
+                    }
+                    swap.addEventListener('click', () => {
+                        pick.hidden = !pick.hidden;
+                    });
+                    hold.append(swap);
+                    body.append(pick);
+                }
                 // What the beams have brought in and the yard has not yet fitted. The refit sheet
                 // shows the same stock, but only while it is open and only for one hull -- this is
                 // where you look to find out whether it is worth going home.
@@ -1245,6 +1578,7 @@ const marketHave = marketEl.querySelector('.cost i');
 const marketShort = marketEl.querySelector('.cost .short');
 const marketOk = marketEl.querySelector('.confirm');
 const marketWhy = marketEl.querySelector('.why');
+const marketTitle = marketEl.querySelector('.who');
 let market = { stock: [], resale: 0.45 };
 let trading = null; // { ship, buy, sell }
 
@@ -1256,10 +1590,26 @@ function openMarket(id) {
     drawMarket();
 }
 
+// The same sheet, moving things between two hulls of your own instead of buying them. A
+// basket both ways, nothing changes hands until CONFIRM, and nothing is priced: it is all
+// yours already, and charging a fleet to shift its own cargo would only teach people to
+// carry it in the hold of whichever ship happens to be going.
+function openTransfer(a, b) {
+    if (!(fleet || []).some((q) => q.id === a)) return;
+    if (!(fleet || []).some((q) => q.id === b)) return;
+    trading = { ship: a, with: b, buy: {}, sell: {} };
+    marketEl.hidden = false;
+    drawMarket();
+}
+
 function closeMarket() {
+    const swap = trading?.with !== undefined;
     trading = null;
     marketEl.hidden = true;
-    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'interact-done' }));
+    // Moving your own cargo was never an interaction the server opened, so there is nothing
+    // to tell it about closing one.
+    if (!swap && ws.readyState === 1)
+        ws.send(JSON.stringify({ t: 'interact-done' }));
 }
 
 const buyPrice = (t) => (modules[t] || {}).price || 0;
@@ -1272,12 +1622,21 @@ function marketNet() {
     return net;
 }
 
-function marketRow(type, price, count, max, onStep) {
+// `price` null is a row for something that is not being bought: the column is still there,
+// so the two sides line up, and it simply says nothing.
+//
+// `have` is how many of it the ship this column draws from is carrying -- for sale, that is
+// your own hold, which is the answer to "do I already have one of these". It is what is
+// aboard now, not what is aboard once the basket goes through: the stepper beside it is
+// already saying what you are about to do.
+function marketRow(type, price, count, max, onStep, have) {
     const row = document.createElement('div');
     row.className = 'row';
     row.innerHTML =
-        `${moduleSvg(type, 16)}<span class="nm">${modTitle(type)}</span>` +
-        `<span class="pr">${price}</span>`;
+        `${type === 'ore' ? oreSvg(16) : moduleSvg(type, 16)}` +
+        `<span class="nm">${type === 'ore' ? 'Ore' : modTitle(type)}` +
+        `<span class="qty">(${have})</span></span>` +
+        `<span class="pr">${price === null ? '' : price}</span>`;
     const less = document.createElement('button');
     less.type = 'button';
     less.textContent = '\u2212';
@@ -1299,6 +1658,11 @@ function drawMarket() {
     if (!trading) return;
     const s = (fleet || []).find((q) => q.id === trading.ship);
     if (!s) return closeMarket();
+    if (trading.with !== undefined) return drawTransfer(s);
+    marketTitle.hidden = true;
+    marketCost.parentElement.hidden = false;
+    marketEl.querySelector('.buy h3').textContent = 'FOR SALE';
+    marketEl.querySelector('.sell h3').textContent = 'YOUR HOLD';
     const net = marketNet();
     const have = s.or || 0;
     const short = net > have;
@@ -1321,8 +1685,13 @@ function drawMarket() {
     buyRows.textContent = '';
     for (const t of market.stock)
         buyRows.append(
-            marketRow(t, buyPrice(t), trading.buy[t] || 0, 99, (d) =>
-                step(trading.buy, t, d, 99),
+            marketRow(
+                t,
+                buyPrice(t),
+                trading.buy[t] || 0,
+                99,
+                (d) => step(trading.buy, t, d, 99),
+                s.hold?.[t] || 0,
             ),
         );
 
@@ -1333,8 +1702,13 @@ function drawMarket() {
     const carried = Object.entries(s.hold || {}).filter(([, n]) => n > 0);
     for (const [t, n] of carried)
         sellRows.append(
-            marketRow(t, sellPrice(t), trading.sell[t] || 0, n, (d) =>
-                step(trading.sell, t, d, n),
+            marketRow(
+                t,
+                sellPrice(t),
+                trading.sell[t] || 0,
+                n,
+                (d) => step(trading.sell, t, d, n),
+                n,
             ),
         );
     if (!carried.length) {
@@ -1345,16 +1719,106 @@ function drawMarket() {
     }
 }
 
+// Two hulls of your own, side by side. `buy` is what comes across from the other one and
+// `sell` is what goes over to it -- the same two baskets the market uses, so the stepping,
+// the confirm and the wire all stay one thing rather than two that have to agree.
+function drawTransfer(s) {
+    const o = (fleet || []).find((q) => q.id === trading.with);
+    if (!o) return closeMarket();
+    const moving =
+        Object.keys(trading.buy).length + Object.keys(trading.sell).length;
+    // Watched rather than checked once: nothing is holding the two hulls together, and a
+    // basket that fills up while they drift apart should say so before CONFIRM does.
+    const far = Math.hypot(o.x - s.x, o.y - s.y) > transferReach;
+    marketCost.parentElement.hidden = true;
+    marketOk.disabled = !moving || far;
+    marketWhy.textContent = far ? 'too far apart to pass anything across' : '';
+    marketTitle.hidden = false;
+    marketTitle.textContent = `SHIP ${s.id} \u21c4 SHIP ${o.id}`;
+
+    const step = (bag, t, d, max) => {
+        bag[t] = Math.max(0, Math.min(max, (bag[t] || 0) + d));
+        if (!bag[t]) delete bag[t];
+        drawMarket();
+    };
+    // What each hull is carrying, ore included: it is cargo like anything else here, and a
+    // refit paid for out of the wrong hold is the reason to move it.
+    const carried = (q) => [
+        ...(q.or ? [['ore', q.or]] : []),
+        ...Object.entries(q.hold || {}).filter(([, n]) => n > 0),
+    ];
+    const fill = (sel, head, from, bag) => {
+        marketEl.querySelector(`${sel} h3`).textContent = head;
+        const rows = marketEl.querySelector(`${sel} .rows`);
+        rows.textContent = '';
+        const have = carried(from);
+        for (const [t, n] of have)
+            rows.append(
+                marketRow(
+                    t,
+                    null,
+                    bag[t] || 0,
+                    n,
+                    (d) => step(bag, t, d, n),
+                    n,
+                ),
+            );
+        if (!have.length) {
+            const e = document.createElement('div');
+            e.className = 'none';
+            e.textContent = 'nothing aboard';
+            rows.append(e);
+        }
+    };
+    fill('.buy', `FROM SHIP ${o.id}`, o, trading.buy);
+    fill('.sell', `FROM SHIP ${s.id}`, s, trading.sell);
+}
+
+// Everything on this sheet is live: two hulls drift apart while the basket fills, and a
+// confirmed transfer lands as a standing record some frames after the yes. Drawn on events
+// alone it goes stale in three separate ways -- a stale "too far", a CONFIRM that refuses
+// for a reason the sheet is not showing, and columns that still say what was there before
+// the trade. Keyed like the drawer's own rebuild: cheap to compute, and it redraws only
+// when something it shows has actually moved.
+let marketKey = '';
+function syncMarket() {
+    if (!trading) {
+        marketKey = '';
+        return;
+    }
+    const s = (fleet || []).find((q) => q.id === trading.ship);
+    const o =
+        trading.with === undefined ?
+            null
+        :   (fleet || []).find((q) => q.id === trading.with);
+    const bag = (q) =>
+        q ? `${q.or || 0}:${JSON.stringify(q.hold || {})}` : '-';
+    const gap =
+        s && o ? Math.hypot(o.x - s.x, o.y - s.y) > transferReach : false;
+    const key = `${bag(s)}|${bag(o)}|${gap}`;
+    if (key === marketKey) return;
+    marketKey = key;
+    drawMarket();
+}
+
 marketEl.querySelector('.cancel').addEventListener('click', closeMarket);
 marketOk.addEventListener('click', () => {
     if (!trading) return;
     ws.send(
-        JSON.stringify({
-            t: 'trade',
-            ship: trading.ship,
-            buy: trading.buy,
-            sell: trading.sell,
-        }),
+        trading.with !== undefined ?
+            JSON.stringify({
+                t: 'transfer',
+                ship: trading.ship,
+                with: trading.with,
+                take: trading.buy,
+                give: trading.sell,
+            })
+        :   JSON.stringify({
+                t: 'trade',
+                ship: trading.ship,
+                buy: trading.buy,
+                sell: trading.sell,
+            }),
     );
 });
 
@@ -1678,6 +2142,81 @@ function specRows(ship, held) {
     return out;
 }
 
+// Health on the loadout board. The repair tab's bar in board units: a dark trough with a
+// coloured fill and the same ramp, so a gun that is half gone looks half gone wherever you
+// happen to be looking at it. Nothing is drawn for a module that is whole -- a board full of
+// full bars says only that nothing is wrong, at the price of hiding the hull under them.
+const RBAR_W = 13,
+    RBAR_H = 2;
+// Outward, always: a bar for a mount on the port row goes above the hull and one on the
+// starboard row goes below it, so the crowded middle of the deck is left to the modules and
+// every bar has the open side of its own row to sit in. A mount on the centreline has no
+// outward, so it takes the space just under itself, where the rows are eleven units away.
+//
+// Searching for a free spot instead reads worse than it sounds: with rows this close,
+// nothing fits between them, and a bar that has gone looking ends up beside a module it is
+// not talking about.
+const RBAR_OUT = 7.5;
+
+function healthBars(ship, fit) {
+    const where = installsOf(ship.h);
+    const out = [];
+    const taken = []; // bars already placed, so two on a row cannot land on each other
+    for (const held of fit) {
+        const at = where[held.install];
+        const full = (modules[held.type] || {}).hp || 0;
+        const i = (ship.ft || []).findIndex((f) => f[0] === held.install);
+        const hp = i >= 0 ? ship.hp[i] : full;
+        if (!at || !full || hp >= full) continue; // whole: nothing worth saying
+        const frac = Math.max(0, Math.min(1, hp / full));
+        const away = at[1] < 0 ? -1 : 1;
+        let y = at[1] + RBAR_OUT * away;
+        // Two mounts close enough along the row to collide step further out, one after the
+        // other, rather than one of them being drawn over the top of the other.
+        while (
+            taken.some(
+                (t) =>
+                    Math.abs(t.x - at[0]) < RBAR_W + 1 &&
+                    Math.abs(t.y - y) < RBAR_H + 1,
+            )
+        )
+            y += RBAR_H * 1.6 * away;
+        taken.push({ x: at[0], y });
+        const g = svgEl('g', {
+            transform: `translate(${at[0] - RBAR_W / 2} ${y - RBAR_H / 2})`,
+        });
+        // What the crew has in hand. Only one mount at a time is being worked on, and it is
+        // the one thing on this board that is happening rather than simply being the case.
+        if (ship.rp === i) {
+            const w = svgEl('g', {
+                transform: `translate(${RBAR_W + 1.5} ${RBAR_H / 2 - 3}) scale(0.5)`,
+            });
+            w.append(svgEl('path', { d: WRENCH_PATH, fill: '#ffd76a' }));
+            g.append(w);
+        }
+        g.append(
+            svgEl('rect', {
+                width: RBAR_W,
+                height: RBAR_H,
+                fill: 'rgba(8,14,22,.85)',
+                stroke: 'rgba(0,0,0,.6)',
+                'stroke-width': 0.4,
+            }),
+        );
+        // A wreck is a hole where a gun was rather than a gun in poor health, so it keeps
+        // the colour the repair tab gives it instead of the bottom of the ramp.
+        g.append(
+            svgEl('rect', {
+                width: hp <= 0 ? RBAR_W : RBAR_W * frac,
+                height: RBAR_H,
+                fill: hp <= 0 ? 'rgba(255,154,106,.45)' : healthColor(frac),
+            }),
+        );
+        out.push(g);
+    }
+    return out;
+}
+
 function drawRefit() {
     if (!refitting) return;
     const s = (fleet || []).find((q) => q.id === refitting.ship);
@@ -1902,6 +2441,10 @@ function drawRefit() {
             );
         svg.append(ghost);
     }
+    // Over the mounts rather than among them, so a bar is never drawn under the next module
+    // along. Only while looking: a board being rearranged has a different question on it,
+    // and what is bolted where is still moving.
+    if (view) for (const bar of healthBars(s, refitting.fit)) svg.append(bar);
     refitBoard.textContent = '';
     refitBoard.append(svg);
 
@@ -2110,10 +2653,16 @@ refitOk.addEventListener('click', () => {
 
 // The state the repair curve is acting on, in the same panel as the curve: which guns
 // are hurt, which are gone, and where the one repair point is going right now.
+// One wrench, two places to draw it: the repair tab writes it into HTML, and the loadout
+// board puts the same path on the hull, so "being worked on" looks the same wherever it is
+// said.
+const WRENCH_PATH =
+    'M7.7 1.1a3.1 3.1 0 0 0-3.3 4.7L1.3 8.9a1.25 1.25 0 0 0 1.8 1.8l3.1-3.1a3.1 3.1 0 0 0 ' +
+    '4.7-3.3L9 6.2 6.7 5.7 6.2 3.4z';
 const WRENCH =
     '<svg class="wrench" viewBox="0 0 12 12" aria-hidden="true"><path d="' +
-    'M7.7 1.1a3.1 3.1 0 0 0-3.3 4.7L1.3 8.9a1.25 1.25 0 0 0 1.8 1.8l3.1-3.1a3.1 3.1 0 0 0 ' +
-    '4.7-3.3L9 6.2 6.7 5.7 6.2 3.4z"/></svg>';
+    WRENCH_PATH +
+    '"/></svg>';
 
 function gunGrid(s) {
     const wrap = document.createElement('div');
@@ -2879,6 +3428,17 @@ const moduleArt = (t) => MODULE_ART[t] || ['M4 4h16v16H4z'];
 const SALVAGE = '#9fd4ff';
 
 // For a panel. `em` sizing so it sits on the text baseline beside the word it labels.
+// Ore is not a module and has no entry in the table, but it moves between hulls like one,
+// so it needs a mark of its own: a grain.
+function oreSvg(px = 13) {
+    return (
+        `<svg class="mi" viewBox="0 0 24 24" width="${px}" height="${px}" fill="none"` +
+        ` stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">` +
+        '<path d="M7 9l5-5 5 5-2 8H9z"/>' +
+        '</svg>'
+    );
+}
+
 function moduleSvg(type, px = 13) {
     return (
         `<svg class="mi" viewBox="0 0 24 24" width="${px}" height="${px}" fill="none"` +
@@ -3757,6 +4317,9 @@ function draw() {
     front.drawImage(back, 0, 0);
 
     syncDetails();
+    syncPicks();
+    syncMarket();
+    if (!mapEl.hidden) drawMap();
     hud.style.color = state.stale ? '#ffb347' : '';
     hud.textContent =
         `TAP select  HOLD add/clear  TAP space to move   DRAG ring to turn   WASD pan   WHEEL zoom  (${cam.zoom.toFixed(2)}x)\n` +

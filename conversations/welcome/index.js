@@ -4,8 +4,8 @@
 //
 // Everybody in the town has one of these on their stack, and only one of them ever says it.
 // The flag goes in `player` -- what this *conversation* knows about this player, which is
-// keyed by the module's name rather than by who is speaking, so the word the harbourmaster
-// had is the word the foreman no longer has.
+// keyed by the module's name rather than by who is speaking, so the word the foreman had
+// is the word the trader no longer has.
 const OPTION = "Let's get to business...";
 
 export default (params, player, place, { choice }) => {

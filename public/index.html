@@ -84,8 +84,6 @@
     #details .bar button + button {
         padding: 4px 2px 4px 12px;
     }
-    /* Nothing in hand, nothing to look at: the button goes rather than opening on an empty
-     list, the same bargain the panel itself used to make about an empty selection. */
     #details .bar button[hidden] {
         display: none;
     }
@@ -115,6 +113,59 @@
     #details .nosel {
         color: #3d6b5e;
         padding: 9px 2px;
+    }
+
+    /* Everywhere you have been, drawn from what was sampled as you flew rather than from
+     the world: the canvas fills the sheet under its own header, and drag and pinch do here
+     what they do on the board. */
+    #map {
+        position: fixed;
+        inset: 0;
+        background: #060a10;
+        z-index: 45;
+        display: flex;
+        flex-direction: column;
+    }
+    #map[hidden] {
+        display: none;
+    }
+    #map header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-bottom: 1px solid #1d3040;
+        font:
+            12px/1.6 ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+    }
+    #map header h2 {
+        font: inherit;
+        letter-spacing: 0.18em;
+        color: #4e8f7d;
+        margin: 0;
+    }
+    #map header .who {
+        margin-left: auto;
+        color: #4e8f7d;
+    }
+    #map header button {
+        font: inherit;
+        color: #7fe8c8;
+        background: #101a26;
+        border: 1px solid #24384f;
+        padding: 8px 14px;
+        cursor: pointer;
+        touch-action: manipulation;
+    }
+    #map canvas {
+        flex: 1;
+        width: 100%;
+        min-height: 0;
+        touch-action: none;
+        cursor: grab;
     }
 
     /* The quest sheet and the licences sheet wear the market's clothes -- same overlay,
@@ -202,8 +253,13 @@
         margin: 0 0 8px;
         line-height: 1.5;
     }
-    #quests .body .none {
+    /* Nothing in hand: a line rather than an empty sheet, and without the border a real
+     quest row wears -- there is nothing there to be a row. */
+    #quests .body li.none {
         color: #3d6b5e;
+        border: 0;
+        background: none;
+        padding: 2px 0;
     }
     #licences .body pre {
         color: #4e8f7d;
@@ -649,6 +705,14 @@
         border-color: #24384f;
     }
     /* Stacked on a phone, side by side once there is width for it. */
+    #market .who {
+        margin-left: auto;
+        color: #8ba0bb;
+        letter-spacing: 0.12em;
+    }
+    #market .who[hidden] {
+        display: none;
+    }
     #market .cols {
         flex: 1 1 auto;
         min-height: 0;
@@ -681,6 +745,12 @@
         gap: 10px;
         padding: 6px 0;
         color: #cfe6ff;
+    }
+    /* How many are aboard, beside the name rather than in a column of its own: it belongs
+     to the thing, not to the price. */
+    #market .row .qty {
+        color: #4e8f7d;
+        margin-left: 6px;
     }
     #market .row .nm {
         flex: 1 1 auto;
@@ -725,6 +795,42 @@
         color: #d8a851;
         font-weight: normal;
         font-size: 20px;
+    }
+    /* The way to move cargo to another hull, at the end of the line that lists it. */
+    #details .hold .swap {
+        margin-left: auto;
+        font: inherit;
+        font-size: 16px;
+        color: #4e8f7d;
+        background: none;
+        border: 0;
+        padding: 0 2px 0 12px;
+        cursor: pointer;
+        touch-action: manipulation;
+    }
+    /* Which hull to move it to. Pulled down under the line, thumb-high rows, and gone again
+     as soon as one is chosen. */
+    #details .pick {
+        display: flex;
+        flex-direction: column;
+        margin: -6px 0 12px;
+    }
+    #details .pick[hidden] {
+        display: none;
+    }
+    #details .pick button:disabled {
+        color: #3d6b5e;
+        cursor: default;
+    }
+    #details .pick button {
+        font: inherit;
+        color: #7fe8c8;
+        background: #0c1420;
+        border: 1px solid #1d3040;
+        padding: 11px 12px;
+        text-align: left;
+        cursor: pointer;
+        touch-action: manipulation;
     }
     /* Modules are not ore and do not get ore's colour. */
     #details .hold.mod {
@@ -1006,6 +1112,7 @@
                 <i>0</i> ore</span
             >
             <button type="button" class="cancel">CLOSE</button>
+            <span class="who" hidden></span>
             <button type="button" class="confirm">TRADE</button>
         </header>
         <div class="cols">
@@ -1043,7 +1150,8 @@
 <button id="detailsToggle" type="button" aria-label="Details"></button>
 <aside id="details">
     <div class="bar">
-        <button type="button" id="questsToggle" hidden>QUESTS</button>
+        <button type="button" id="questsToggle">QUESTS</button>
+        <button type="button" id="mapToggle">MAP</button>
         <button type="button" id="menuToggle">MENU</button>
     </div>
     <nav id="menu" hidden>
@@ -1053,6 +1161,14 @@
     <h2>SELECTION</h2>
     <div id="detailsBody"></div>
 </aside>
+<div id="map" hidden>
+    <header>
+        <h2>MAP</h2>
+        <span class="who"></span>
+        <button type="button" class="cancel">CLOSE</button>
+    </header>
+    <canvas></canvas>
+</div>
 <div id="quests" hidden>
     <header>
         <h2>QUESTS</h2>

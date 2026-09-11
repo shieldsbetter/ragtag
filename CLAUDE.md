@@ -140,8 +140,8 @@ lay themselves out again, so discarding chunk files takes a biome's rock away fo
 ground somebody has already explored. `WALL_OLDEST` is the oldest still read, and fields
 added since default to empty.
 
-**A conversation is a stack of frames, and a frame is a name and a bag.** `['harbour',
-{at: 'nests'}]` — plain JSON both halves, so a conversation serialises by being what it
+**A conversation is a stack of frames, and a frame is a name and a bag.** `['yard',
+{at: 'work'}]` — plain JSON both halves, so a conversation serialises by being what it
 already is. Behaviour is never in the stack: the name is looked up in `conversations/`,
 which is what makes a stack safe to write to disk and load into a build that has moved on.
 A module is one function handed an immer draft of its own bag; where it is in its own tree
@@ -168,7 +168,7 @@ wire, which is what lets a later step turn on what you have done rather than on 
 have been told. A session is held in a conversation until a step ends it — the sheet has
 no way out of its own.
 
-**A conversationalist is an instance, not a role.** One town has one harbourmaster, and
+**A conversationalist is an instance, not a role.** One town has one yard foreman, and
 the same set piece stamped somewhere else has its own, so the id carries the site that
 laid it down — already how one cell's rock is told from a neighbour's. Stacks are per
 player, because two people may be mid-sentence with the same person.
@@ -176,7 +176,7 @@ player, because two people may be mid-sentence with the same person.
 **A conversation keeps things in three places, chosen by how widely they should be
 known.** A holder is handed three immer drafts. `params` is its own frame's state and dies
 when the frame pops. `player` is what this _conversation_ knows about this player — keyed
-by the module's name, not the conversationalist's id, so every harbourmaster in the world
+by the module's name, not the conversationalist's id, so every yard foreman in the world
 reads and writes the one bag, which is how one of them knows what you told another; it
 rides in the player's record. `place` is what the _set piece_ knows, shared by everybody it
 put in the world and by every player who walks up to them; it hangs off the site, because
