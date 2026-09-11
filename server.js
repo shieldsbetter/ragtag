@@ -266,6 +266,29 @@ const MODULES = {
         install: 0,
         fixed: true,
     },
+    // Anti-fighter. It fires far too fast to be modelling shells in flight and does not
+    // try: the shot is resolved the moment it leaves, hits or misses on a roll, and what
+    // the client draws is a line that is gone again before anybody could follow it.
+    //
+    // `only` is what makes it anti-fighter rather than a fast gun: it will not consider
+    // anything else, whatever the envelope says. That is a property of the mount rather
+    // than a preference, which is why it is here and not in the priorities.
+    flak: {
+        turn: 5,
+        range: 360,
+        cooldown: 0.1,
+        arcHalf: 1.6,
+        hitR: 8,
+        hp: TURRET_HP,
+        size: 8,
+        install: 60,
+        price: 260,
+        only: 'fighter',
+        // Point blank it rarely misses; at the edge of its reach it mostly does. Ten shots
+        // a second at 7 a hit is about 40 a second in the middle of its band, against a
+        // fighter's 200 -- twice what a gun manages, and nothing at all against a hull.
+        hitscan: { damage: 7, near: 0.9, far: 0.35 },
+    },
     core: {
         turn: 0,
         range: 0,
@@ -2088,8 +2111,9 @@ function worldFor(p, now, motion) {
         })),
     });
     const saw = kills.filter((k) => near(p, k.x, k.y));
+    const lines = tracers.filter((r) => near(p, r.x, r.y));
     const has = Object.keys(motion.a).length || Object.keys(motion.d).length;
-    if (!has && !saw.length && p.told === roster) return null;
+    if (!has && !saw.length && !lines.length && p.told === roster) return null;
     const first = p.told !== roster;
     p.told = roster;
     return JSON.stringify({
@@ -2099,6 +2123,7 @@ function worldFor(p, now, motion) {
         ...(Object.keys(motion.a).length ? { a: motion.a } : {}),
         ...(Object.keys(motion.d).length ? { d: motion.d } : {}),
         ...(saw.length ? { kills: saw } : {}),
+        ...(lines.length ? { fire: lines } : {}),
     });
 }
 
@@ -2289,6 +2314,7 @@ const newMoving = () =>
 //   { say, options }     say this, and offer these
 //   { pop }              nothing to say; drop me and ask the next one down
 //   { exit }             the conversation ends, and I stay where I am
+//   { push: name }       put that conversation on top of me and ask it; work is taken on
 //   { open: markKey }    hand the session to another interaction; the conversation ends
 //
 // A frame that has become irrelevant -- a quest finished somewhere else entirely -- pops
@@ -2298,8 +2324,11 @@ const CONVERSATIONS = await (async () => {
     const found = new Map();
     for (const name of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
         const entry = path.join(dir, name, 'index.js');
+        // The whole module rather than its default export: a conversation that is also a
+        // piece of work exports `offer` beside it, and that is the only thing that makes
+        // it work rather than talk.
         if (fs.existsSync(entry))
-            found.set(name, (await import(pathToFileURL(entry))).default);
+            found.set(name, await import(pathToFileURL(entry)));
     }
     return found;
 })();
@@ -2474,6 +2503,136 @@ const bagOk = (what, bag, max) => {
 const siteBySrc = (src) =>
     src ? (sites.find((q) => siteKey(q) === src) ?? null) : null;
 
+// What there is to be had here. A conversation that exports `offer` is a piece of work:
+// it is asked whether it is on the table, given who is asking, what it already knows about
+// this player, where they are standing and what they have destroyed.
+//
+// Anything already on this conversationalist's stack is left out, so "you have that one
+// already" is answered by the stack rather than by a flag somebody has to remember to set.
+// A predicate that throws is a predicate that says no: an authoring mistake in one piece of
+// work must not take the conversation it was offered in down with it.
+// ---- quests ----
+//
+// A quest is a thing in the world rather than a note on a player: one bag of them, keyed by
+// id, saved beside the mesh. `who` is a player today, and it is the seam a shared quest
+// would widen -- something everybody is working on wants one record, not one apiece.
+//
+// What it is *about* stays in the conversation module that gave it: the record carries a
+// kind, where it was taken and whatever state the giver put in it, and the module says what
+// that means and what it reads as.
+const quests = new Map(); // id -> { id, kind, who, src, state, done }
+let questsDirty = false;
+const questFile = () => path.join(WORLD_DIR, 'quests.json');
+
+const questsOf = (pid) =>
+    [...quests.values()].filter((q) => q.who === pid && !q.done);
+
+// The one a given frame is about: this kind of work, taken here, still open.
+const questHere = (pid, kind, src) =>
+    questsOf(pid).find((q) => q.kind === kind && q.src === src) ?? null;
+
+function takeQuest(pid, kind, src, state) {
+    const q = {
+        id: nextId++,
+        kind,
+        who: pid,
+        src,
+        state: state ?? {},
+        done: false,
+    };
+    quests.set(q.id, q);
+    questsDirty = true;
+    return q;
+}
+
+// Finished rather than forgotten: the record stays, because what somebody has done is worth
+// as much as what they are doing, and `offer` reads it to know not to give it again.
+function finishQuest(q) {
+    if (!q || q.done) return;
+    q.done = true;
+    questsDirty = true;
+}
+
+function saveQuests() {
+    if (!questsDirty) return;
+    questsDirty = false;
+    try {
+        fs.mkdirSync(WORLD_DIR, { recursive: true });
+        fs.writeFileSync(
+            questFile(),
+            JSON.stringify({ v: 1, quests: [...quests.values()] }),
+        );
+    } catch {
+        /* unwritable store: the game runs, it just will not survive a restart */
+    }
+}
+
+function loadQuests() {
+    let d;
+    try {
+        d = JSON.parse(fs.readFileSync(questFile(), 'utf8'));
+    } catch {
+        return; // no file: nobody has been given anything yet
+    }
+    if (d.v !== 1) return console.warn('quests.json: unknown version; ignored');
+    for (const q of d.quests ?? []) quests.set(q.id, q);
+}
+
+// One line per open quest, written by the module that gave it, so "(3 remaining)" is worked
+// out from what is true now rather than from something that had to be kept up to date.
+function questLines(p) {
+    const out = [];
+    for (const q of questsOf(p.id)) {
+        const say = CONVERSATIONS.get(q.kind)?.describe;
+        if (typeof say !== 'function') continue; // a build that no longer has that work
+        try {
+            const text = say(q, {
+                kills: p.kills,
+                place: siteBySrc(q.src)?.bag ?? null,
+            });
+            if (text) out.push({ id: q.id, text: String(text).slice(0, 200) });
+        } catch (e) {
+            console.warn(`work ${q.kind}: describe threw: ${e.message}`);
+        }
+    }
+    return out;
+}
+
+// Said when it changes and not otherwise, like everything else that does not move.
+function sendQuests(p) {
+    if (p.ws?.readyState !== 1) return;
+    p.ws.send(JSON.stringify({ t: 'quests', list: questLines(p) }));
+}
+
+function gatherWork(p, who, from, src, site) {
+    const stack = p.talks[who] ?? [];
+    const out = [];
+    for (const [name, mod] of CONVERSATIONS) {
+        if (typeof mod.offer !== 'function') continue;
+        if (stack.some((f) => f[0] === name)) continue;
+        try {
+            if (
+                mod.offer({
+                    from,
+                    src,
+                    player: p.store[name] ?? {},
+                    place: site?.bag ?? null,
+                    kills: p.kills,
+                    // Everything this player has of this kind, open or finished, so a
+                    // predicate can say "not twice here" without keeping a flag of its own.
+                    quests: [...quests.values()].filter(
+                        (q) => q.who === p.id && q.kind === name,
+                    ),
+                })
+            )
+                out.push(name);
+        } catch (e) {
+            console.warn(`work ${name}: offer threw: ${e.message}`);
+        }
+    }
+    return out;
+}
+
 // Ask the stack what happens next. Walks down through frames with nothing to say, so a
 // pop is invisible to the client: it sees the first frame that actually speaks.
 //
@@ -2490,7 +2649,7 @@ function nextStep(p, who, choice, start) {
     for (let guard = 0; guard < 64; guard++) {
         const frame = stack[stack.length - 1];
         if (!frame) return { exit: true }; // nothing left to say, by anybody
-        const hold = CONVERSATIONS.get(frame[0]);
+        const hold = CONVERSATIONS.get(frame[0])?.default;
         // Named a module this build does not have -- renamed, or gone. Drop the frame and
         // carry on down: an interrupt nobody can run degrades to never being mentioned,
         // which is survivable, and refusing to load the save is not.
@@ -2513,12 +2672,43 @@ function nextStep(p, who, choice, start) {
         // apart from one that wrote: immer hands back what it was given when a recipe
         // changes nothing, and without this every ask filed an empty bag of its own.
         const storeWas = p.store[name] ?? {};
+        const src = p.talk?.src ?? null;
+        // A quest is world state, not the conversation's own, so it is moved by asking
+        // rather than by drafting: the module says take it or finish it and the registry
+        // does the rest. `quest` is whatever this kind of work already is here, if any.
+        let told = false; // the list has changed and this player has not been told
         const ask = (params, player, here) =>
             hold(params, player, here, {
                 who,
+                src,
                 ship: p.talk?.ship,
                 choice: input,
                 start: fresh,
+                kills: p.kills,
+                quest: questHere(p.id, name, src),
+                // Asked rather than handed over, because most steps never want to know:
+                // gathering means running everybody's predicate.
+                gatherWork: () => gatherWork(p, who, name, src, site),
+                takeQuest: (state) => {
+                    told = true;
+                    return takeQuest(p.id, name, src, state);
+                },
+                finishQuest: () => {
+                    told = true;
+                    finishQuest(questHere(p.id, name, src));
+                },
+                // Paid into the hold of the ship that is standing here, not bolted on: what
+                // to do with it is a refit, which is a decision and a sheet of its own. The
+                // yard is where you are, so the walk to it is nothing.
+                give: (type) => {
+                    if (!MODULES[type] || MODULES[type].fixed) return false;
+                    const ship = [...ships].find(
+                        (q) => q.id === p.talk?.ship && q.owner === p.id,
+                    );
+                    if (!ship) return false;
+                    ship.hold[type] = (ship.hold[type] || 0) + 1;
+                    return true;
+                },
             });
         frame[1] = produce(frame[1], (params) => {
             store = produce(storeWas, (player) => {
@@ -2537,6 +2727,7 @@ function nextStep(p, who, choice, start) {
             bagOk(`conversation store ${name}`, store, STORE_KEYS)
         )
             p.store[name] = store;
+        if (told) sendQuests(p);
         if (
             site &&
             place !== placeWas &&
@@ -2544,6 +2735,20 @@ function nextStep(p, who, choice, start) {
         ) {
             site.bag = place;
             meshDirty = true;
+        }
+        // Work taken on. The giver puts it on the stack and says nothing more: the frame
+        // above it speaks for itself from here, and is asked as though walked up to.
+        if (step?.push) {
+            if (!CONVERSATIONS.get(step.push)?.default) {
+                console.warn(
+                    `conversation: no module ${step.push}; not pushed`,
+                );
+                return { exit: true };
+            }
+            stack.push([step.push, {}]);
+            input = null;
+            fresh = true;
+            continue;
         }
         if (!step?.pop) return step ?? { exit: true };
         stack.pop();
@@ -3661,9 +3866,15 @@ function bleed(dt) {
     }
 }
 
-function wound(s, t, amount) {
+// `by` is the player whose shell did it, or null for anything nobody owns -- a rock that
+// finished off a fighter, or one raider's shot landing on another. A tally is only ever
+// kept for a kill somebody can be said to have made.
+function wound(s, t, amount, by = null) {
     t.hp = t.hp - amount <= 0 ? -WRECK_DEPTH : t.hp - amount;
     if (t.hp <= 0 && s.hull.frail) {
+        // Read before the group lets go of it: what was killed and what it was part of are
+        // both wanted, and one of them is about to be unhooked.
+        if (by !== null) credit(by, s);
         ships.delete(s);
         if (s.enc) s.enc.members.delete(s);
         // A broken cache does not vanish: it lets its ore go over the same ten seconds the
@@ -3685,6 +3896,27 @@ function wound(s, t, amount) {
             h: hullKey(s.hull),
         });
     }
+}
+
+// What a player has destroyed, by what it was and what it was part of: `kills.cache.nest`
+// is the number of nest caches they have broken. Two dimensions because the same hull means
+// different things in different company -- a cache standing alone is salvage, and a cache
+// with a guard over it is a fight somebody went looking for.
+//
+// It is player state rather than conversation state, which is why it sits here and not in
+// one of the bags: those are ten flags a conversation branches on, and this is a record of
+// what has happened in the world. A quest reads it; it does not own it.
+function credit(pid, s) {
+    const p = players.get(pid);
+    if (!p) return; // gone in the time the shell was in the air
+    const enemy = hullKey(s.hull);
+    const where = s.enc?.kind ?? 'loose'; // killed out on its own, not as part of anything
+    p.kills[enemy] ??= {};
+    p.kills[enemy][where] = (p.kills[enemy][where] ?? 0) + 1;
+    playersDirty = true;
+    // What the list says is worked out from the tally, so the tally moving is the only
+    // thing that can change it without anybody saying a word.
+    sendQuests(p);
 }
 
 // What a given side is willing to shoot: every rock, plus the live guns of anyone
@@ -3714,6 +3946,11 @@ function targetsFor(team) {
                 list.push({
                     kind: s.hull.targetKind || 'turret',
                     ship: s.id,
+                    // The hull and the mount themselves, for a shot that is resolved where
+                    // it is fired: a shell finds what it hits by flying into it, and a
+                    // hitscan gun has to be told.
+                    body: s,
+                    mount: t,
                     x: t.wx,
                     y: t.wy,
                     vx: s.vx,
@@ -3865,6 +4102,32 @@ function intercept(dx, dy, ux, uy, B) {
     return roots.length ? Math.min(...roots) : null;
 }
 
+// A shot with no shell. It is decided where it is fired: a roll against range says whether
+// it lands, the damage goes on at once, and what everybody near enough is told is a line
+// that was there for an instant. Missing is drawn as well as hitting -- a gun that only
+// showed its hits would look like it was firing in bursts rather than being outshot.
+const tracers = [];
+function hitscan(s, t, T, at) {
+    const H = T.hitscan;
+    const u = Math.max(0, Math.min(1, at.range / T.range));
+    const hit = Math.random() < H.near + (H.far - H.near) * u;
+    // A miss goes wide by a hair rather than stopping short, so the line still reads as
+    // aimed at something.
+    const wide =
+        hit ? 0 : (Math.random() < 0.5 ? -1 : 1) * (8 + Math.random() * 14);
+    const a = at.bearing + wide / Math.max(60, at.range);
+    const reach = Math.hypot(at.ax - t.wx, at.ay - t.wy);
+    tracers.push({
+        x: Math.round(t.wx),
+        y: Math.round(t.wy),
+        x2: Math.round(t.wx + Math.cos(a) * reach),
+        y2: Math.round(t.wy + Math.sin(a) * reach),
+        h: hit ? 1 : 0,
+    });
+    if (hit && at.g.mount?.hp > 0)
+        wound(at.g.body, at.g.mount, H.damage, s.owner);
+}
+
 // Turret bearings are world-space: the mount rides the hull, the gun holds its own
 // bearing. A gun fires only on the tick its slew lands exactly on the firing
 // solution, so the shot leaves along the solved bearing rather than near it.
@@ -3885,6 +4148,8 @@ function aimTurrets(s, targets, dt) {
         // while a clear target stood behind it.
         const shots = [];
         for (const g of targets) {
+            // A mount that only answers one kind of question does not get asked others.
+            if (T.only && g.kind !== T.only) continue;
             const dx = g.x - t.wx,
                 dy = g.y - t.wy;
             const range = Math.hypot(dx, dy) - g.r;
@@ -3906,11 +4171,13 @@ function aimTurrets(s, targets, dt) {
 
             const ux = g.vx - s.vx,
                 uy = g.vy - s.vy; // bullets inherit the hull's velocity
-            const ti = intercept(dx, dy, ux, uy, BULLET_SPEED);
+            // Nothing to lead: a hitscan shot arrives where it is pointed, at once.
+            const ti = T.hitscan ? 0 : intercept(dx, dy, ux, uy, BULLET_SPEED);
             if (ti === null || ti > BULLET_LIFE) continue; // shell would expire before arrival
             const bearing = Math.atan2(dy + uy * ti, dx + ux * ti);
             if (Math.abs(angleDiff(bearing, rest)) > T.arcHalf) continue; // outside this mount's arc
             shots.push({
+                g,
                 tier,
                 score,
                 range,
@@ -3930,7 +4197,8 @@ function aimTurrets(s, targets, dt) {
         // one hull behind a wall consume the lot and leave the turret idle with a target in
         // plain view. Refusing to shoot is the envelope's job -- zero priority -- so focus
         // decides what comes first and nothing more.
-        let want = null;
+        let want = null,
+            at = null; // the shot that answered, for a gun that resolves its own hit
         for (const group of [
             shots.filter((x) => x.tier === 0),
             shots.filter((x) => x.tier === 1),
@@ -3942,6 +4210,7 @@ function aimTurrets(s, targets, dt) {
                 )
                     continue;
                 want = group[k].bearing;
+                at = group[k];
                 break;
             }
             if (want !== null) break;
@@ -3957,6 +4226,10 @@ function aimTurrets(s, targets, dt) {
 
         if (want !== null && Math.abs(err) <= step && t.cool <= 0) {
             t.cool = T.cooldown;
+            if (T.hitscan) {
+                hitscan(s, t, T, at);
+                continue;
+            }
             bullets.push({
                 id: nextId++,
                 owner: s.owner,
@@ -4312,7 +4585,7 @@ function step(dt) {
                     dy = o.y - t.wy,
                     rr = MODULES[t.type].hitR + o.r;
                 if (dx * dx + dy * dy >= rr * rr) continue;
-                wound(s, t, BULLET_DAMAGE);
+                wound(s, t, BULLET_DAMAGE, o.owner);
                 bullets.splice(b, 1);
                 struck = true;
                 break;
@@ -4512,6 +4785,7 @@ function newPlayer(id, session) {
         talk: null, // who it is talking to, if it is talking to anybody
         talks: {}, // conversationalist id -> stack of [module, state]
         store: {}, // conversation name -> what that conversation knows about them
+        kills: {}, // what they have destroyed: hull -> encounter kind -> how many
         view: { x: 0, y: 0 },
         left: null, // when their socket went, if they are away
         fleet: null, // their ships, while the world is not holding them
@@ -4537,6 +4811,7 @@ function savePlayers() {
             busy: p.busy,
             talks: p.talks,
             store: p.store,
+            kills: p.kills,
             fleet: inWorld.length ? inWorld.map(shipRec) : (p.fleet ?? []),
         });
     }
@@ -4569,6 +4844,7 @@ function loadPlayers() {
         p.score = rec.score ?? 0;
         p.talks = rec.talks ?? {};
         p.store = rec.store ?? {};
+        p.kills = rec.kills ?? {};
         p.talk = rec.talk ?? null;
         p.busy = rec.busy ?? null;
         p.fleet = rec.fleet ?? [];
@@ -4605,8 +4881,10 @@ function sweepAbsent() {
 }
 
 loadPlayers();
+loadQuests();
 setInterval(sweepAbsent, 1000);
 setInterval(savePlayers, 5000);
+setInterval(saveQuests, 5000);
 
 wss.on('connection', (ws) => {
     let p = null;
@@ -4690,6 +4968,7 @@ wss.on('connection', (ws) => {
         // Held in the conversation it was in: a reload lands back on the same words
         // rather than outside a sheet the server still believes is open. Asked again
         // rather than replayed, because the frame's own state is where it was up to.
+        sendQuests(p);
         if (p.talk) playTalk(p, nextStep(p, p.talk.who, null, false));
     }
 
@@ -4883,6 +5162,7 @@ setInterval(() => {
         if (msg) p.ws.send(msg);
     }
     kills.length = 0; // said once, to whoever was near enough to see it
+    tracers.length = 0;
 }, TICK);
 
 // Dev mode. `node --watch` restarts this process when server.js changes, which drops
@@ -5034,6 +5314,7 @@ for (const sig of ['SIGINT', 'SIGTERM'])
     process.on(sig, () => {
         stopTunnel();
         savePlayers();
+        saveQuests();
         process.exit(0);
     });
 

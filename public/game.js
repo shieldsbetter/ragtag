@@ -347,6 +347,13 @@ ws.onmessage = (e) => {
         closeTalk();
         return;
     }
+    // Said when it changes and not otherwise: taking work, finishing it, or killing the
+    // thing it was about.
+    if (m.t === 'quests') {
+        questLines = m.list || [];
+        drawQuests();
+        return;
+    }
     if (m.t === 'trade') {
         // Done, and still standing at the counter: the basket empties and the sheet stays,
         // because the reason to come here is rarely one transaction.
@@ -406,6 +413,9 @@ ws.onmessage = (e) => {
     // arrival rather than read out of the drawn view. It is stamped on the render timeline
     // so it plays when the ship is seen to vanish, not a render delay early.
     for (const k of m.kills || []) blowUp(k, rt);
+    // A shot with no shell: it was there for an instant at a moment the server names, so it
+    // is stamped the same way a death is and drawn for as long as a muzzle flash lasts.
+    for (const f of m.fire || []) tracers.push({ ...f, born: rt });
 };
 
 // The server streams around the camera, so it has to know where the camera is. Only
@@ -866,6 +876,33 @@ const detailsToggle = document.getElementById('detailsToggle');
 // because it is not a gesture: the whole gesture budget is spent on the map.
 const menu = document.getElementById('menu');
 const licences = document.getElementById('licences');
+
+// What is in hand, in a sheet of its own. The lines are written by the server -- a quest
+// knows what it is and what is left of it, and the client is told the sentence rather than
+// the arithmetic, which is the same bargain the markers make about their icons.
+const questsEl = document.getElementById('quests');
+const questsList = questsEl.querySelector('.body ul');
+const questsToggle = document.getElementById('questsToggle');
+let questLines = [];
+
+function drawQuests() {
+    questsToggle.hidden = !questLines.length;
+    if (!questLines.length) questsEl.hidden = true; // the last one finished while it was open
+    questsList.replaceChildren(
+        ...questLines.map((q) => {
+            const li = document.createElement('li');
+            li.textContent = q.text;
+            return li;
+        }),
+    );
+}
+
+questsToggle.addEventListener('click', () => {
+    questsEl.hidden = false;
+});
+questsEl.querySelector('.cancel').addEventListener('click', () => {
+    questsEl.hidden = true;
+});
 document.getElementById('menuToggle').addEventListener('click', () => {
     menu.hidden = !menu.hidden;
 });
@@ -2509,6 +2546,35 @@ function blowUp(k, born) {
 
 const rnd = (a, b) => a + Math.random() * (b - a);
 
+// Lines of fire from a gun that resolves its own hits. They live long enough to be seen as
+// a line rather than a flash and short enough that ten a second read as one gun firing,
+// not as ten lines standing on the screen. A miss is drawn as plainly as a hit: a gun that
+// showed only what it landed would look like it was firing in bursts.
+const TRACER_MS = 110;
+let tracers = [];
+
+function drawTracers(now) {
+    const clock = now - RENDER_DELAY;
+    tracers = tracers.filter((f) => clock - f.born < TRACER_MS);
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const f of tracers) {
+        const age = clock - f.born;
+        if (age < 0) continue; // arrived early: it has not happened yet
+        const fade = 1 - age / TRACER_MS;
+        const line = new Path2D();
+        line.moveTo(f.x - cam.x, f.y - cam.y);
+        line.lineTo(f.x2 - cam.x, f.y2 - cam.y);
+        ctx.strokeStyle =
+            f.h ?
+                `rgba(255,236,170,${(fade * fade).toFixed(3)})`
+            :   `rgba(160,190,220,${(fade * fade * 0.5).toFixed(3)})`;
+        ctx.lineWidth = (f.h ? 1.6 : 1) / cam.zoom;
+        ctx.stroke(line);
+    }
+    ctx.restore();
+}
+
 function drawDebris(now) {
     const clock = now - RENDER_DELAY; // the same instant the ships are drawn at
     debris = debris.filter((d) => clock - d.born < d.span);
@@ -2689,6 +2755,12 @@ const MODULE_ART = {
         'M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0',
         'M8 12a4 4 0 1 0 8 0a4 4 0 1 0-8 0',
         'M22 12h-3M5 12H2M12 5V2M12 22v-3',
+    ],
+    flak: [
+        // a barrel throwing a burst: three strokes leaving the muzzle
+        'M3 16l8-8',
+        'M9 6l9 9',
+        'M13 4l2-2M18 6l2-2M20 11l2-2',
     ],
     tractor: [
         // an emitter: waves closing on a point
@@ -3455,6 +3527,7 @@ function draw() {
         ctx.restore();
     }
 
+    drawTracers(now);
     drawDebris(now);
     drawGroup();
     for (const s of fleet)
