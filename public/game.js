@@ -4105,10 +4105,14 @@ function draw() {
         }
         // Salvage, drawn as a marker rather than as an object: a coloured tile with the
         // module's mark cut out of it in black. It does not turn with the grain it is attached
-        // to -- a label that tumbles is a label you have to read twice.
+        // to -- a label that tumbles is a label you have to read twice -- and it does not grow
+        // with the zoom either. It is an icon: it says "a module is here", and that sentence
+        // is the same size whether you are looking at a berth or at a morning's flying. Drawn
+        // in the world all the same, so it stays on the thing it is labelling rather than
+        // floating over the board with the HUD.
         const x = o.x - cam.x,
             y = o.y - cam.y;
-        const R = 8;
+        const R = 8 / cam.zoom;
         ctx.save();
         ctx.fillStyle = SALVAGE;
         ctx.fillRect(x - R, y - R, R * 2, R * 2);

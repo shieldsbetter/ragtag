@@ -60,6 +60,13 @@ after that they go into the player's record and come back at the origin next tim
 them standing is not a kindness: a crewed hull is what makes terrain, so every fleet that
 ever existed would hold ground resident from boot.
 
+**A hold is a place, not a pool.** Cargo moves between two of your own hulls freely and
+for nothing — it is all yours already, and charging a fleet to shift its own cargo teaches
+people to leave it aboard whichever ship happens to be going. But they have to be alongside
+(`TRANSFER_REACH`, near enough that both are on screen at once with the camera between
+them), because a fleet whose holds are one pool wherever the hulls are is a fleet that never
+has to sail anything home, and the walk back with a full hold is most of what a hold is for.
+
 **One game on every screen.** Phone and desktop show the same thing. Platform-specific
 rendering tricks are a bug, not an optimisation, and platform-specific _feedback_ may
 only ever be a bonus on top of something that works everywhere.
@@ -333,6 +340,27 @@ players, ships, rocks and ore, so it is saved with them: a restored ship keeps i
 because a conversation held mid-sentence names the ship that started it. What is _not_
 saved is everything the world makes for itself — rocks, ore, fighters, the settlement's own
 guns — which is the same bargain the mesh makes.
+
+**The map is a picture of where you have been, not a view of the world.** A wall exists
+only while its chunk is loaded and merged, so a map of everywhere you have been cannot be
+made of walls. The server samples an 8×8 grid of _what matter is standing where_ as a
+crewed hull passes — five chunks either side of the one it is in, two chunks a tick off a
+queue — and keeps a byte a cell, which is room for every kind of matter there will ever be.
+Every sample asks with `ensure = false`: the map may only ever record ground that already
+exists, or looking at it would call the world into being ahead of anybody going there.
+Sampled again on every visit, which is precisely when a wall somebody has blown a hole in
+shows the hole — the map is as old as your last look at the place and says nothing about
+what has happened since.
+
+**A tile is stored once for everybody, under the hash of what it says.** Two players who
+have stood in the same place have seen the same ground, and an unexplored chunk is the same
+sixty-four zero bytes for all of them — so a player's map is a list of names and the
+pictures behind the names are world state, in `tiles.json`. Deflated on the way to disk,
+where a tile is mostly one repeated byte; sent raw, because the socket deflates the whole
+message anyway and inflating in a browser would need a decompression stream nothing else
+here depends on. The client caches a painted tile under the same name, which can never go
+stale: a different picture would have a different name. Measured: 57 distinct pictures
+behind 75 chunks, 2.3KB on disk, 0.02ms a frame to pan.
 
 **Nothing rock-shaped arrives in sight.** Asteroids are stocked and culled across the
 whole area of interest rather than a small disc: they appear only in a thin band just
