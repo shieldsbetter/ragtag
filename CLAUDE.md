@@ -56,9 +56,10 @@ the same size at every zoom and covers roughly 45px of whatever is under it.
 rock you cut, what you were told — but a player's ships do not stand in it while nobody is
 flying them. They are kept where they were left for `LOGOFF_GRACE`, two minutes, so a
 dropped connection is not a lost battle and quitting a fight is not a way to save a hull;
-after that they go into the player's record and come back at the origin next time. Leaving
-them standing is not a kindness: a crewed hull is what makes terrain, so every fleet that
-ever existed would hold ground resident from boot.
+after that they go into the player's record and come back next time at `respawnSite` — the
+last station anybody in the fleet touched, the origin until one has been. Leaving them
+standing is not a kindness: a crewed hull is what makes terrain, so every fleet that ever
+existed would hold ground resident from boot.
 
 **A hold is a place, not a pool.** Cargo moves between two of your own hulls freely and
 for nothing — it is all yours already, and charging a fleet to shift its own cargo teaches
@@ -135,6 +136,20 @@ about it collides, merges or is matter.
 **The yard is where a hull is worked on, and the marker is the only way in.** Refitting is
 checked against the reach of something offering to do it, not against being somewhere in
 the cavern, so the rule the order is validated by is the same one that opened the sheet.
+
+**A second set piece costs a `kind` and a version, and nothing else.** Low Berth is a
+cavern with one way in; Still Basin is the other kind of settlement, a slab of rock with a
+warren cut through it — a hub, a spoke out through the middle of every edge of its cell, and
+a ring corridor joining them so it reads as a network rather than a star. Each mouth keeps a
+moat for the reason the town's door has one: a neighbour's blob landing across it would seal
+that way in. It claims its hexagon the same way, names itself the same way, and offers the
+same two things to do through the same two conversation modules. It is founded once, 35
+screens out at a bearing nobody chose, on a world that does not already have one.
+
+**A conversation names no mark.** `{ open: true }` hands the session to the mark the
+conversation is standing at, whichever instance that is, so one foreman module serves every
+yard there will ever be. Naming a key instead — `town:yard` — meant the second city's
+foreman opened the first city's refit sheet.
 
 **A set piece is versioned and lays itself out again in place.** Its claim is permanent, its
 contents are not: bump `SET_VERSION` and every cell of that kind rebuilds what is inside it

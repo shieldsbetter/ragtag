@@ -755,10 +755,211 @@ const PLACE_TAIL = [
 // than as a generator.
 const placeName = (rng) => `${pick(PLACE_HEAD, rng)} ${pick(PLACE_TAIL, rng)}`;
 
+// ---- the second city ----
+//
+// Low Berth is a cavern with one way in. This is the other kind of settlement: a slab of
+// rock with a warren cut through it, a way out through every edge of its cell, and a ring
+// corridor joining the spokes so it reads as a network rather than a star. Same hexagon,
+// same claim, and nothing about it is special-cased anywhere -- it is a second `kind` in
+// `generateCell` and a second entry in `SET_VERSION`, which is the whole of what a new set
+// piece costs.
+const CITY_SIDE = 2.12 * SCREEN; // the same hexagon the town claims
+const CITY_HUB = 640; // the chamber where the spokes meet
+const CITY_BORE = 300; // clear width of a spoke
+const CITY_LOOP = 240; // ...and of the ring that joins them
+const CITY_RING = 0.56; // where that ring sits, as a fraction of the apothem
+const CITY_ROOM = 430; // a chamber off the ring: market, yard
+const CITY_DOOR = 0.3; // half-width of the wedge the rock stands back in, at each mouth
+const CITY_STAND = 0.82; // ...and how far out it stands there, of its full reach. Every
+// mouth keeps a moat for the reason the town's one does: a
+// neighbour's blob landing across it would seal that way in,
+// and "a way out through every edge" is the whole idea.
+const CITY_LAP = 1.05; // everywhere else it laps over, so neighbouring rock merges in
+const CITY_AWAY = 35 * SCREEN; // how far from Low Berth it is founded
+
+// Where the hexagon reaches in a direction, which is the town's own maths with this side.
+const cityReach = (a) => {
+    let best = Infinity;
+    for (let k = 0; k < 6; k++) {
+        const c = Math.cos(angleDiff(a, Math.PI / 6 + (k * Math.PI) / 3));
+        if (c > 0.01) best = Math.min(best, (CITY_SIDE * APOTHEM) / c);
+    }
+    return best;
+};
+
+// The six bearings a spoke runs along: the edge normals, which is what makes each one come
+// out through the middle of an edge rather than at a corner.
+const CITY_WAYS = Array.from(
+    { length: 6 },
+    (_, k) => Math.PI / 6 + (k * Math.PI) / 3,
+);
+// Two of them have a chamber on the ring: the market and the yard, on opposite sides so
+// arriving at one does not mean arriving at both.
+const CITY_MARKET = 1,
+    CITY_YARD = 4;
+
+// Where a chamber sits, in world coordinates.
+const cityRoom = (s, k) => {
+    const a = CITY_WAYS[k],
+        d = cityReach(a) * CITY_RING;
+    return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
+};
+
+function cityMatter(s) {
+    const rnd = siteRng(s);
+    // The slab. It laps over its own cell except in a wedge at each mouth, where it stands
+    // back far enough that nothing a neighbour grows can reach across the opening.
+    const ring = [];
+    for (let k = 0; k < 60; k++) {
+        const a = (k / 60) * Math.PI * 2;
+        let off = Math.PI;
+        for (const w of CITY_WAYS)
+            off = Math.min(off, Math.abs(angleDiff(a, w)));
+        const t = Math.min(1, Math.max(0, (off - CITY_DOOR) / CITY_DOOR));
+        const full = cityReach(a);
+        const r =
+            (full * CITY_STAND + (full * CITY_LAP - full * CITY_STAND) * t) *
+            (1 + (rnd() - 0.5) * 0.12 * t);
+        ring.push([s.x + Math.cos(a) * r, s.y + Math.sin(a) * r]);
+    }
+    const rock = [ring];
+
+    const cuts = [];
+    // The hub, and a chamber on the ring for each thing there is to do here.
+    cuts.push([wobbleRing(s.x, s.y, CITY_HUB, 28, 0.12, rnd)]);
+    for (const k of [CITY_MARKET, CITY_YARD]) {
+        const [rx, ry] = cityRoom(s, k);
+        cuts.push([wobbleRing(rx, ry, CITY_ROOM, 24, 0.14, rnd)]);
+    }
+    // A spoke out through every edge, cut long so it opens past the rock rather than
+    // leaving a plug standing in the mouth.
+    const slab = (ax, ay, bx, by, half) => {
+        const dx = bx - ax,
+            dy = by - ay,
+            d = Math.hypot(dx, dy) || 1;
+        const px = (-dy / d) * half,
+            py = (dx / d) * half;
+        return [
+            [
+                [ax + px, ay + py],
+                [bx + px, by + py],
+                [bx - px, by - py],
+                [ax - px, ay - py],
+            ],
+        ];
+    };
+    for (const a of CITY_WAYS) {
+        const out = cityReach(a) * CITY_LAP + 900;
+        cuts.push(
+            slab(
+                s.x,
+                s.y,
+                s.x + Math.cos(a) * out,
+                s.y + Math.sin(a) * out,
+                CITY_BORE / 2,
+            ),
+        );
+    }
+    // ...and a ring joining them, so there is a way round as well as a way through.
+    for (let k = 0; k < 6; k++) {
+        const [ax, ay] = cityRoom(s, k);
+        const [bx, by] = cityRoom(s, (k + 1) % 6);
+        cuts.push(slab(ax, ay, bx, by, CITY_LOOP / 2));
+    }
+
+    let solid;
+    try {
+        solid = polygonClipping.difference(rock, ...cuts);
+    } catch {
+        solid = [rock];
+    } // degenerate input: better a solid rock than none
+    return solid.map((poly) => ({ ring: poly[0], mat: 'block' }));
+}
+
+// What the two chambers look like from outside a hull: a dish over the market, a gantry
+// over the yard. Lines and nothing else, as everywhere -- the client is never told what it
+// is drawing.
+function cityArt(s) {
+    const out = [];
+    const [mx, my] = cityRoom(s, CITY_MARKET);
+    const dish = [];
+    for (let k = 0; k <= 16; k++) {
+        const a = Math.PI * (0.15 + (k / 16) * 0.7);
+        dish.push([
+            +(mx + Math.cos(a) * 200).toFixed(1),
+            +(my + Math.sin(a) * 200).toFixed(1),
+        ]);
+    }
+    out.push({
+        key: `${siteKey(s)}:art:market`,
+        lines: [
+            dish,
+            [
+                [+(mx - 150).toFixed(1), +my.toFixed(1)],
+                [+(mx + 150).toFixed(1), +my.toFixed(1)],
+            ],
+        ],
+    });
+    const [yx, yy] = cityRoom(s, CITY_YARD);
+    const beams = [];
+    for (const u of [-180, -60, 60, 180])
+        beams.push([
+            [+(yx + u).toFixed(1), +(yy - 150).toFixed(1)],
+            [+(yx + u).toFixed(1), +(yy + 150).toFixed(1)],
+        ]);
+    beams.push([
+        [+(yx - 210).toFixed(1), +(yy - 150).toFixed(1)],
+        [+(yx + 210).toFixed(1), +(yy - 150).toFixed(1)],
+    ]);
+    beams.push([
+        [+(yx - 210).toFixed(1), +(yy + 150).toFixed(1)],
+        [+(yx + 210).toFixed(1), +(yy + 150).toFixed(1)],
+    ]);
+    out.push({ key: `${siteKey(s)}:art:yard`, lines: beams });
+    return out;
+}
+
+// The same two things to do that Low Berth offers, and the same two modules behind them:
+// a conversation names no mark, so one foreman module serves every yard there will ever be.
+function cityMarks(s) {
+    const [mx, my] = cityRoom(s, CITY_MARKET);
+    const [yx, yy] = cityRoom(s, CITY_YARD);
+    return [
+        {
+            key: `${siteKey(s)}:market`,
+            kind: 'market',
+            who: 'trader',
+            talk: ['market', {}],
+            x: +mx.toFixed(1),
+            y: +my.toFixed(1),
+            r: 260,
+            icon: [
+                'M12 3v18M7 21h10',
+                'M12 6l-7 2 7-2 7 2-7-2',
+                'M5 8l-3 7a3 3 0 0 0 6 0z',
+                'M19 8l-3 7a3 3 0 0 0 6 0z',
+            ],
+        },
+        {
+            key: `${siteKey(s)}:yard`,
+            kind: 'refit',
+            who: 'foreman',
+            talk: ['yard', {}],
+            x: +yx.toFixed(1),
+            y: +yy.toFixed(1),
+            r: 260,
+            icon: [
+                'M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94' +
+                    'l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z',
+            ],
+        },
+    ];
+}
+
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 9 };
+const SET_VERSION = { town: 9, city: 1 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
@@ -1057,6 +1258,26 @@ function seedTown() {
     meshDirty = true;
 }
 
+// The second city, founded once and then simply there. Thirty-five screens out at a
+// bearing nobody chose, which is far enough that finding it is a voyage and near enough
+// that it is the obvious one to make. Idempotent: a world that already has a city keeps the
+// one it has, wherever that turned out to be.
+function seedCity() {
+    if (sites.some((q) => q.kind === 'city')) return;
+    const a = Math.random() * Math.PI * 2;
+    const cx = Math.cos(a) * CITY_AWAY,
+        cy = Math.sin(a) * CITY_AWAY;
+    addSite(cx, cy).kind = 'city';
+    // Its six neighbours are the reflections of its site across its own edges, which is
+    // what makes the cell come out as the hexagon it claims. Ordinary ground otherwise.
+    const reach = 2 * CITY_SIDE * APOTHEM;
+    for (let k = 0; k < 6; k++) {
+        const b = Math.PI / 6 + (k * Math.PI) / 3;
+        addSite(cx + Math.cos(b) * reach, cy + Math.sin(b) * reach);
+    }
+    meshDirty = true;
+}
+
 let sites = [];
 let meshVersion = 0; // bumped whenever a site is added, to drop cached cells
 let meshDirty = false;
@@ -1285,6 +1506,7 @@ function siteFor(x, y) {
 
 loadSites();
 seedTown();
+seedCity();
 // The settlement's guns, set into the rock either side of the tunnel. Ships live only in
 // memory, so these go up on every boot rather than being part of what the cell generated
 // once: the set piece's furniture, not its matter.
@@ -1397,6 +1619,13 @@ function toUnits(ring, mat) {
 // chunk or a unit, which is the point: a set piece draws its walls, a biome scatters its
 // rock, and neither has to know how the world files things.
 function generateCell(s) {
+    if (s.kind === 'city')
+        return {
+            matter: cityMatter(s),
+            art: cityArt(s),
+            marks: cityMarks(s),
+            place: { name: placeName(siteRng(s)) },
+        };
     if (s.kind === 'town')
         return {
             matter: townMatter(),
@@ -1845,6 +2074,13 @@ function armedArrivals() {
         if (!p || p.ws?.readyState !== 1) {
             s.arm = null;
             continue;
+        }
+        // Touching anything a settlement offers is what makes it home, whether or not the
+        // touch opens a sheet: arriving is the act, and a session that already has one open
+        // has still put in here.
+        if (m.src && p.respawnSite !== m.src) {
+            p.respawnSite = m.src;
+            playersDirty = true;
         }
         // Arriving is what fires the armed action, and it fires exactly once whatever
         // comes of it. Opening the sheet is the part that can do nothing: a session shows
@@ -2297,6 +2533,8 @@ const newMoving = () =>
 //   { exit }             the conversation ends, and I stay where I am
 //   { push: name }       put that conversation on top of me and ask it; work is taken on
 //   { open: markKey }    hand the session to another interaction; the conversation ends
+//   { open: true }       ...to the one this conversation is standing at, whichever
+//                        instance of it that is -- the same yard module serves every yard
 //
 // A frame that has become irrelevant -- a quest finished somewhere else entirely -- pops
 // itself the next time it is asked, and the client never learns it was there.
@@ -2903,7 +3141,10 @@ function nextStep(p, who, choice, start) {
 // draws what it was last told.
 async function playTalk(p, step) {
     if (step.open) {
-        const mark = marks.get(step.open);
+        // `true` is the mark this conversation was offered from, which is the one the
+        // session is already inside. A module that named a key instead would name one
+        // town's yard, and the second town's foreman would open the first town's sheet.
+        const mark = marks.get(step.open === true ? p.busy : step.open);
         // Whatever it pointed at is not loaded, or not there any more. Saying nothing
         // would leave the sheet spinning, so the conversation simply ends.
         if (!mark) return endTalk(p);
@@ -5038,18 +5279,30 @@ const shipRec = (s) => ({
     ft: s.turrets.map((t) => [t.install, t.type, t.rot, t.hp]),
 });
 
-// Put a saved fleet back in the world. It arrives at the origin rather than where it was
-// left: a hull that reappears in the middle of a nest its owner logged out of is a worse
-// bargain than a walk back out. Ids are kept, because a conversation held mid-sentence
-// names the ship that started it.
+// Where a fleet comes back to: the last settlement this player touched anything in, or the
+// origin for somebody who has not touched one yet. The site rather than the spot, so it is
+// "you come back at Still Basin" rather than "you come back at that gantry" -- and so a set
+// piece that lays itself out again cannot strand anybody inside new rock.
+function respawnAt(p) {
+    const s = siteBySrc(p.respawnSite);
+    return s ? { x: s.x, y: s.y } : { x: 0, y: 0 };
+}
+
+// Put a saved fleet back in the world. It arrives where its commander last put in rather
+// than where it was left: a hull that reappears in the middle of a nest its owner logged
+// out of is a worse bargain than a walk back out. Ids are kept, because a conversation held
+// mid-sentence names the ship that started it.
 function restoreFleet(p) {
     const fleet = [];
     for (const rec of p.fleet ?? []) {
         const lead = fleet[0];
+        const home = respawnAt(p);
         const s = newShip(
             p.id,
             PLAYER_TEAM,
-            lead ? { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP } : {},
+            lead ?
+                { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP }
+            :   { nearX: home.x, nearY: home.y },
             HULLS[rec.h] ?? CARRIER,
         );
         s.id = rec.id; // the id newShip just handed out is spent; the saved one is the ship
@@ -5097,6 +5350,7 @@ function newPlayer(id, session) {
         mapNew: null, // ...and what has changed since we last did
         places: [], // named set pieces they have been near
         view: { x: 0, y: 0 },
+        respawnSite: null, // where they last put in; the origin until they have
         left: null, // when their socket went, if they are away
         fleet: null, // their ships, while the world is not holding them
     };
@@ -5119,6 +5373,7 @@ function savePlayers() {
             // whole of why the stack is plain JSON.
             talk: p.talk,
             busy: p.busy,
+            respawnSite: p.respawnSite,
             talks: p.talks,
             store: p.store,
             kills: p.kills,
@@ -5160,6 +5415,7 @@ function loadPlayers() {
         p.map = rec.map ?? {};
         p.places = rec.places ?? [];
         p.talk = rec.talk ?? null;
+        p.respawnSite = rec.respawnSite ?? null;
         p.busy = rec.busy ?? null;
         p.fleet = rec.fleet ?? [];
         players.set(p.id, p);
@@ -5243,13 +5499,14 @@ wss.on('connection', (ws) => {
                 // The rest of the fleet forms up on the first ship rather than being scattered
                 // across the map: a squadron you cannot see together is not a squadron.
                 const lead = fleet[0];
+                const home = respawnAt(p);
                 fleet.push(
                     newShip(
                         p.id,
                         PLAYER_TEAM,
                         lead ?
                             { nearX: lead.x, nearY: lead.y, reach: SPAWN_SEP }
-                        :   {},
+                        :   { nearX: home.x, nearY: home.y },
                     ),
                 );
             }

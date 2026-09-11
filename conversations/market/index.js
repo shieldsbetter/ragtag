@@ -2,7 +2,7 @@
 const SAY =
     '"We\'ve got whatever you need. Best prices for... well, a long way."';
 const OPTIONS = [
-    ['Let me see your wares.', { open: 'town:market' }],
+    ['Let me see your wares.', { open: true }],
     ['Never mind.', { exit: true }],
 ];
 

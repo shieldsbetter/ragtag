@@ -8,8 +8,9 @@ export default (params, player, place, { choice, gatherWork }) => {
     const work = gatherWork();
     const options = [
         // The mark this conversation is offered from is the yard itself, so opening it
-        // hands the session straight to the refit sheet without going anywhere.
-        ['I want to refit my ship.', { open: 'town:yard' }],
+        // hands the session straight to the refit sheet without going anywhere -- and
+        // without naming which yard, so one module serves every one of them.
+        ['I want to refit my ship.', { open: true }],
         ...(work.length ? [['Any work?', { push: work[0] }]] : []),
         ['Never mind.', { exit: true }],
     ];
