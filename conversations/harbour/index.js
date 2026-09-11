@@ -1,10 +1,16 @@
 // The harbourmaster: the default frame under everybody's stack at the starting town.
 //
-// A conversation holder is one function. It is handed two immer drafts -- `params`, its
-// own frame's state, and `player`, the little the person it belongs to remembers about
-// this player -- and returns the next step. Mutate either freely. Where it is in its own
-// tree is state like anything else, which is what makes resuming after a reconnect free:
-// the frame already knows. What outlives the frame goes in `player` instead.
+// A conversation holder is one function. It is handed three immer drafts and returns the
+// next step; mutate any of them freely.
+//
+//   params   this frame's own state, which dies when the frame pops
+//   player   what this conversation knows about this player, wherever they meet it
+//   place    what the set piece knows, shared by everybody it put in the world --
+//            null if whoever is speaking was not put there by one
+//
+// Where it is in its own tree is state like anything else, which is what makes resuming
+// after a reconnect free: the frame already knows. What has to outlive the frame goes in
+// one of the other two, by how widely it should be known.
 const NODES = {
     hello: {
         say:
@@ -39,7 +45,7 @@ const NODES = {
     },
 };
 
-export default (params, player, { choice, start }) => {
+export default (params, player, place, { choice, start }) => {
     // Taken up -- walked up to, or uncovered by whatever was above popping -- so begin at
     // the top rather than in the middle of an exchange nobody remembers having. A
     // reconnect is not this: it arrives with start false and gets the node it was on.

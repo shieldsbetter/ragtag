@@ -686,10 +686,58 @@ function wallFrame(A, back = 20) {
     };
 }
 
+// ---- naming ----
+//
+// A place is named the way a person is -- two tables and a roll -- so the same set piece
+// stamped somewhere else is not stamping the same name. Offered to set piece generators:
+// hand it the cell's own stream (`siteRng`) and the name comes out the same on every world
+// that has that cell in it, without anybody storing a seed. The people tables are down with
+// the conversations, beside the code that draws faces.
+const pick = (xs, rng) => xs[Math.floor(rng() * xs.length)];
+const PLACE_HEAD = [
+    'Cold',
+    'Long',
+    'Iron',
+    'Quiet',
+    'Black',
+    'Far',
+    'Low',
+    'Broken',
+    'Still',
+    'Old',
+    'Grey',
+    'Salt',
+    'Deep',
+    'Thin',
+    'Bitter',
+    'Last',
+];
+const PLACE_TAIL = [
+    'Harbour',
+    'Reach',
+    'Drift',
+    'Anchorage',
+    'Roads',
+    'Hold',
+    'Landing',
+    'Berth',
+    'Quay',
+    'Shoal',
+    'Narrows',
+    'Mooring',
+    'Haven',
+    'Watch',
+    'Basin',
+    'Crossing',
+];
+// 256 of them, which is more than anybody will sail to, and each reads as a place rather
+// than as a generator.
+const placeName = (rng) => `${pick(PLACE_HEAD, rng)} ${pick(PLACE_TAIL, rng)}`;
+
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 6 };
+const SET_VERSION = { town: 8 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
@@ -833,6 +881,15 @@ function marketArt() {
 // itself -- the client is told what to draw rather than looking it up, the same bargain as
 // the art, so a new set piece can offer a new thing to do without the client learning
 // about it first. What the interaction *is* stays on the server.
+
+// What the town knows about itself, shared by the harbourmaster, the foreman and whoever
+// is minding the stall. Declared here rather than written by whoever speaks first, because
+// it is true of the place before anybody has walked up to it: the harbourmaster's greeting
+// already says the lanes are closed, and this is that fact where all three can read it.
+// Only keys the place does not already have are filled in, so a later version of the town
+// can add a fact without unlearning what has happened here -- and so a town that has
+// already been named keeps the name it has.
+const townPlace = (rng) => ({ name: placeName(rng), lanesOpen: false });
 
 function townMarks() {
     const yard = wallFrame(YARD_A).inward(0, 280);
@@ -1341,7 +1398,13 @@ function toUnits(ring, mat) {
 // rock, and neither has to know how the world files things.
 function generateCell(s) {
     if (s.kind === 'town')
-        return { matter: townMatter(), art: townArt(), marks: townMarks() };
+        return {
+            matter: townMatter(),
+            art: townArt(),
+            marks: townMarks(),
+            // What this town starts out knowing, shared by everybody it puts in the world.
+            place: townPlace(siteRng(s)),
+        };
     const b = BIOMES[s.kind] || BIOMES.open;
     if (!b.density) return { matter: [], art: [], marks: [] };
     const poly = cellOf(s);
@@ -1470,6 +1533,18 @@ function depositCell(s) {
             touched.add(c);
         }
     for (const c of touched) saveChunk(c);
+    // What the set piece declares its place starts out knowing. Only keys it does not
+    // already have are filled in: laying a cell out again for a new version replaces what
+    // is standing there, but it must not unlearn what has happened there since. Held to the
+    // same rules as anything a conversation writes -- a generator is author code too, and a
+    // declaration nobody checked is the one that puts a paragraph in the mesh.
+    if (made.place) {
+        const was = s.bag ?? {};
+        const bag = { ...was };
+        for (const [k, v] of Object.entries(made.place))
+            if (!(k in bag)) bag[k] = v;
+        if (bagOk(`set piece ${src}`, bag, PLACE_KEYS)) s.bag = bag;
+    }
     s.gen = SET_VERSION[s.kind] || 1;
     meshDirty = true;
     wallsDirty = true;
@@ -2307,9 +2382,8 @@ const folk = new Map(); // conversationalist id -> promise of { name, gender, po
 function folkFor(who) {
     if (!folk.has(who)) {
         const rng = seeded(who);
-        const pick = (xs) => xs[Math.floor(rng() * xs.length)];
-        const name = `${pick(GIVEN)} ${pick(FAMILY)}`;
-        const gender = pick(GENDERS);
+        const name = `${pick(GIVEN, rng)} ${pick(FAMILY, rng)}`;
+        const gender = pick(GENDERS, rng);
         // The two renders have to be the same person, and the generator consumes whatever
         // stream it is handed -- so each gets its own copy of one wound to the same place,
         // rather than sharing a stream and drawing two different faces.
@@ -2341,8 +2415,16 @@ function folkFor(who) {
 // the other's half of it. The bottom frame is seeded from what the set piece authored, so
 // "the world decides the default, the player owns the interrupts" holds without the two
 // being stored in different places.
-function stackFor(p, who, seed) {
-    if (!p.talks[who]?.length) p.talks[who] = seed ? [seed] : [];
+function stackFor(p, who, mark) {
+    if (p.talks[who]?.length) return p.talks[who];
+    p.talks[who] = mark.talk ? [mark.talk] : [];
+    // Everybody in a town has a word ready for somebody who has just arrived, and it goes
+    // on the first time you meet each of them -- not when you join, because on a cold start
+    // nothing is loaded yet and there is nobody to hand it to. Pushed whether or not it is
+    // still wanted: the frame itself knows whether anybody has said it, and pops unspoken
+    // if somebody has.
+    if (p.talks[who].length && siteBySrc(mark.src)?.kind === 'town')
+        p.talks[who].push(['welcome', {}]);
     return p.talks[who];
 }
 
@@ -2356,27 +2438,41 @@ function stackFor(p, who, seed) {
 // conversation that wants to remember something about a particular person can say so by
 // putting the id in the key it chooses.
 //
-// Small on purpose. It is a bag of flags and counts to branch on, not a place to keep a
-// player's business: ten keys is enough for what one conversation needs to know about you,
-// and a limit nobody reaches is a limit that never had to be explained.
-const STORE_KEYS = 10;
-const STORE_KEY = 50;
-const storeOk = (name, bag) => {
+// Small on purpose. These are bags of flags and counts to branch on, not places to keep a
+// player's business: what one conversation needs to know about you fits in ten keys, and a
+// whole settlement's worth of standing facts fits in a hundred. A limit nobody reaches is a
+// limit that never had to be explained.
+const STORE_KEYS = 10; // what a conversation knows about a player
+const PLACE_KEYS = 100; // what a set piece knows, shared by everybody in it
+const BAG_KEY = 50;
+const BAG_TEXT = 50; // a name or a label, not a paragraph
+const bagOk = (what, bag, max) => {
     const keys = Object.keys(bag);
     let why = null;
-    if (keys.length > STORE_KEYS) why = `over ${STORE_KEYS} keys`;
+    if (keys.length > max) why = `over ${max} keys`;
     for (const k of keys) {
         const v = bag[k];
-        if (k.length > STORE_KEY)
-            why = `key over ${STORE_KEY} characters: ${k}`;
-        else if (typeof v !== 'boolean' && !Number.isFinite(v))
-            why = `${k} is neither a boolean nor a number`;
+        if (k.length > BAG_KEY) why = `key over ${BAG_KEY} characters: ${k}`;
+        // Strings because a place knows its own name, which is neither a flag nor a count.
+        // Capped, because the day a bag holds a paragraph is the day it is a save file.
+        else if (typeof v === 'string') {
+            if (v.length > BAG_TEXT)
+                why = `${k} is over ${BAG_TEXT} characters`;
+        } else if (typeof v !== 'boolean' && !Number.isFinite(v))
+            why = `${k} is not a boolean, a number or a short string`;
     }
     // Dropped whole rather than trimmed. Half a write is a state nobody authored, and a
     // conversation that quietly forgets is easier to find than one that half-remembers.
-    if (why) console.warn(`conversation store ${name}: ${why}; write dropped`);
+    if (why) console.warn(`${what}: ${why}; write dropped`);
     return !why;
 };
+
+// Where a set piece keeps what it knows. It hangs off the site because the site *is* the
+// instance -- the cell the piece claimed -- which is already how one cell's rock is told
+// from a neighbour's, and which means it is saved and loaded with the mesh for free.
+// Scanned rather than indexed: this runs once per thing anybody says, not per tick.
+const siteBySrc = (src) =>
+    src ? (sites.find((q) => siteKey(q) === src) ?? null) : null;
 
 // Ask the stack what happens next. Walks down through frames with nothing to say, so a
 // pop is invisible to the client: it sees the first frame that actually speaks.
@@ -2405,23 +2501,50 @@ function nextStep(p, who, choice, start) {
             fresh = true;
             continue;
         }
-        let step, store;
-        // immer, twice: the holder mutates its own frame's bag and what this conversation
-        // knows about this player, and returns the step. What comes back from each produce
-        // is the next state, replacing what was there if anything changed.
+        let step, store, place;
+        // immer, three times: its own frame's bag, what this conversation knows about this
+        // player, and what the set piece it belongs to knows about anybody. The holder
+        // mutates whichever it likes and returns the step; what comes back from each
+        // produce is the next state, replacing what was there if anything changed.
         const name = frame[0];
+        const site = siteBySrc(p.talk?.src);
+        const placeWas = site?.bag ?? {};
+        // Held rather than fetched twice, so a conversation that writes nothing is told
+        // apart from one that wrote: immer hands back what it was given when a recipe
+        // changes nothing, and without this every ask filed an empty bag of its own.
+        const storeWas = p.store[name] ?? {};
+        const ask = (params, player, here) =>
+            hold(params, player, here, {
+                who,
+                ship: p.talk?.ship,
+                choice: input,
+                start: fresh,
+            });
         frame[1] = produce(frame[1], (params) => {
-            store = produce(p.store[name] ?? {}, (player) => {
-                step = hold(params, player, {
-                    who,
-                    ship: p.talk?.ship,
-                    choice: input,
-                    start: fresh,
-                });
+            store = produce(storeWas, (player) => {
+                // Nobody put this conversationalist anywhere, so there is no place: a null
+                // rather than a draft whose writes go nowhere, because a module that wants
+                // one should find out by asking rather than by being quietly forgotten.
+                if (!site) step = ask(params, player, null);
+                else
+                    place = produce(placeWas, (here) => {
+                        step = ask(params, player, here);
+                    });
             });
         });
-        if (store !== p.store[name] && storeOk(name, store))
+        if (
+            store !== storeWas &&
+            bagOk(`conversation store ${name}`, store, STORE_KEYS)
+        )
             p.store[name] = store;
+        if (
+            site &&
+            place !== placeWas &&
+            bagOk(`set piece ${p.talk.src}`, place, PLACE_KEYS)
+        ) {
+            site.bag = place;
+            meshDirty = true;
+        }
         if (!step?.pop) return step ?? { exit: true };
         stack.pop();
         input = null; // whoever is underneath is starting, not answering
@@ -2472,8 +2595,11 @@ async function playTalk(p, step) {
 
 function startTalk(p, shipId, mark) {
     const who = whoId(mark);
-    stackFor(p, who, mark.talk);
-    p.talk = { who, ship: shipId };
+    stackFor(p, who, mark);
+    // The set piece that laid this conversationalist down, carried so a later step can
+    // reach what the place knows without picking the id apart. It rides in the saved
+    // record with the rest of the conversation.
+    p.talk = { who, ship: shipId, src: mark.src ?? null };
     playTalk(p, nextStep(p, who, null, true));
 }
 

@@ -168,6 +168,27 @@ the same set piece stamped somewhere else has its own, so the id carries the sit
 laid it down — already how one cell's rock is told from a neighbour's. Stacks are per
 player, because two people may be mid-sentence with the same person.
 
+**A conversation keeps things in three places, chosen by how widely they should be
+known.** A holder is handed three immer drafts. `params` is its own frame's state and dies
+when the frame pops. `player` is what this _conversation_ knows about this player — keyed
+by the module's name, not the conversationalist's id, so every harbourmaster in the world
+reads and writes the one bag, which is how one of them knows what you told another; it
+rides in the player's record. `place` is what the _set piece_ knows, shared by everybody it
+put in the world and by every player who walks up to them; it hangs off the site, because
+the site is the instance, so it is saved and loaded with the mesh for free. It is `null`
+when whoever is speaking was not put there by a set piece, rather than a draft whose writes
+go nowhere: a module that wants a place should find out by asking. A generator may
+declare what its place starts out knowing by returning `place` beside its matter, art and
+marks — filling in only keys that are missing, so laying a cell out again for a new version
+replaces what is standing there without unlearning what has happened since. Both bags are
+small on purpose: things to branch on, ten keys for a conversation and a hundred for a
+place, keys under 50 characters, values booleans, finite numbers, or strings under 50 —
+strings because a place knows its own name, capped because the day a bag holds a paragraph
+is the day it is a save file. A bag that breaks a rule is dropped whole with a warning
+naming it, so a bad write costs the good writes made in the same breath — half a write is
+a state nobody authored. A generator's declaration is held to the same rules: it is author
+code too.
+
 **A set piece can offer something to do, and the server decides what that is.** Besides
 matter and art, a generator may emit _interaction markers_: a point, a reach, a kind, and
 an icon the marker carries itself. Tapping one sends the selection there _armed_; arriving
