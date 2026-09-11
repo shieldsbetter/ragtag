@@ -687,15 +687,11 @@ function wobbleRing(cx, cy, r, sides, wobble, rnd) {
 //
 // Anything built against the cavern wall is drawn in a frame where x runs along the wall
 // and y points inward, so a bearing is the only thing that decides where it stands.
-function wallFrame(A, back = 20) {
-    const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT,
-        cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
+function faceFrame(ox, oy, A) {
     const nx = Math.cos(A),
         ny = Math.sin(A); // out towards the rock
-    const ox = cx + nx * (TOWN_CAVE - back),
-        oy = cy + ny * (TOWN_CAVE - back);
     const px = -ny,
-        py = nx; // along the wall
+        py = nx; // along the face
     const at = (u, v) => [
         +(ox + px * u - nx * v).toFixed(1),
         +(oy + py * u - ny * v).toFixed(1),
@@ -705,6 +701,17 @@ function wallFrame(A, back = 20) {
         line: (...pts) => pts.map(([u, v]) => at(u, v)),
         inward: (u, v) => [ox + px * u - nx * v, oy + py * u - ny * v],
     };
+}
+
+// The town's own cavern wall, at a bearing round it.
+function wallFrame(A, back = 20) {
+    const cx = -Math.cos(TOWN_OUT) * TOWN_SHIFT,
+        cy = -Math.sin(TOWN_OUT) * TOWN_SHIFT;
+    return faceFrame(
+        cx + Math.cos(A) * (TOWN_CAVE - back),
+        cy + Math.sin(A) * (TOWN_CAVE - back),
+        A,
+    );
 }
 
 // ---- naming ----
@@ -758,19 +765,24 @@ const placeName = (rng) => `${pick(PLACE_HEAD, rng)} ${pick(PLACE_TAIL, rng)}`;
 // ---- the second city ----
 //
 // Low Berth is a cavern with one way in. This is the other kind of settlement: a slab of
-// rock with a warren cut through it, a way out through every edge of its cell, and a ring
-// corridor joining the spokes so it reads as a network rather than a star. Same hexagon,
-// same claim, and nothing about it is special-cased anywhere -- it is a second `kind` in
+// rock with a warren dug through it, a way out through every edge of its cell, and
+// clearings here and there where there was room to build something. Same hexagon, same
+// claim, and nothing about it is special-cased anywhere -- it is a second `kind` in
 // `generateCell` and a second entry in `SET_VERSION`, which is the whole of what a new set
 // piece costs.
 const CITY_SIDE = 2.12 * SCREEN; // the same hexagon the town claims
-const CITY_HUB = 640; // the chamber where the spokes meet
-const CITY_BORE = 300; // clear width of a spoke
-const CITY_LOOP = 240; // ...and of the ring that joins them
-const CITY_RING = 0.56; // where that ring sits, as a fraction of the apothem
-const CITY_ROOM = 430; // a chamber off the ring: market, yard
-const CITY_DOOR = 0.3; // half-width of the wedge the rock stands back in, at each mouth
-const CITY_STAND = 0.82; // ...and how far out it stands there, of its full reach. Every
+const CITY_HUB = 340; // the clearing the trunks are dug from
+const CITY_BORE = 250; // clear width of a trunk, at its widest
+const CITY_STEP = 170; // how far a tunnel runs before it bends
+const CITY_BEND = 0.5; // ...and how far it may bend there, in radians
+const CITY_SPURS = 40; // side passages driven off whatever is already dug
+const CITY_ROOM = 300; // a clearing, at its widest
+const CITY_HALL = 440; // ...and a clearing with a station in it, which has to hold one
+const CITY_ROOMS = 10; // how many of them, the market and the yard among them
+const CITY_PILLAR = 150; // thinnest rib of rock allowed to stand between two tunnels
+const CITY_SEAM = 2; // ...and how many steps one may run inside that before it stops
+const CITY_DOOR = 0.17; // half-width of the wedge the rock stands back in, at each mouth
+const CITY_STAND = 0.9; // ...and how far out it stands there, of its full reach. Every
 // mouth keeps a moat for the reason the town's one does: a
 // neighbour's blob landing across it would seal that way in,
 // and "a way out through every edge" is the whole idea.
@@ -787,26 +799,152 @@ const cityReach = (a) => {
     return best;
 };
 
-// The six bearings a spoke runs along: the edge normals, which is what makes each one come
+// The six bearings a trunk sets out on: the edge normals, which is what makes each one come
 // out through the middle of an edge rather than at a corner.
 const CITY_WAYS = Array.from(
     { length: 6 },
     (_, k) => Math.PI / 6 + (k * Math.PI) / 3,
 );
-// Two of them have a chamber on the ring: the market and the yard, on opposite sides so
-// arriving at one does not mean arriving at both.
-const CITY_MARKET = 1,
-    CITY_YARD = 4;
 
-// Where a chamber sits, in world coordinates.
-const cityRoom = (s, k) => {
-    const a = CITY_WAYS[k],
-        d = cityReach(a) * CITY_RING;
-    return [s.x + Math.cos(a) * d, s.y + Math.sin(a) * d];
-};
+// Where a walk has eaten into another tunnel's rib of rock, and the point on that tunnel it
+// is too close to -- which is what a walk turns away from. Segments near where the walk set
+// out are skipped: a spur starts on the tunnel it branches from and a trunk starts in the
+// hub with five others, so without that exemption every walk is a seam from its first step.
+function ribbed(x, y, seam, x0, y0) {
+    for (const g of seam.segs) {
+        const mx = (g.ax + g.bx) / 2,
+            my = (g.ay + g.by) / 2;
+        if (Math.hypot(mx - x0, my - y0) < CITY_STEP * 1.5) continue;
+        const dx = g.bx - g.ax,
+            dy = g.by - g.ay;
+        const d2 = dx * dx + dy * dy || 1;
+        const t = Math.max(
+            0,
+            Math.min(1, ((x - g.ax) * dx + (y - g.ay) * dy) / d2),
+        );
+        const px = g.ax + dx * t,
+            py = g.ay + dy * t;
+        if (Math.hypot(px - x, py - y) < seam.half + g.half + CITY_PILLAR)
+            return [px, py];
+    }
+    return null;
+}
 
-function cityMatter(s) {
+// A tunnel is a walk, not a line: it takes a step, bends, and takes another. Given
+// somewhere to be it is steered as well -- each bend pulled part of the way back toward the
+// target -- so a trunk arrives at its mouth without ever having run straight at it. Given
+// nothing, it wanders off and ends wherever it ends.
+function dig(x, y, a, steps, rnd, aim, seam) {
+    const pts = [[x, y]];
+    const x0 = x,
+        y0 = y;
+    let along = 0;
+    for (let i = 0; i < steps; i++) {
+        a += (rnd() - 0.5) * 2 * CITY_BEND;
+        if (aim) {
+            a += angleDiff(Math.atan2(aim[1] - y, aim[0] - x), a) * 0.4;
+            if (Math.hypot(aim[0] - x, aim[1] - y) < CITY_STEP) break;
+        }
+        let nx = x + Math.cos(a) * CITY_STEP,
+            ny = y + Math.sin(a) * CITY_STEP;
+        // Two tunnels running side by side with nothing standing between them are not two
+        // tunnels, they are open space -- and enough of that and the place reads as more
+        // tunnel than wall. So a step that would eat the rib turns away from whatever it
+        // came too near and tries once more; a walk that cannot get clear that way is
+        // running alongside rather than crossing, and it ends. The budget is in steps and
+        // there is no angle to measure: a crossing is in and out again whatever angle it
+        // comes in at, and the shallow crossing, which is the worst kind of seam, is the
+        // one that cannot get clear.
+        if (seam) {
+            const rib = ribbed(nx, ny, seam, x0, y0);
+            if (rib) {
+                a = Math.atan2(ny - rib[1], nx - rib[0]);
+                nx = x + Math.cos(a) * CITY_STEP;
+                ny = y + Math.sin(a) * CITY_STEP;
+                along = ribbed(nx, ny, seam, x0, y0) ? along + 1 : 0;
+                if (along > CITY_SEAM) break;
+            } else along = 0;
+        }
+        x = nx;
+        y = ny;
+        pts.push([x, y]);
+    }
+    // A walk covers less ground than it travels, so a trunk given a step budget for the
+    // straight-line distance stops short -- and a trunk that stops short leaves a plug
+    // standing in its mouth, which is that edge of the cell with no way out. The budget is
+    // generous and the last point is the mouth regardless: arriving is the invariant, and
+    // bending prettily on the way there is not.
+    if (aim) pts.push(aim);
+    return pts;
+}
+
+// Has this been dug out? Everything the warren cuts, asked as a shape rather than looked up
+// in the matter, because the matter is not built yet when this is wanted.
+function cityDug(plan, x, y) {
+    if (Math.hypot(x - plan.at[0], y - plan.at[1]) < CITY_HUB) return true;
+    for (const r of plan.rooms)
+        if (Math.hypot(x - r.x, y - r.y) < r.r) return true;
+    for (const g of plan.segs) {
+        const dx = g.bx - g.ax,
+            dy = g.by - g.ay;
+        const d2 = dx * dx + dy * dy || 1;
+        const t = Math.max(
+            0,
+            Math.min(1, ((x - g.ax) * dx + (y - g.ay) * dy) / d2),
+        );
+        if (Math.hypot(g.ax + dx * t - x, g.ay + dy * t - y) < g.half)
+            return true;
+    }
+    return false;
+}
+
+// Where a station stands on its hall's wall. The hall is cut into rock that is already
+// tunnelled, so its wall is not the circle it was drawn as: tunnels open into it and the
+// void runs on past them, and standing the art at a fixed bearing put it in mid-air in the
+// middle of a merged cavern. So the wall is found rather than assumed -- march out along
+// each bearing until rock starts, then take the stretch, as wide as the station itself,
+// where the furthest of those is nearest. That is the piece of the hall's own wall no
+// tunnel has opened. The art is laid on the deepest point of it, so none of the station is
+// buried and the rest of the wall stands a little proud of it, which is what "built against
+// the rock" looks like when the rock is not a drawn circle.
+const CITY_SPAN = 0.62; // half the angle a station takes up on its own wall
+
+function cityWall(plan, room) {
+    const N = 32;
+    const out = [];
+    for (let k = 0; k < N; k++) {
+        const a = (k / N) * Math.PI * 2;
+        let d = room.r * 0.7;
+        for (; d < room.r * 2.4; d += 30)
+            if (
+                !cityDug(
+                    plan,
+                    room.x + Math.cos(a) * d,
+                    room.y + Math.sin(a) * d,
+                )
+            )
+                break;
+        out.push(d);
+    }
+    const span = Math.round((CITY_SPAN / (Math.PI * 2)) * N);
+    let best = 0,
+        worst = Infinity;
+    for (let k = 0; k < N; k++) {
+        let far = 0;
+        for (let j = -span; j <= span; j++)
+            far = Math.max(far, out[(k + j + N) % N]);
+        if (far < worst) ((worst = far), (best = k));
+    }
+    return { a: (best / N) * Math.PI * 2, d: worst };
+}
+
+// The whole layout, worked out from the cell's own stream, so matter, art and marks each ask
+// for it and get the same warren without anything being stored. It is worked out three times
+// in the life of a cell -- all three inside the one `depositCell` that lays the cell down --
+// and what it produces is persisted, so remembering it would save that twice, once, ever.
+function cityPlan(s) {
     const rnd = siteRng(s);
+
     // The slab. It laps over its own cell except in a wedge at each mouth, where it stands
     // back far enough that nothing a neighbour grows can reach across the opening.
     const ring = [];
@@ -822,116 +960,276 @@ function cityMatter(s) {
             (1 + (rnd() - 0.5) * 0.12 * t);
         ring.push([s.x + Math.cos(a) * r, s.y + Math.sin(a) * r]);
     }
-    const rock = [ring];
 
-    const cuts = [];
-    // The hub, and a chamber on the ring for each thing there is to do here.
-    cuts.push([wobbleRing(s.x, s.y, CITY_HUB, 28, 0.12, rnd)]);
-    for (const k of [CITY_MARKET, CITY_YARD]) {
-        const [rx, ry] = cityRoom(s, k);
-        cuts.push([wobbleRing(rx, ry, CITY_ROOM, 24, 0.14, rnd)]);
+    // Somewhere inside the rock, with room to stand back from the surface. Spurs are dug
+    // from these and clearings opened at them; a point out in the mouth of a trunk is
+    // neither, which is what this keeps out.
+    const inside = ([x, y]) => {
+        const dx = x - s.x,
+            dy = y - s.y;
+        return Math.hypot(dx, dy) < cityReach(Math.atan2(dy, dx)) * 0.82;
+    };
+
+    const paths = [];
+    const nodes = [];
+    const trunkNodes = [];
+    const segs = [];
+    const drive = (pts, bore, trunk) => {
+        paths.push({ pts, bore });
+        for (let i = 1; i < pts.length; i++)
+            segs.push({
+                ax: pts[i - 1][0],
+                ay: pts[i - 1][1],
+                bx: pts[i][0],
+                by: pts[i][1],
+                half: bore / 2,
+            });
+        for (const p of pts)
+            if (inside(p)) {
+                nodes.push(p);
+                if (trunk) trunkNodes.push({ x: p[0], y: p[1] });
+            }
+    };
+
+    // A trunk out through the middle of every edge, cut long so it opens past the rock
+    // rather than leaving a plug standing in the mouth.
+    for (const a of CITY_WAYS) {
+        const out = cityReach(a) * CITY_LAP + 900;
+        drive(
+            dig(s.x, s.y, a, Math.ceil(out / CITY_STEP) * 2 + 8, rnd, [
+                s.x + Math.cos(a) * out,
+                s.y + Math.sin(a) * out,
+            ]),
+            CITY_BORE * (0.88 + rnd() * 0.12),
+            true,
+        );
     }
-    // A spoke out through every edge, cut long so it opens past the rock rather than
-    // leaving a plug standing in the mouth.
+
+    // ...and spurs off whatever is already dug, with nothing steering them. They wander,
+    // they run across trunks and across each other, and a crossing is a junction because
+    // the warren is all one cut -- so the place reads as a network without anything having
+    // laid a network out.
+    for (let i = 0; i < CITY_SPURS; i++) {
+        // Each spur sets out from a different quarter of the compass, taken in turn. Left to
+        // pick freely, spurs clump: every spur adds its own points to the pool, so wherever
+        // the last one went is where the next one is likeliest to start, and the warren came
+        // out packed down one side with plates of untouched rock down the other. And within
+        // the sector, the outer of two picks -- every trunk passes through the middle, so an
+        // even pick is a pick near the hub.
+        const want = (i / CITY_SPURS) * Math.PI * 2 + rnd() * 0.5;
+        const sector = nodes.filter(
+            (p) =>
+                Math.abs(angleDiff(Math.atan2(p[1] - s.y, p[0] - s.x), want)) <
+                Math.PI / 5,
+        );
+        const from = sector.length ? sector : nodes;
+        const a = from[Math.floor(rnd() * from.length)];
+        const b = from[Math.floor(rnd() * from.length)];
+        const [x, y] =
+            (
+                Math.hypot(a[0] - s.x, a[1] - s.y) >
+                Math.hypot(b[0] - s.x, b[1] - s.y)
+            ) ?
+                a
+            :   b;
+        // A spur is stopped where it starts running alongside something already dug; a
+        // trunk never is, because a trunk that stops leaves a plug in its mouth and that
+        // edge of the cell has no way out. Six trunks radiating from one hub hardly run
+        // alongside anything anyway -- it is the spurs, which set out from a point on
+        // something else, that seam.
+        const bore = CITY_BORE * (0.62 + rnd() * 0.28);
+        drive(
+            dig(
+                x,
+                y,
+                rnd() * Math.PI * 2,
+                10 + Math.floor(rnd() * 31),
+                rnd,
+                null,
+                { segs, half: bore / 2 },
+            ),
+            bore,
+        );
+    }
+
+    // Clearings, at whichever of those points are furthest from each other: a warren of
+    // even bore is a maze, and the places wide enough to put something down are what make
+    // it somewhere rather than a way through. Spread rather than scattered, so two of them
+    // can be the market and the yard without those ending up side by side.
+    // Kept to a band: out of the hub, which is busy enough, and well inside the mouths,
+    // because a market standing in a doorway is a market anyone sails past rather than into.
+    // Off a trunk, never off a spur: a trunk runs from the hub to a mouth at full bore, so
+    // anything standing on one has a way in wide enough to bring a hull down. A spur may be
+    // half that and may dead-end, and a market at the end of one is a market nobody can
+    // reach -- which is not a thing a player can see to be wrong, only fail at.
+    const rooms = [];
+    const far = trunkNodes.filter((p) => {
+        const d = Math.hypot(p.x - s.x, p.y - s.y);
+        const full = cityReach(Math.atan2(p.y - s.y, p.x - s.x));
+        return d > CITY_HUB * 1.6 && d < full * 0.62;
+    });
+    while (rooms.length < CITY_ROOMS && far.length) {
+        let best = 0,
+            score = -1;
+        for (const [i, p] of far.entries()) {
+            const d =
+                rooms.length ?
+                    Math.min(
+                        ...rooms.map((q) => Math.hypot(p.x - q.x, p.y - q.y)),
+                    )
+                :   Math.hypot(p.x - s.x, p.y - s.y);
+            if (d > score) ((score = d), (best = i));
+        }
+        const p = far.splice(best, 1)[0];
+        // The first two are the market and the yard -- furthest apart, so arriving at one
+        // does not mean arriving at both. A hall has to hold a station drawn for the town's
+        // cavern, so it is bigger and rounder than an ordinary clearing: the art is built
+        // off the face and a face that wanders is a station half inside the rock.
+        const hall = rooms.length < 2;
+        rooms.push({
+            x: p.x,
+            y: p.y,
+            r: hall ? CITY_HALL : CITY_ROOM * (0.7 + rnd() * 0.5),
+            w: hall ? 0.06 : 0.22,
+        });
+    }
+
+    // The rings the clearings are actually cut as, rolled here rather than where the cut is
+    // made, so no half-spent random stream has to leave this function -- which is what lets
+    // the layout be worked out once and remembered.
+    const hub = wobbleRing(s.x, s.y, CITY_HUB, 28, 0.12, rnd);
+    for (const r of rooms) r.ring = wobbleRing(r.x, r.y, r.r, 24, r.w, rnd);
+
+    const plan = {
+        at: [s.x, s.y],
+        ring,
+        paths,
+        segs,
+        hub,
+        rooms,
+        market: rooms[0],
+        yard: rooms[1],
+    };
+    for (const r of [plan.market, plan.yard])
+        if (r) r.stand = cityWall(plan, r);
+    return plan;
+}
+
+function cityMatter(s) {
+    const plan = cityPlan(s);
+
+    const cuts = [[plan.hub]];
+    for (const r of plan.rooms) cuts.push([r.ring]);
+
+    // A run of tunnel is a quad between two points, overrun by half its own width at each
+    // end so consecutive runs lap over each other -- otherwise every bend leaves a notch of
+    // rock standing in the corner of its own turn.
     const slab = (ax, ay, bx, by, half) => {
         const dx = bx - ax,
             dy = by - ay,
             d = Math.hypot(dx, dy) || 1;
+        const ux = (dx / d) * half,
+            uy = (dy / d) * half;
         const px = (-dy / d) * half,
             py = (dx / d) * half;
         return [
             [
-                [ax + px, ay + py],
-                [bx + px, by + py],
-                [bx - px, by - py],
-                [ax - px, ay - py],
+                [ax - ux + px, ay - uy + py],
+                [bx + ux + px, by + uy + py],
+                [bx + ux - px, by + uy - py],
+                [ax - ux - px, ay - uy - py],
             ],
         ];
     };
-    for (const a of CITY_WAYS) {
-        const out = cityReach(a) * CITY_LAP + 900;
-        cuts.push(
-            slab(
-                s.x,
-                s.y,
-                s.x + Math.cos(a) * out,
-                s.y + Math.sin(a) * out,
-                CITY_BORE / 2,
-            ),
-        );
-    }
-    // ...and a ring joining them, so there is a way round as well as a way through.
-    for (let k = 0; k < 6; k++) {
-        const [ax, ay] = cityRoom(s, k);
-        const [bx, by] = cityRoom(s, (k + 1) % 6);
-        cuts.push(slab(ax, ay, bx, by, CITY_LOOP / 2));
+    for (const path of plan.paths) {
+        const half = path.bore / 2;
+        for (let i = 1; i < path.pts.length; i++) {
+            const [ax, ay] = path.pts[i - 1],
+                [bx, by] = path.pts[i];
+            cuts.push(slab(ax, ay, bx, by, half));
+        }
     }
 
-    let solid;
-    try {
-        solid = polygonClipping.difference(rock, ...cuts);
-    } catch {
-        solid = [rock];
-    } // degenerate input: better a solid rock than none
+    // Snapped to whole units, and rings that collapse to nothing dropped. `polygon-clipping`
+    // falls over on a segment whose ends differ in the twelfth decimal -- "unable to find
+    // segment in SweepLine tree" -- and a warren is hundreds of overlapping quads, which is
+    // exactly the input that produces those. Measured: 4 of 30 cells threw before snapping,
+    // and a throw means the whole warren is lost and the cell comes back as solid rock.
+    const snap = (rings) =>
+        rings
+            .map((r) => r.map(([x, y]) => [Math.round(x), Math.round(y)]))
+            .map((r) =>
+                r.filter(
+                    (p, i) =>
+                        i === 0 || p[0] !== r[i - 1][0] || p[1] !== r[i - 1][1],
+                ),
+            )
+            .filter((r) => r.length > 2);
+
+    // Cut in batches, each on its own. `polygon-clipping` still falls over on maybe one
+    // warren in thirty even snapped, and a single difference of everything at once means
+    // that one throw is the whole warren: the cell comes back as a solid slab with no way
+    // in. A batch that throws costs the dozen runs of tunnel in it and nothing else.
+    let solid = snap([plan.ring]).length ? [snap([plan.ring])] : [[plan.ring]];
+    const ready = cuts.map(snap).filter((c) => c.length);
+    // 128 a batch. Measured over 30 warrens, median 99ms against 127 at 64 and 234 at 32 --
+    // each batch re-walks the whole slab, so small batches pay for that many more times. A
+    // batch that throws costs the four or five runs of tunnel that were in it.
+    for (let i = 0; i < ready.length; i += 128) {
+        try {
+            solid = polygonClipping.difference(
+                solid,
+                ...ready.slice(i, i + 128),
+            );
+        } catch {
+            /* this batch of tunnel is not cut; the rest of the warren still is */
+        }
+    }
     return solid.map((poly) => ({ ring: poly[0], mat: 'block' }));
 }
 
-// What the two chambers look like from outside a hull: a dish over the market, a gantry
-// over the yard. Lines and nothing else, as everywhere -- the client is never told what it
-// is drawing.
+// The same two stations the town has, stood up on a rock face in a clearing instead of on
+// the cavern wall. Nothing is redrawn: `yardLines` and `marketLines` are handed a frame and
+// have no idea which settlement they are being built in.
+// The station's frame sits a little inside the wall that was found for it, the way the
+// town's sits a little inside its cavern wall.
+const cityFace = (r) =>
+    faceFrame(
+        r.x + Math.cos(r.stand.a) * (r.stand.d - 20),
+        r.y + Math.sin(r.stand.a) * (r.stand.d - 20),
+        r.stand.a,
+    );
+
 function cityArt(s) {
-    const out = [];
-    const [mx, my] = cityRoom(s, CITY_MARKET);
-    const dish = [];
-    for (let k = 0; k <= 16; k++) {
-        const a = Math.PI * (0.15 + (k / 16) * 0.7);
-        dish.push([
-            +(mx + Math.cos(a) * 200).toFixed(1),
-            +(my + Math.sin(a) * 200).toFixed(1),
-        ]);
-    }
-    out.push({
-        key: `${siteKey(s)}:art:market`,
-        lines: [
-            dish,
-            [
-                [+(mx - 150).toFixed(1), +my.toFixed(1)],
-                [+(mx + 150).toFixed(1), +my.toFixed(1)],
-            ],
-        ],
-    });
-    const [yx, yy] = cityRoom(s, CITY_YARD);
-    const beams = [];
-    for (const u of [-180, -60, 60, 180])
-        beams.push([
-            [+(yx + u).toFixed(1), +(yy - 150).toFixed(1)],
-            [+(yx + u).toFixed(1), +(yy + 150).toFixed(1)],
-        ]);
-    beams.push([
-        [+(yx - 210).toFixed(1), +(yy - 150).toFixed(1)],
-        [+(yx + 210).toFixed(1), +(yy - 150).toFixed(1)],
-    ]);
-    beams.push([
-        [+(yx - 210).toFixed(1), +(yy + 150).toFixed(1)],
-        [+(yx + 210).toFixed(1), +(yy + 150).toFixed(1)],
-    ]);
-    out.push({ key: `${siteKey(s)}:art:yard`, lines: beams });
-    return out;
+    const plan = cityPlan(s);
+    return [
+        {
+            key: `${siteKey(s)}:art:yard`,
+            lines: yardLines(cityFace(plan.yard)),
+        },
+        {
+            key: `${siteKey(s)}:art:market`,
+            lines: marketLines(cityFace(plan.market)),
+        },
+    ];
 }
 
 // The same two things to do that Low Berth offers, and the same two modules behind them:
 // a conversation names no mark, so one foreman module serves every yard there will ever be.
+// Each stands off its own face by what it does in the town, so the marker is where the
+// station is rather than where the clearing happens to be centred.
 function cityMarks(s) {
-    const [mx, my] = cityRoom(s, CITY_MARKET);
-    const [yx, yy] = cityRoom(s, CITY_YARD);
+    const plan = cityPlan(s);
+    const yard = cityFace(plan.yard).inward(0, 280);
+    const market = cityFace(plan.market).inward(0, 300);
     return [
         {
             key: `${siteKey(s)}:market`,
             kind: 'market',
             who: 'trader',
             talk: ['market', {}],
-            x: +mx.toFixed(1),
-            y: +my.toFixed(1),
+            x: +market[0].toFixed(1),
+            y: +market[1].toFixed(1),
             r: 260,
             icon: [
                 'M12 3v18M7 21h10',
@@ -945,8 +1243,8 @@ function cityMarks(s) {
             kind: 'refit',
             who: 'foreman',
             talk: ['yard', {}],
-            x: +yx.toFixed(1),
-            y: +yy.toFixed(1),
+            x: +yard[0].toFixed(1),
+            y: +yard[1].toFixed(1),
             r: 260,
             icon: [
                 'M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94' +
@@ -959,14 +1257,16 @@ function cityMarks(s) {
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 9, city: 1 };
+const SET_VERSION = { town: 9, city: 6 };
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
 
-// The yard: staging built out from the cavern wall with two cranes over it.
-function townArt() {
-    const { line } = wallFrame(YARD_A);
+// The yard: staging built out from the rock face with two cranes over it. It is authored
+// in a face frame and knows nothing else, which is what lets the same yard stand in the
+// town's cavern and in a clearing in the second city's warren -- like stations look alike
+// because they are one drawing, not two that resemble each other.
+function yardLines({ line }) {
     const lines = [];
 
     // The staging: a deck off the wall, uprights, and two galleries above it.
@@ -1012,13 +1312,12 @@ function townArt() {
     );
     lines.push(line([-60, 200], [-60, 248]), line([10, 200], [10, 248]));
     for (const u of [-70, 40]) lines.push(line([u, 150], [u, 200])); // props down to the deck
-    return [{ key: 'town:yard', lines }, ...marketArt()];
+    return lines;
 }
 
 // The market: a faceted dome on a plinth with a dish beside it, because a place that talks
 // to other places is a place that has an antenna.
-function marketArt() {
-    const { line } = wallFrame(MARKET_A);
+function marketLines({ line }) {
     const lines = [];
     const R = 190,
         cy = R + 40; // dome centre, out from the wall
@@ -1093,7 +1392,14 @@ function marketArt() {
             [focus[0] - 9, focus[1] - 9],
         ),
     );
-    return [{ key: 'town:market', lines }];
+    return lines;
+}
+
+function townArt() {
+    return [
+        { key: 'town:yard', lines: yardLines(wallFrame(YARD_A)) },
+        { key: 'town:market', lines: marketLines(wallFrame(MARKET_A)) },
+    ];
 }
 
 // Somewhere you can do something. A marker is a point, a reach, and an icon it carries

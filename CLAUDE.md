@@ -139,12 +139,55 @@ the cavern, so the rule the order is validated by is the same one that opened th
 
 **A second set piece costs a `kind` and a version, and nothing else.** Low Berth is a
 cavern with one way in; Still Basin is the other kind of settlement, a slab of rock with a
-warren cut through it — a hub, a spoke out through the middle of every edge of its cell, and
-a ring corridor joining them so it reads as a network rather than a star. Each mouth keeps a
-moat for the reason the town's door has one: a neighbour's blob landing across it would seal
-that way in. It claims its hexagon the same way, names itself the same way, and offers the
-same two things to do through the same two conversation modules. It is founded once, 35
-screens out at a bearing nobody chose, on a world that does not already have one.
+warren dug through it. Each mouth keeps a moat for the reason the town's door has one: a
+neighbour's blob landing across it would seal that way in. It claims its hexagon the same
+way, names itself the same way, and offers the same two things to do through the same two
+conversation modules. It is founded once, 35 screens out at a bearing nobody chose, on a
+world that does not already have one.
+
+**A tunnel is a walk, and the warren is what the walks make between them.** Nothing lays a
+network out. A trunk is a walk steered toward the middle of one edge of the cell, bending
+the whole way and arriving because the last point is the mouth regardless — six of those, so
+every edge has a way out. A spur is the same walk with nothing steering it, started from a
+point on whatever is already dug. Spurs run across trunks and across each other, and a
+crossing is a junction because the warren is all one cut. Clearings are opened where those
+points are furthest apart, which is what stops a market and a yard ending up side by side.
+
+**What makes it read as rock is the rock left standing, and three rules put it there.**
+Bores are deliberately narrow against the slab: at full width the trunks severed it into
+plates and the place read as something shattered rather than something tunnelled through.
+A minimum rib (`CITY_PILLAR`) stands between any two tunnels: a step that would eat it turns
+away from whatever it came too near and tries once more, and a walk that cannot get clear is
+running _alongside_ rather than crossing, so it ends there. That budget is in steps and there
+is no angle to measure — a crossing is in and out again whatever angle it comes in at, and
+the shallow crossing, which is the worst kind of seam, is exactly the one that cannot get
+clear. And each spur sets out from a different quarter of the compass, taken in turn, and
+from the outer of two picks within it: left to pick freely spurs clump, because every spur
+adds its own points to the pool and wherever the last one went is where the next is likeliest
+to start — the warren came out packed down one side with plates of untouched rock down the
+other, and packed at the hub besides, since every trunk runs through the middle.
+
+The two rules that are not aesthetic: a clearing goes on a _trunk_, never a spur, because a
+spur may be half the bore and may dead-end, and a market nobody can reach is not a thing a
+player can see to be wrong — only fail at; and a walk covers less ground than it travels, so
+a trunk budgeted for the straight-line distance stops short and leaves a plug in its own
+mouth. Neither the rib rule nor the step budget may apply to a trunk for that second reason:
+a trunk that stops is an edge of the cell with no way out.
+
+**Like stations are one drawing, not two that resemble each other.** The yard's staging and
+the market's dome are authored in a _face frame_ — `u` along a rock face, `v` inward off it
+— and know nothing else, so the same drawing stands on the town's cavern wall and on a wall
+in the second city's warren. What the city has to work out is where that wall is. A clearing
+is cut into rock that is already tunnelled, so its wall is not the circle it was drawn as:
+tunnels open into it and the void runs on past them, and standing the art at a fixed bearing
+put it in mid-air in the middle of a merged cavern. So the wall is found rather than assumed
+— march out along each bearing until rock starts, and take the stretch, as wide as the
+station itself, where the furthest of those is nearest. The art lies on the deepest point of
+that stretch, so none of the station is buried and the rest of the wall stands a little proud
+of it, which is what "built against the rock" looks like when the rock is not a drawn circle.
+The layout is worked out three times in the life of a cell — by matter, by art and by marks,
+all three inside the one `depositCell` that lays the cell down — and nothing carries a
+half-spent random stream out of it, which is what makes that safe.
 
 **A conversation names no mark.** `{ open: true }` hands the session to the mark the
 conversation is standing at, whichever instance that is, so one foreman module serves every
@@ -508,6 +551,16 @@ shared context. Removing redundant fields buys almost nothing; digits do, becaus
 entropy is what survives. Measure before restructuring the protocol: trimming the three
 fields of a rock that never change saved 3% of the wire, and not sending its position at
 all saved 93%.
+
+**`polygon-clipping` falls over on a warren, and one throw is the whole set piece.**
+Hundreds of overlapping quads is exactly the input that produces "unable to find segment in
+SweepLine tree" — a segment whose ends differ in the twelfth decimal. Measured: 4 cells in
+30 threw, and a throw meant the cell came back as a solid slab with no way in, which reads
+as the set piece simply not being there. Two defences, both needed: snap every ring to whole
+units and drop what collapses, and cut in batches so a batch that still throws costs the
+four or five runs of tunnel that were in it rather than the whole town. Batch size is a
+speed knob as much as a safety one and the bigger end wins: each batch re-walks the whole
+slab, so 128 at a time is a median 99ms against 234 at 32.
 
 **Test servers leak, and this box has no RAM to spare.** Every throwaway server holds
 60-140MB, and any run that dies before its cleanup line leaves one behind. Thirty-eight
