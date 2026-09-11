@@ -130,14 +130,11 @@ const TRACTOR_R = 260,
     ORE_GRAB = 26;
 
 // Opposition is scattered through the world rather than spawned at anyone: each chunk
-// gets one roll the first time it is loaded, so exploring is what finds a fight. The
+// gets a roll the first time it is loaded, so exploring is what finds a fight. The
 // roll is per process, not per chunk file -- ships do not survive a restart, so a
-// restarted world repopulates the ground you have already walked over.
-// One roll per newly loaded chunk, and what it rolls for is a nest: a cache with three
-// fighters standing over it. Opposition and reward are the same thing to find, so there
-// is a reason to take the fight rather than to avoid it. At even odds they were on top
-// of each other -- a chunk is only 900 units across.
-const NEST_CHANCE = 0.15;
+// restarted world repopulates the ground you have already walked over. How often, and how
+// far apart, is declared by each kind of encounter in `SCRIPTS`; nothing else about
+// placement is any of their business.
 const NEST_GUARDS = 3,
     NEST_RING = 95;
 const ENEMY_CLEAR = 900; // never spawn this close to any existing ship
@@ -1596,7 +1593,10 @@ function loadChunk(cx, cy) {
     wallsDirty = true;
     // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which would
     // land back in here. The queue is drained once loading has settled.
-    if (Math.random() < NEST_CHANCE) pendingNests.push([cx, cy]);
+    // Ground nobody has seen before. What it is worth is decided in the tick rather than
+    // here: terrain generation is re-entrant, and what an encounter wants is declared in
+    // `SCRIPTS`, which this file has not reached the first time a chunk is loaded.
+    freshChunks.push([cx, cy]);
     return c;
 }
 
@@ -1823,7 +1823,8 @@ function rebuildWalls() {
     }
 }
 
-const pendingNests = [];
+const pendingPlaces = [];
+const freshChunks = []; // loaded for the first time, and not yet rolled for opposition
 
 // A ship sent to a marker carries the arming with it, and keeps it until it arrives or is
 // told to do something else. Arriving fires it, once, and clears it -- but a session shows
@@ -3067,7 +3068,14 @@ const encounters = [];
 // nearer means ships blinking out in front of you, which is what an area of interest is
 // for in the first place. Spawning keys on ships alone, so panning the camera across an
 // empty corner does not populate it.
-const ENC_KEEP = MAX_VIEW + 500;
+// Far enough out that an encounter has its ships long before anyone could see them: what
+// is visible on the widest screen is 2200 from the middle, and this is well past it. They
+// are not spawned when you arrive -- they were already flying when you came over the
+// horizon, which is the difference between finding a fight and watching one appear.
+const ENC_BUILD = 3000;
+// Room to spare above the radius an encounter builds at, or a ship hovering between the
+// two would build it, drop it for being unwatched, and build it again for ever.
+const ENC_KEEP = MAX_VIEW + 1800;
 // If a script will not let go -- a guard wedged behind rock, say -- it is overruled
 // eventually. A group that cannot finish tidying up is not a reason to hold a nest
 // resident for the life of the process.
@@ -3152,12 +3160,6 @@ function manageEncounters(dt) {
 // The pool belongs to the encounter rather than to any fighter, which is the whole of
 // rule two: there is nowhere for one fighter to hold a private opinion about who it is
 // fighting.
-const NEST_R = 1200; // how close you have to be for it to exist at all
-// And placed only out at the rim of what anyone can reach. A nest that appeared beside you
-// would be a nest that was not there a moment ago; found at the edge, it was always there
-// and you sailed up to it. Once placed, how long it stays is the encounter's own business
-// -- nothing sweeps it up for being outside the boundary later.
-const NEST_EDGE = 0.8; // of AOI_R, from the nearest crewed ship
 const NEST_NOTICE = 900,
     NEST_FORGET = 1700;
 // No two nests within twice the leash, so their pursuits cannot overlap: there is always
@@ -3169,6 +3171,12 @@ const GUARD_ORBIT = 120; // how tightly the guard circles its cache
 
 const SCRIPTS = {
     nest: {
+        // A cache with three fighters standing over it. Opposition and reward are the same
+        // thing to find, so there is a reason to take the fight rather than avoid it. At
+        // even odds they were on top of each other -- a chunk is only 900 units across --
+        // and no two within twice the leash, so their pursuits cannot overlap: there is
+        // always a direction that takes you out of one without carrying you into the next.
+        place: { per: 0.15, apart: NEST_APART },
         spawn(e) {
             if (e.state.guards === undefined) {
                 e.state.guards = NEST_GUARDS;
@@ -3265,36 +3273,111 @@ const SCRIPTS = {
 
 // Somewhere clear inside the chunk, and never on top of anyone. The world places the
 // nest and stops there -- what a nest is made of is the encounter's business.
-function trySpawnNest(cx, cy) {
-    for (let i = 0; i < 10; i++) {
+// How often a kind of encounter happens, how far apart, and nothing else. Everything that
+// made the last one fiddly to get right -- rolling on a newly loaded chunk, keeping the spot
+// outside the active radius so it is discovered rather than watched arriving, the spacing
+// against its own kind, not landing on somebody, giving up after a few tries -- is here
+// rather than in the script. A new kind of opposition says two numbers and is done.
+const PLACING = {
+    per: 0, // how many of it a newly loaded chunk is worth, on average
+    // How clumpy that is. Left out, chance alone decides and the count per chunk is
+    // Poisson, which is as steady as independent rolls can be; a larger number spreads the
+    // rate itself, so they arrive in groups with emptier ground between. Smaller than
+    // Poisson is not on offer -- that would need rolls that know about each other.
+    sd: null,
+    apart: 0, // never nearer than this to another of its own kind
+    clear: ENEMY_CLEAR, // ...nor this near any ship at all
+    build: ENC_BUILD, // how close a hull has to be for it to have its ships
+    tries: 8, // spots to try in the chunk before letting the roll go
+};
+
+// Poisson by Knuth, which is the right shape for "rare thing, independent rolls" and is
+// exact rather than a normal curve pretending at small numbers.
+function poisson(mean) {
+    if (mean <= 0) return 0;
+    const limit = Math.exp(-mean);
+    let k = 0,
+        p = 1;
+    do {
+        k++;
+        p *= Math.random();
+    } while (p > limit);
+    return k - 1;
+}
+
+// Marsaglia and Tsang, for drawing the rate when a kind wants to arrive in clumps.
+function gamma(shape) {
+    if (shape < 1) return gamma(shape + 1) * Math.pow(Math.random(), 1 / shape);
+    const d = shape - 1 / 3,
+        c = 1 / Math.sqrt(9 * d);
+    for (;;) {
+        let x, v;
+        do {
+            const u1 = Math.random(),
+                u2 = Math.random();
+            x = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+            v = 1 + c * x;
+        } while (v <= 0);
+        v = v * v * v;
+        const u = Math.random();
+        if (u < 1 - 0.0331 * x * x * x * x) return d * v;
+        if (Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v))) return d * v;
+    }
+}
+
+// How many of this kind a chunk is worth this time. Plain Poisson unless the kind asked to
+// be clumpier than that, in which case the rate is itself drawn from a Gamma wide enough to
+// give the spread it wanted.
+function rollCount(P) {
+    if (!(P.per > 0)) return 0;
+    const spread = P.sd === null ? 0 : P.sd * P.sd - P.per;
+    if (spread <= 0) return poisson(P.per);
+    const k = (P.per * P.per) / spread;
+    return poisson(gamma(k) * (P.per / k));
+}
+
+// Which kinds want placing, and what each asked for, worked out once rather than per chunk.
+// After `SCRIPTS`, which is the table it reads.
+const PLACED = Object.keys(SCRIPTS).filter((k) => SCRIPTS[k].place?.per > 0);
+const PLACING_OF = Object.fromEntries(
+    PLACED.map((k) => [k, { ...PLACING, ...SCRIPTS[k].place }]),
+);
+
+// Somewhere in this chunk for one of these, or nowhere. Every rule an encounter would
+// otherwise have had to remember lives in this function.
+function tryPlace(kind, cx, cy) {
+    const P = { ...PLACING, ...(SCRIPTS[kind].place || {}) };
+    for (let i = 0; i < P.tries; i++) {
         const x = cx * CHUNK + rand(80, CHUNK - 80),
             y = cy * CHUNK + rand(80, CHUNK - 80);
         if (blockedAt(x, y, HULL_CLEAR, false)) continue;
-        let far = true;
-        for (const s of ships)
-            if (crewed(s) && Math.hypot(s.x - x, s.y - y) < AOI_R * NEST_EDGE) {
-                far = false;
+        // Outside the area of interest, always. Ground is made a chunk further out than
+        // that, which is the whole reason there is anywhere to put this.
+        let out = true;
+        for (const q of ships)
+            if (crewed(q) && Math.hypot(q.x - x, q.y - y) < AOI_R) {
+                out = false;
                 break;
             }
-        if (!far) continue;
-        // Against the other nests, not against their fighters. This used to test ships, which
-        // worked only because a nest built itself the instant it was placed -- once placement
-        // and building came apart, a dormant nest had no hulls to keep the next one away and
+        if (!out) continue;
+        // Against its own kind rather than against their ships. Testing ships worked only
+        // while an encounter built itself the instant it was placed; once placing and
+        // building came apart, a dormant one had no hulls to keep the next one away and
         // they packed in on top of each other.
-        let clear = true;
+        let room = true;
         for (const e of encounters)
-            if (Math.hypot(e.x - x, e.y - y) < NEST_APART) {
-                clear = false;
+            if (e.kind === kind && Math.hypot(e.x - x, e.y - y) < P.apart) {
+                room = false;
                 break;
             }
-        if (clear)
-            for (const s of ships)
-                if (Math.hypot(s.x - x, s.y - y) < ENEMY_CLEAR) {
-                    clear = false;
+        if (room)
+            for (const q of ships)
+                if (Math.hypot(q.x - x, q.y - y) < P.clear) {
+                    room = false;
                     break;
                 }
-        if (!clear) continue;
-        addEncounter('nest', x, y, NEST_R);
+        if (!room) continue;
+        addEncounter(kind, x, y, P.build);
         return;
     }
 }
@@ -3318,6 +3401,12 @@ const crewed = (s) => s.owner !== null;
 // the edge of what exists stays two screens beyond anything anyone can see.
 const AOI_R = MAX_VIEW * 3;
 const AOI_KEEP = AOI_R + 900; // a chunk of hysteresis, so a hovering ship does not thrash
+// Ground is made a chunk further out than the area of interest reaches. Nothing is played
+// out there -- it is a skirt, so that there is somewhere for a thing to be placed that is
+// *outside* the active radius and can be discovered by pushing the radius over it. A nest
+// rolled in a chunk inside the radius is a nest that was not there a moment ago.
+const AOI_LOAD = AOI_R + CHUNK;
+const CHUNK_KEEP = AOI_LOAD + CHUNK; // ...and the same hysteresis on top of the skirt
 
 function shipAnchors() {
     const out = [];
@@ -3385,10 +3474,14 @@ function manageCells() {
 function manageChunks() {
     manageCells();
     for (const a of shipAnchors())
-        for (let cx = chunkOf(a.x - AOI_R); cx <= chunkOf(a.x + AOI_R); cx++)
+        for (
+            let cx = chunkOf(a.x - AOI_LOAD);
+            cx <= chunkOf(a.x + AOI_LOAD);
+            cx++
+        )
             for (
-                let cy = chunkOf(a.y - AOI_R);
-                cy <= chunkOf(a.y + AOI_R);
+                let cy = chunkOf(a.y - AOI_LOAD);
+                cy <= chunkOf(a.y + AOI_LOAD);
                 cy++
             )
                 loadChunk(cx, cy);
@@ -3399,7 +3492,7 @@ function manageChunks() {
             for (let cy = chunkOf(a.y - r); cy <= chunkOf(a.y + r); cy++)
                 keep.add(chunkKey(cx, cy));
     };
-    for (const a of shipAnchors()) hold(a, AOI_KEEP);
+    for (const a of shipAnchors()) hold(a, CHUNK_KEEP);
     for (const a of watchAnchors()) hold(a, STREAM_R + 400);
     for (const key of [...chunks.keys()])
         if (!keep.has(key)) {
@@ -4685,7 +4778,15 @@ function step(dt) {
     manageChunks();
     // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
     // the next tick rather than extending this one.
-    for (const [cx, cy] of pendingNests.splice(0)) trySpawnNest(cx, cy);
+    // A roll a kind for every chunk nobody had seen before, then the placements those rolls
+    // asked for. Both off a queue rather than as the chunk loads, because loading a chunk
+    // can load more of them.
+    for (const [cx, cy] of freshChunks.splice(0))
+        for (const kind of PLACED)
+            for (let n = rollCount(PLACING_OF[kind]); n > 0; n--)
+                pendingPlaces.push([kind, cx, cy]);
+    for (const [kind, cx, cy] of pendingPlaces.splice(0))
+        tryPlace(kind, cx, cy);
     armedArrivals();
     mapSweep();
     manageEncounters(dt);

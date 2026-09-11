@@ -326,7 +326,11 @@ a convex cell always takes a corner with it. Cull that check by the cell's own r
 than its site suggests, and a fixed cull let a site 25,000 units away quietly steal one.
 
 **Only a crewed hull makes world.** Terrain and the mesh are generated within `AOI_R`
-— three max-zoom screens — of a player's ship, and nothing else. A camera may _hold_
+— three max-zoom screens — of a player's ship, and nothing else. Ground itself is made one
+chunk further out than that (`AOI_LOAD`): a skirt, so there is somewhere _outside_ the
+active radius for a thing to be placed and then discovered by pushing the radius over it.
+Chunk residency has its own radius on top of the skirt rather than sharing the rocks'
+`AOI_KEEP`, which would have inflated the rock field as a side effect of loading further. A camera may _hold_
 what it is looking at so nothing vanishes in front of you, but it may never call anything
 into being: otherwise a finger on the map drags the world into existence for as far as
 anyone cares to scroll, deciding biomes for ground nobody has been near.
@@ -369,8 +373,12 @@ Density is what is preserved, not the count — the same rock per unit of space 
 area twenty times larger, about 500 a ship. The band has to sit _inside_ the radius the
 stocking counts over, or rocks spawn where they are never counted and the field grows
 without bound. Ore is exempt on purpose: it comes and goes near the ship, because it
-is meant to be noticed. Nests are placed past `AOI_R * NEST_EDGE` for the same reason a
-rock is — found at the rim, a nest was always there and you sailed up to it.
+is meant to be noticed. Nests are placed outside `AOI_R` entirely — in the skirt, never
+within the active radius — and build their ships at `NEST_R`, which is well past the 2200
+the widest screen can reach. Measured: built 2888 out, first visible 40 seconds later at 1273. Found at the rim, a nest was always there and you sailed up to it; the fighters were
+already flying when you came over the horizon. `ENC_KEEP` has to stay above `NEST_R` with
+room to spare, or a ship hovering between the two builds a nest, drops it for being
+unwatched, and builds it again for ever.
 
 **A "screen" is 1732 world units, and it is the unit to design against.** At full
 zoom-out the visible rectangle's half-diagonal is always `MAX_VIEW` (2200) on every
