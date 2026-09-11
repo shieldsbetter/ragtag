@@ -4962,6 +4962,9 @@ wss.on('connection', (ws) => {
 
                 prioMax: PRIO_MAX,
                 turretHp: TURRET_HP,
+                // What a shell does, which is the one thing about a gun that is not in the
+                // module table: the readout would otherwise have to guess at it.
+                shellDamage: BULLET_DAMAGE,
                 wreck: WRECK_DEPTH,
             }),
         );

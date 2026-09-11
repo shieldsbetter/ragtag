@@ -286,6 +286,7 @@ ws.onmessage = (e) => {
         cam.zoom = clampZoom(cam.zoom);
         if (m.prioMax) prioMax = m.prioMax;
         if (m.wreck) wreckDepth = m.wreck;
+        if (m.shellDamage) shellDamage = m.shellDamage;
         return;
     }
     if (m.t === 'reload') {
@@ -967,23 +968,10 @@ const PANELS = [
 ];
 let openTab = 0;
 let prioMax = 8,
-    wreckDepth = 150;
-
-// Guns, and only guns: a hull's modules are no longer all weapons, and counting a tractor
-// among them said a ship had seven guns when it had six and a winch.
-const statusOf = (s) => {
-    const guns = (s.ft || [])
-        .map((f, i) => [f[1], s.hp[i]])
-        .filter(([type]) => aims(type));
-    const alive = guns.filter(([, hp]) => hp > 0).length;
-    return (
-        `${alive}/${guns.length} guns  ${s.th ? 'burn' : 'coast'}` +
-        `  ${s.dx !== undefined ? 'move' : 'hold'}`
-    );
-};
+    wreckDepth = 150,
+    shellDamage = 20;
 
 let builtKey = '';
-const statusEls = new Map();
 let gunEls = null,
     gunShip = null; // the repair tab's live bars, one per mount
 let cargoEl = null; // the cargo tab's running total
@@ -1049,7 +1037,6 @@ function syncDetails() {
         if (builtKey !== 'empty') {
             builtKey = 'empty';
             openShip = null;
-            statusEls.clear();
             gunEls = null;
             gunShip = null;
             cargoEl = null;
@@ -1088,10 +1075,6 @@ function syncDetails() {
         builtKey = key;
         buildDetails(ships);
     }
-    for (const s of ships) {
-        const el = statusEls.get(s.id);
-        if (el) el.textContent = statusOf(s);
-    }
     if (gunEls) {
         const s = ships.find((q) => q.id === gunShip);
         if (s && s.hp) paintGuns(s);
@@ -1103,7 +1086,6 @@ function syncDetails() {
 }
 
 function buildDetails(ships) {
-    statusEls.clear();
     gunEls = null;
     gunShip = null;
     cargoEl = null;
@@ -1117,13 +1099,26 @@ function buildDetails(ships) {
         head.className = 'shiphead' + (s.id === openShip ? ' open' : '');
         head.innerHTML =
             `<span class="tw">\u25b8</span> <b>${s.id === designated ? '\u25c9 ' : ''}` +
-            `ship ${s.id}</b> <span class="st"></span>`;
+            `ship ${s.id}</b>`;
         head.addEventListener('click', () => {
             openShip = openShip === s.id ? null : s.id;
             syncDetails();
         });
-        statusEls.set(s.id, head.querySelector('.st'));
-        row.append(head);
+        // What is bolted to it, without flying to a yard to find out. The same sheet the
+        // refit uses, with nothing to take hold of: seeing a loadout and changing one are
+        // the same picture, and drawing a second one would be two pictures to keep in step.
+        const info = document.createElement('button');
+        info.type = 'button';
+        info.className = 'info';
+        info.setAttribute('aria-label', `ship ${s.id} loadout`);
+        info.textContent = '\u24d8';
+        info.addEventListener('click', () => openRefit(s.id, true));
+        // A button cannot go inside a button, and the whole overview line is the accordion's
+        // hinge, so the two sit side by side in a row of their own.
+        const line = document.createElement('div');
+        line.className = 'shiprow';
+        line.append(head, info);
+        row.append(line);
 
         if (s.id === openShip) {
             const body = document.createElement('div');
@@ -1377,8 +1372,11 @@ const refitHave = refitEl.querySelector('.cost i');
 const refitShort = refitEl.querySelector('.cost .short');
 const refitWhy = refitEl.querySelector('.why');
 const refitOk = refitEl.querySelector('.confirm');
+const refitCancel = refitEl.querySelector('.cancel');
+const refitWho = refitEl.querySelector('.who');
+const refitSpec = refitEl.querySelector('.spec');
 const refitAsk = refitEl.querySelector('.why-cost');
-let refitting = null; // { ship, was, fit, sel, pick }
+let refitting = null; // { view, ship, was, fit, sel, pick }
 let refitShowItems = false;
 
 refitAsk.addEventListener('click', () => {
@@ -1397,10 +1395,14 @@ const rotSame = (a, b) =>
 // whatever the ship looked like then, so passing the object meant reopening the sheet after
 // a refit showed the loadout from before it -- and the preview priced every change against
 // a hull that no longer existed.
-function openRefit(id) {
+function openRefit(id, view = false) {
     const s = (fleet || []).find((q) => q.id === id);
     if (!s) return;
     refitting = {
+        // Read-only: the same board with the palette, the price and every gesture but a tap
+        // taken away. The server was never told anything was opened, so closing must not
+        // tell it anything was closed.
+        view,
         ship: s.id,
         was: (s.ft || []).map(([install, type, rot]) => ({
             install,
@@ -1420,10 +1422,13 @@ function openRefit(id) {
 }
 
 function closeRefit() {
+    const view = refitting?.view;
     refitting = null;
     refitEl.hidden = true;
     // The session holds one interaction at a time, and the server cannot see a sheet close.
-    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'interact-done' }));
+    // Nothing was opened for a look at a loadout, so there is nothing to close.
+    if (!view && ws.readyState === 1)
+        ws.send(JSON.stringify({ t: 'interact-done' }));
 }
 
 // The same arithmetic the server does, per install point and nothing across points. If
@@ -1608,10 +1613,87 @@ function moduleIcon(held, lit, blocking) {
     return g;
 }
 
+const DEG = 180 / Math.PI;
+const deg = (r) => `${Math.round(r * DEG)}\u00b0`;
+
+// What a module is, read off the same table the server works from -- so a hull class added
+// tomorrow describes itself without anybody writing it down twice. Only the rows that mean
+// something for this module: a tractor has no reach, so it has no range, no rate and no
+// arc, and saying "0" three times would read as a broken gun rather than as a winch.
+function specRows(ship, held) {
+    const T = modules[held.type] || {};
+    const i = (ship.ft || []).findIndex((f) => f[0] === held.install);
+    const hp = i >= 0 ? ship.hp[i] : null;
+    const rows = [];
+    const row = (k, v) => rows.push([k, v]);
+    if (hp !== null)
+        row(
+            'condition',
+            hp > 0 ? `${hp} / ${T.hp}`
+            : hp === 0 ? 'silenced'
+            : `wrecked (${-hp} to rebuild)`,
+        );
+    if (T.range) {
+        row('range', `${T.range}`);
+        row('rate', `${(1 / T.cooldown).toFixed(1)} a second`);
+        row('damage', `${T.hitscan ? T.hitscan.damage : shellDamage} a hit`);
+        if (T.hitscan)
+            row(
+                'accuracy',
+                `${Math.round(T.hitscan.near * 100)}% close, ` +
+                    `${Math.round(T.hitscan.far * 100)}% at reach`,
+            );
+        row(
+            'arc',
+            T.arcHalf >= Math.PI - 0.01 ?
+                'all round'
+            :   `\u00b1${deg(T.arcHalf)}`,
+        );
+        if (T.turn) row('traverse', `${deg(T.turn)} a second`);
+        row('facing', deg(held.rot || 0));
+    }
+    if (T.install) row('to fit', `${T.install} ore`);
+    const out = [];
+    for (const [k, v] of rows) {
+        const a = document.createElement('span');
+        a.className = 'k';
+        a.textContent = k;
+        const b = document.createElement('span');
+        b.className = 'v';
+        b.textContent = v;
+        out.push(a, b);
+    }
+    // The one thing a number cannot say, in the words the module itself supplies.
+    const notes = [];
+    if (T.only) notes.push(`Engages ${T.only}s and nothing else.`);
+    if (T.hitscan) notes.push('Fires on sight; no shell crosses the gap.');
+    if (!T.range) notes.push('Carries no gun: it has no reach of its own.');
+    if (T.fixed) notes.push('Part of the hull, and cannot be taken off.');
+    if (notes.length) {
+        const n = document.createElement('span');
+        n.className = 'note';
+        n.textContent = notes.join(' ');
+        out.push(n);
+    }
+    return out;
+}
+
 function drawRefit() {
     if (!refitting) return;
     const s = (fleet || []).find((q) => q.id === refitting.ship);
     if (!s) return closeRefit();
+    const view = refitting.view;
+    // Nothing to pay and nothing to confirm when nothing can change. The cost line, the
+    // breakdown, the hold and CONFIRM all go; CANCEL is the way out of a sheet you did not
+    // come here to change, so it says so.
+    refitCost.parentElement.hidden = view;
+    refitOk.hidden = view;
+    refitPalette.hidden = view;
+    refitCancel.textContent = view ? 'CLOSE' : 'CANCEL';
+    // Which ship this is, since the drawer it was opened from is behind the sheet.
+    refitWho.hidden = !view;
+    refitWho.textContent = `SHIP ${s.id}`;
+    refitEl.classList.toggle('view', view);
     const where = installsOf(s.h);
     const stock = refitStock(s);
     const cost = refitCost_(refitting.was, refitting.fit);
@@ -1620,8 +1702,14 @@ function drawRefit() {
     refitOk.disabled = short || owed.length > 0;
     // The header says the ore does not stretch, so this line is left for the one thing it
     // cannot say.
+    const held = refitting.fit.find((f) => f.install === refitting.sel);
     refitWhy.textContent =
-        owed.length ? `no ${modName(owed[0][0])} in the hold` : '';
+        view ?
+            held ? modTitle(held.type)
+            :   'tap a module for more information'
+        : owed.length ? `no ${modName(owed[0][0])} in the hold`
+        : '';
+    refitSpec.replaceChildren(...(view && held ? specRows(s, held) : []));
 
     // What it costs against what is aboard, which is the only comparison that decides
     // whether CONFIRM does anything.
@@ -1752,7 +1840,7 @@ function drawRefit() {
                         'stroke-dasharray': '3 3',
                     }),
                 );
-            if (refitting.sel === p.id && aims(held.type)) {
+            if (!view && refitting.sel === p.id && aims(held.type)) {
                 // The rotate ring. Dragging it points the module; dragging the module itself moves
                 // it, so the two gestures never have to be told apart.
                 g.append(
@@ -1818,6 +1906,7 @@ function drawRefit() {
     refitBoard.append(svg);
 
     refitPalette.textContent = '';
+    if (view) return;
     // A module being carried off the hull shows in the hold before it gets there, so the
     // gesture reads as putting it somewhere rather than as making it disappear. It is not in
     // the hold until the pointer comes up, which is what the ghosting says.
@@ -1862,6 +1951,20 @@ let refitDrag = null;
 
 refitEl.addEventListener('pointerdown', (e) => {
     if (!refitting) return;
+    // A look has one gesture: tap a module and it names itself. Nothing is picked up, so
+    // there is no drag to start and no pointer to capture.
+    if (refitting.view) {
+        const point = e.target.closest('[data-install]');
+        const id = point?.getAttribute('data-install');
+        refitting.sel =
+            id && refitting.fit.some((f) => f.install === id) ?
+                refitting.sel === id ?
+                    null
+                :   id
+            :   null;
+        drawRefit();
+        return;
+    }
     const mod = e.target.closest('.palette .mod');
     if (mod) {
         refitDrag = { type: mod.dataset.type, at: null, moved: false };
@@ -1993,7 +2096,7 @@ function svgPoint(e) {
     };
 }
 
-refitEl.querySelector('.cancel').addEventListener('click', closeRefit);
+refitCancel.addEventListener('click', closeRefit);
 refitOk.addEventListener('click', () => {
     if (!refitting) return;
     ws.send(

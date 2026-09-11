@@ -240,7 +240,26 @@
         border-top: 1px solid #14232f;
     }
     /* The whole overview line is the accordion's hinge, so it is a button: a thumb aims at
-     a row, not at a chevron. */
+     a row, not at a chevron. The way into the loadout sits beside it rather than in it,
+     because a button cannot go inside a button. */
+    #details .shiprow {
+        display: flex;
+        align-items: center;
+    }
+    #details .shiprow .shiphead {
+        flex: 1;
+        min-width: 0;
+    }
+    #details .info {
+        font: inherit;
+        font-size: 15px;
+        color: #4e8f7d;
+        background: none;
+        border: 0;
+        padding: 9px 2px 9px 12px;
+        cursor: pointer;
+        touch-action: manipulation;
+    }
     #details .shiphead {
         display: block;
         width: 100%;
@@ -384,6 +403,58 @@
     #refit .why {
         color: #ff6b8a;
         min-height: 16px;
+    }
+    /* Looking rather than changing: the one line under the board names what you tapped, so
+     it is not a complaint and is not coloured like one. It sits under the hull rather than
+     at the foot of the sheet, where the hold would otherwise be. */
+    #refit.view .why {
+        font:
+            13px/1.6 ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+        letter-spacing: 0.1em;
+        color: #cfe6ff;
+        text-align: center;
+        padding-top: 4px;
+    }
+    #refit.view .board {
+        flex: 0 1 auto;
+    }
+    /* What the tapped module is, in two columns: the property and the number. Rows rather
+     than prose because they are read by scanning down, and a reader comparing two guns is
+     comparing the same line twice. */
+    #refit .spec {
+        font:
+            12px/1.6 ui-monospace,
+            Menlo,
+            Consolas,
+            monospace;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 14px;
+        max-width: 340px;
+        margin: 10px auto 0;
+        line-height: 1.6;
+    }
+    #refit .spec .k {
+        color: #4e8f7d;
+    }
+    #refit .spec .v {
+        color: #cfe6ff;
+    }
+    #refit .spec .note {
+        grid-column: 1 / -1;
+        color: #8ba0bb;
+        padding-top: 4px;
+    }
+    #refit .who {
+        margin-left: auto;
+        color: #8ba0bb;
+        letter-spacing: 0.12em;
+    }
+    #refit .who[hidden] {
+        display: none;
     }
     #refit .palette {
         display: flex;
@@ -960,10 +1031,12 @@
                 </button></span
             >
             <button type="button" class="cancel">CANCEL</button>
+            <span class="who" hidden></span>
             <button type="button" class="confirm">CONFIRM</button>
         </header>
         <div class="board"></div>
         <div class="why"></div>
+        <div class="spec"></div>
         <div class="palette"></div>
     </div>
 </div>
