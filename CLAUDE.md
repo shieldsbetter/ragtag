@@ -45,6 +45,12 @@ and fissures through dense rock at the other. Neither extreme is the design targ
 both must work. Walls will eventually be destructible, which is why overlapping walls
 are merged into single polygons rather than left stacked.
 
+**A warren is meant to be gone through, not round.** The dense end of that range is
+somewhere you usually get across, not a wall with a way in — so a tunnel reaches every edge
+of the cell and the bores are wide enough to take a hull. Usually is the standard, not
+always: a spur may dead-end and a passage may be too tight, and being caught out by one is
+the biome doing its job. What is not allowed is a warren that seals the ground behind it.
+
 **Mobile first.** The phone is the target; desktop is the phone with a mouse. The whole
 gesture budget is tap, drag, long-press and pinch — and drag is already the map, so it
 is really three. Having nothing selected is a legitimate state, not an empty one to fill:
@@ -144,6 +150,30 @@ neighbour's blob landing across it would seal that way in. It claims its hexagon
 way, names itself the same way, and offers the same two things to do through the same two
 conversation modules. It is founded once, 35 screens out at a bearing nobody chose, on a
 world that does not already have one.
+
+**A biome may bring its own generator, and the warren is the first that does.** The others
+are a density and a blob size run through one scatterer; a warren is bored, not scattered, so
+`BIOMES` takes an optional `make` instead. The same walks the second city is dug with, minus
+everything a settlement adds: no hub, no station, and no count that can be written down --
+the cell is filled with rock and bored through in proportion to how much ground it turned out
+to have. A trunk goes out through the middle of every edge of the cell, which is the whole of
+how two warrens meet: both make for the middle of the edge they share, from opposite sides, so
+the seam is a junction without either cell knowing the other exists or what it turned out to
+be. It lays `rock`, not `block`, so a neighbour's field merges into it rather than being
+truncated at the border the way the town's asteroid truncates its own neighbours.
+
+**A biome may decline a cell, and the roll goes on without it.** Some ground does not suit
+some of them: the cut is superlinear in how much of it there is, and a cell 16,841 across
+costs a warren 481ms against 37ms for a median one — half a second is a stall the whole
+server feels. Cells run wildly over target and nothing in the mesh can be bent to stop that,
+so `takes(s)` is part of what a biome is and a warren says no to anything past `WARREN_BIG`.
+Declining takes that one name out of the hat and the roll runs over the rest, so the ground
+is not quietly handed to any particular biome either — measured, an ordinary cell comes out
+40/40/20 open/dense/warren and an oversized one 50/50 open/dense. If every biome declines,
+the cell is `open`: there is always somewhere for nothing in particular to go. The
+alternative — generating somebody else's terrain under your own name — leaves `kind` saying
+one thing while the ground says another, and everything that reads a cell's kind is then
+reading a lie. Worst case is now 213ms, near what a set piece costs.
 
 **A tunnel is a walk, and the warren is what the walks make between them.** Nothing lays a
 network out. A trunk is a walk steered toward the middle of one edge of the cell, bending

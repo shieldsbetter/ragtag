@@ -636,10 +636,30 @@ const CELL_MAX = CELL_R * 1.35;
 const BIOMES = {
     open: { density: 0.22, base: 50, spread: 90 },
     dense: { density: 0.95, base: 90, spread: 220 },
+    // A biome may bring its own generator instead of a density: scattering blobs is one way
+    // to fill a cell, not the only one, and the warren is not a field of anything. It may
+    // also decline a cell outright -- see `rollBiome`.
+    warren: { make: warrenMatter, takes: warrenTakes },
     town: { density: 0 }, // a set piece owns this ground; generate nothing in it
 };
-// What the roll may choose. A set piece's biome is claimed, never rolled.
-const BIOME_NAMES = ['open', 'dense'];
+// What the roll may choose, and how often: a name listed twice comes up twice as much. A
+// set piece's biome is claimed, never rolled.
+const BIOME_NAMES = ['open', 'open', 'dense', 'dense', 'warren'];
+
+// A biome may say no. Some ground does not suit some of them -- a warren is bored rather
+// than scattered and boring is superlinear in how much of it there is -- and the honest way
+// to say so is to decline the cell rather than to quietly hand back somebody else's
+// terrain: what the cell is called would stop matching what is standing in it. Declining
+// takes one name out of the hat and the roll goes on over the rest, so it does not hand the
+// ground to any particular biome either. If every one of them declines, the cell is open:
+// there is always somewhere for nothing in particular to go.
+function rollBiome(s) {
+    const willing = BIOME_NAMES.filter(
+        (n) => !BIOMES[n].takes || BIOMES[n].takes(s),
+    );
+    const from = willing.length ? willing : ['open'];
+    return from[Math.floor(Math.random() * from.length)];
+}
 
 // ---- set pieces ----
 //
@@ -772,15 +792,15 @@ const placeName = (rng) => `${pick(PLACE_HEAD, rng)} ${pick(PLACE_TAIL, rng)}`;
 // piece costs.
 const CITY_SIDE = 2.12 * SCREEN; // the same hexagon the town claims
 const CITY_HUB = 340; // the clearing the trunks are dug from
-const CITY_BORE = 250; // clear width of a trunk, at its widest
-const CITY_STEP = 170; // how far a tunnel runs before it bends
-const CITY_BEND = 0.5; // ...and how far it may bend there, in radians
+const WARREN_BORE = 250; // clear width of a trunk, at its widest
+const WARREN_STEP = 170; // how far a tunnel runs before it bends
+const WARREN_BEND = 0.5; // ...and how far it may bend there, in radians
 const CITY_SPURS = 40; // side passages driven off whatever is already dug
 const CITY_ROOM = 300; // a clearing, at its widest
 const CITY_HALL = 440; // ...and a clearing with a station in it, which has to hold one
 const CITY_ROOMS = 10; // how many of them, the market and the yard among them
-const CITY_PILLAR = 150; // thinnest rib of rock allowed to stand between two tunnels
-const CITY_SEAM = 2; // ...and how many steps one may run inside that before it stops
+const WARREN_PILLAR = 150; // thinnest rib of rock allowed to stand between two tunnels
+const WARREN_SEAM = 2; // ...and how many steps one may run inside that before it stops
 const CITY_DOOR = 0.17; // half-width of the wedge the rock stands back in, at each mouth
 const CITY_STAND = 0.9; // ...and how far out it stands there, of its full reach. Every
 // mouth keeps a moat for the reason the town's one does: a
@@ -814,7 +834,7 @@ function ribbed(x, y, seam, x0, y0) {
     for (const g of seam.segs) {
         const mx = (g.ax + g.bx) / 2,
             my = (g.ay + g.by) / 2;
-        if (Math.hypot(mx - x0, my - y0) < CITY_STEP * 1.5) continue;
+        if (Math.hypot(mx - x0, my - y0) < WARREN_STEP * 1.5) continue;
         const dx = g.bx - g.ax,
             dy = g.by - g.ay;
         const d2 = dx * dx + dy * dy || 1;
@@ -824,7 +844,7 @@ function ribbed(x, y, seam, x0, y0) {
         );
         const px = g.ax + dx * t,
             py = g.ay + dy * t;
-        if (Math.hypot(px - x, py - y) < seam.half + g.half + CITY_PILLAR)
+        if (Math.hypot(px - x, py - y) < seam.half + g.half + WARREN_PILLAR)
             return [px, py];
     }
     return null;
@@ -840,13 +860,13 @@ function dig(x, y, a, steps, rnd, aim, seam) {
         y0 = y;
     let along = 0;
     for (let i = 0; i < steps; i++) {
-        a += (rnd() - 0.5) * 2 * CITY_BEND;
+        a += (rnd() - 0.5) * 2 * WARREN_BEND;
         if (aim) {
             a += angleDiff(Math.atan2(aim[1] - y, aim[0] - x), a) * 0.4;
-            if (Math.hypot(aim[0] - x, aim[1] - y) < CITY_STEP) break;
+            if (Math.hypot(aim[0] - x, aim[1] - y) < WARREN_STEP) break;
         }
-        let nx = x + Math.cos(a) * CITY_STEP,
-            ny = y + Math.sin(a) * CITY_STEP;
+        let nx = x + Math.cos(a) * WARREN_STEP,
+            ny = y + Math.sin(a) * WARREN_STEP;
         // Two tunnels running side by side with nothing standing between them are not two
         // tunnels, they are open space -- and enough of that and the place reads as more
         // tunnel than wall. So a step that would eat the rib turns away from whatever it
@@ -859,10 +879,10 @@ function dig(x, y, a, steps, rnd, aim, seam) {
             const rib = ribbed(nx, ny, seam, x0, y0);
             if (rib) {
                 a = Math.atan2(ny - rib[1], nx - rib[0]);
-                nx = x + Math.cos(a) * CITY_STEP;
-                ny = y + Math.sin(a) * CITY_STEP;
+                nx = x + Math.cos(a) * WARREN_STEP;
+                ny = y + Math.sin(a) * WARREN_STEP;
                 along = ribbed(nx, ny, seam, x0, y0) ? along + 1 : 0;
-                if (along > CITY_SEAM) break;
+                if (along > WARREN_SEAM) break;
             } else along = 0;
         }
         x = nx;
@@ -996,11 +1016,11 @@ function cityPlan(s) {
     for (const a of CITY_WAYS) {
         const out = cityReach(a) * CITY_LAP + 900;
         drive(
-            dig(s.x, s.y, a, Math.ceil(out / CITY_STEP) * 2 + 8, rnd, [
+            dig(s.x, s.y, a, Math.ceil(out / WARREN_STEP) * 2 + 8, rnd, [
                 s.x + Math.cos(a) * out,
                 s.y + Math.sin(a) * out,
             ]),
-            CITY_BORE * (0.88 + rnd() * 0.12),
+            WARREN_BORE * (0.88 + rnd() * 0.12),
             true,
         );
     }
@@ -1037,7 +1057,7 @@ function cityPlan(s) {
         // edge of the cell has no way out. Six trunks radiating from one hub hardly run
         // alongside anything anyway -- it is the spurs, which set out from a point on
         // something else, that seam.
-        const bore = CITY_BORE * (0.62 + rnd() * 0.28);
+        const bore = WARREN_BORE * (0.62 + rnd() * 0.28);
         drive(
             dig(
                 x,
@@ -1115,11 +1135,11 @@ function cityPlan(s) {
     return plan;
 }
 
-function cityMatter(s) {
-    const plan = cityPlan(s);
-
-    const cuts = [[plan.hub]];
-    for (const r of plan.rooms) cuts.push([r.ring]);
+// Cut a warren out of a slab: the walks, plus any clearings already drawn as rings, taken
+// out of one outer ring, and what is left standing handed back. Shared, because a warren is
+// a warren whether a settlement dug it or the ground came that way.
+function carveWarren(outer, holes, paths) {
+    const cuts = holes.map((h) => [h]);
 
     // A run of tunnel is a quad between two points, overrun by half its own width at each
     // end so consecutive runs lap over each other -- otherwise every bend leaves a notch of
@@ -1141,7 +1161,7 @@ function cityMatter(s) {
             ],
         ];
     };
-    for (const path of plan.paths) {
+    for (const path of paths) {
         const half = path.bore / 2;
         for (let i = 1; i < path.pts.length; i++) {
             const [ax, ay] = path.pts[i - 1],
@@ -1169,8 +1189,8 @@ function cityMatter(s) {
     // Cut in batches, each on its own. `polygon-clipping` still falls over on maybe one
     // warren in thirty even snapped, and a single difference of everything at once means
     // that one throw is the whole warren: the cell comes back as a solid slab with no way
-    // in. A batch that throws costs the dozen runs of tunnel in it and nothing else.
-    let solid = snap([plan.ring]).length ? [snap([plan.ring])] : [[plan.ring]];
+    // in. A batch that throws costs the runs of tunnel in it and nothing else.
+    let solid = snap([outer]).length ? [snap([outer])] : [[outer]];
     const ready = cuts.map(snap).filter((c) => c.length);
     // 128 a batch. Measured over 30 warrens, median 99ms against 127 at 64 and 234 at 32 --
     // each batch re-walks the whole slab, so small batches pay for that many more times. A
@@ -1185,7 +1205,179 @@ function cityMatter(s) {
             /* this batch of tunnel is not cut; the rest of the warren still is */
         }
     }
-    return solid.map((poly) => ({ ring: poly[0], mat: 'block' }));
+    return solid.map((poly) => poly[0]);
+}
+
+function cityMatter(s) {
+    const plan = cityPlan(s);
+    return carveWarren(
+        plan.ring,
+        [plan.hub, ...plan.rooms.map((r) => r.ring)],
+        plan.paths,
+    ).map((ring) => ({ ring, mat: 'block' }));
+}
+
+// ---- the warren biome ----
+//
+// The same tunnels, without a settlement to dig them: ground that came out this way. A
+// biome cell is whatever shape the mesh made it, not an authored hexagon, so there is no
+// hub, no station and no count that can be written down -- the cell is filled with rock and
+// then bored through in proportion to how much ground it turned out to have.
+const WARREN_LAP = 1.04; // how far the slab laps over its own cell, so a neighbour's
+// rock merges into it instead of stopping at the seam
+const WARREN_OUT = 700; // how far past the border a trunk is cut, so it opens into
+// the neighbour rather than leaving a plug in the edge
+const WARREN_PER = 3.2; // spurs per square screen of ground...
+const WARREN_MOST = 56; // ...and never more than this. Cells run wildly over target --
+// a median of 3,672 across against a worst of 16,841 -- and the
+// cut is superlinear in how much of it there is, so an honest
+// per-area count would make one cell in fifty a multi-second
+// stall. A big cell comes out sparser instead: tunnels with
+// plates of rock between them, which is what a big one should
+// look like anyway.
+const WARREN_CLEAR = 0.45; // clearings per square screen, on the same terms
+const WARREN_BIG = 4200; // a cell reaching further than this is somebody else's
+
+// Boring is superlinear in how much ground there is: measured, a cell 16,841 across costs
+// 481ms against 37ms for a median one, and half a second is a stall the whole server feels.
+// Cells run wildly over target and nothing in the mesh can be bent to stop that, so the
+// warren declines the ground instead. It is the better world anyway -- a labyrinth five
+// screens across is something to cross, not something to be lost in.
+// A declaration, not a `const`: `BIOMES` names it, and `BIOMES` is built when the module
+// loads, long before this line would have run.
+function warrenTakes(s) {
+    return cellRadius(s) <= WARREN_BIG;
+}
+
+function warrenMatter(s) {
+    return warrenFrom(cellOf(s), s).map((ring) => ({ ring, mat: 'rock' }));
+}
+
+function warrenFrom(poly, s) {
+    const rnd = siteRng(s);
+    const about = (k) =>
+        poly.map(([x, y]) => [s.x + (x - s.x) * k, s.y + (y - s.y) * k]);
+    const outer = about(WARREN_LAP);
+    const inner = about(0.84); // where a spur may start and a clearing may open
+
+    let area = 0;
+    for (let i = 0; i < poly.length; i++) {
+        const [x, y] = poly[i],
+            [nx, ny] = poly[(i + 1) % poly.length];
+        area += x * ny - nx * y;
+    }
+    area = Math.abs(area) / 2;
+    const per = (k) =>
+        Math.min(WARREN_MOST, Math.round((k * area) / (SCREEN * SCREEN)));
+
+    const paths = [],
+        nodes = [],
+        segs = [];
+    const drive = (pts, bore) => {
+        paths.push({ pts, bore });
+        for (let i = 1; i < pts.length; i++)
+            segs.push({
+                ax: pts[i - 1][0],
+                ay: pts[i - 1][1],
+                bx: pts[i][0],
+                by: pts[i][1],
+                half: bore / 2,
+            });
+        for (const p of pts)
+            if (pointInWall([inner], p[0], p[1])) nodes.push(p);
+    };
+
+    // A trunk out through the middle of every edge. Two warrens that share an edge both make
+    // for the middle of that edge, from opposite sides, so their tunnels meet there -- the
+    // seam is a junction without either cell having to know the other exists, or what biome
+    // it turned out to be. Cut past the border for the same reason the city's are: a trunk
+    // that stops at the edge leaves a plug standing in its own mouth.
+    for (let i = 0; i < poly.length; i++) {
+        const [ax, ay] = poly[i],
+            [bx, by] = poly[(i + 1) % poly.length];
+        const mx = (ax + bx) / 2,
+            my = (ay + by) / 2;
+        const d = Math.hypot(mx - s.x, my - s.y) || 1;
+        const aim = [
+            mx + ((mx - s.x) / d) * WARREN_OUT,
+            my + ((my - s.y) / d) * WARREN_OUT,
+        ];
+        drive(
+            dig(
+                s.x,
+                s.y,
+                Math.atan2(my - s.y, mx - s.x),
+                Math.ceil((d + WARREN_OUT) / WARREN_STEP) * 2 + 8,
+                rnd,
+                aim,
+            ),
+            WARREN_BORE * (0.88 + rnd() * 0.12),
+        );
+    }
+
+    // Spurs, on the same terms as the city's: taken in turn round the compass so they do not
+    // clump where the last one went, and stopped where they start running alongside rather
+    // than crossing, so a rib of rock stands between any two tunnels.
+    const spurs = per(WARREN_PER);
+    for (let i = 0; i < spurs && nodes.length; i++) {
+        const want = (i / Math.max(1, spurs)) * Math.PI * 2 + rnd() * 0.5;
+        const sector = nodes.filter(
+            (p) =>
+                Math.abs(angleDiff(Math.atan2(p[1] - s.y, p[0] - s.x), want)) <
+                Math.PI / 5,
+        );
+        const from = sector.length ? sector : nodes;
+        const a = from[Math.floor(rnd() * from.length)];
+        const b = from[Math.floor(rnd() * from.length)];
+        const [x, y] =
+            (
+                Math.hypot(a[0] - s.x, a[1] - s.y) >
+                Math.hypot(b[0] - s.x, b[1] - s.y)
+            ) ?
+                a
+            :   b;
+        const bore = WARREN_BORE * (0.62 + rnd() * 0.28);
+        drive(
+            dig(
+                x,
+                y,
+                rnd() * Math.PI * 2,
+                10 + Math.floor(rnd() * 31),
+                rnd,
+                null,
+                { segs, half: bore / 2 },
+            ),
+            bore,
+        );
+    }
+
+    // Clearings, kept apart from each other but otherwise wherever they land -- there is
+    // nothing to stand in them here, so there is nothing to choose them for.
+    const holes = [];
+    const want = per(WARREN_CLEAR);
+    for (let i = 0; i < want * 8 && holes.length < want && nodes.length; i++) {
+        const [x, y] = nodes[Math.floor(rnd() * nodes.length)];
+        if (holes.some((h) => Math.hypot(x - h.x, y - h.y) < CITY_ROOM * 2.5))
+            continue;
+        holes.push({
+            x,
+            y,
+            ring: wobbleRing(
+                x,
+                y,
+                CITY_ROOM * (0.7 + rnd() * 0.5),
+                24,
+                0.22,
+                rnd,
+            ),
+        });
+    }
+
+    return carveWarren(
+        outer,
+        holes.map((h) => h.ring),
+        paths,
+    );
 }
 
 // The same two stations the town has, stood up on a rock face in a clearing instead of on
@@ -1786,8 +1978,7 @@ function loadCell(s) {
     // corners as ground worth protecting.
     bindCell(s);
     if (!cellBounded(s)) return null;
-    s.kind =
-        s.want || BIOME_NAMES[Math.floor(Math.random() * BIOME_NAMES.length)];
+    s.kind = s.want || rollBiome(s);
     meshDirty = true;
     return s;
 }
@@ -1941,6 +2132,7 @@ function generateCell(s) {
             place: townPlace(siteRng(s)),
         };
     const b = BIOMES[s.kind] || BIOMES.open;
+    if (b.make) return { matter: b.make(s), art: [], marks: [] };
     if (!b.density) return { matter: [], art: [], marks: [] };
     const poly = cellOf(s);
     const rnd = siteRng(s);
