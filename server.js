@@ -108,6 +108,246 @@ if (DEV)
         stale = sourceHash() !== VERSION;
     }, 2000);
 
+// ---- the tick budget ----
+//
+// A tick has 33ms, and overrunning it does not read as the server being slow. The
+// integrator's dt is clamped (DT_MAX), so work a long tick spent is world time the
+// simulation never advanced through -- while every client carried on extrapolating at
+// real speed, and the correction that follows hauls it backwards. On screen that is
+// things changing their mind and rewinding, which looks nothing like a busy process,
+// which is why this is measured on every tick rather than reasoned about afterwards.
+//
+// Everything here is counted always, never switched on: an intermittent fault that needs
+// a flag set before it can be seen is a fault you have to reproduce twice. It is
+// cumulative since boot and never reset, which is what a counter is -- rates and windows
+// are the scraper's business. Read it at /metrics.
+const DT_MAX = 0.1; // seconds of world a single tick may advance
+const OVERRUN = 50; // ms: a tick worth naming in the log, half again over budget
+// Where a tick's time lands. The interesting boundary is 0.033: over it, the tick is not
+// keeping up with the clock it is driven by.
+const TICK_BUCKETS = [0.005, 0.01, 0.02, 0.033, 0.05, 0.1, 0.2, 0.5, 1];
+
+const spent = Object.create(null); // this tick only, by phase
+const timed = (name, fn) => {
+    const t = performance.now();
+    try {
+        return fn();
+    } finally {
+        spent[name] = (spent[name] || 0) + (performance.now() - t);
+    }
+};
+
+const metric = {
+    ticks: 0,
+    tickSeconds: 0,
+    overruns: 0,
+    gaps: 0,
+    gapSeconds: 0,
+    // World time the clamp threw away: the total amount of rewinding the clients have been
+    // asked to do since boot. It only counts what went past DT_MAX, so it understates --
+    // a 90ms tick loses no world time and still shows on screen as a correction.
+    debt: 0,
+    sendSeconds: 0,
+    phase: Object.create(null), // phase -> seconds
+    calls: Object.create(null), // phase -> times entered
+    bucket: new Array(TICK_BUCKETS.length + 1).fill(0),
+};
+
+// Name what a long tick was doing, in the log as well as in the counters: a line in the
+// terminal is what gets read while something is going wrong in front of you.
+const naming = () =>
+    Object.entries(spent)
+        .filter(([, ms]) => ms >= 1)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, ms]) => `${k} ${ms.toFixed(0)}`)
+        .join(' ');
+
+// Fold what this tick spent into the counters, and empty it for the next one.
+function sweepSpent() {
+    for (const k in spent) {
+        metric.phase[k] = (metric.phase[k] || 0) + spent[k] / 1000;
+        metric.calls[k] = (metric.calls[k] || 0) + 1;
+        delete spent[k];
+    }
+}
+
+// `lost` is the world time the clamp took off THIS tick -- not the running total, which is
+// what the line used to end with. A cumulative figure sitting beside per-tick ones, with
+// nothing saying which was which, read as every long tick having cost a rewind when most of
+// them cost nothing at all. A tick is only worth mentioning as lost time if it lost some.
+function endTick(total, sim, lost) {
+    const named = naming();
+    metric.ticks++;
+    metric.tickSeconds += total / 1000;
+    metric.sendSeconds += (total - sim) / 1000;
+    let b = TICK_BUCKETS.findIndex((le) => total / 1000 <= le);
+    metric.bucket[b < 0 ? TICK_BUCKETS.length : b]++;
+    if (total > OVERRUN) {
+        metric.overruns++;
+        console.log(
+            `tick ${total.toFixed(0)}ms (sim ${sim.toFixed(0)}, send ${(total - sim).toFixed(0)})` +
+                (named ? `  of which ${named}` : '') +
+                (lost > 0 ?
+                    `  LOST ${(lost * 1000).toFixed(0)}ms of world`
+                :   ''),
+        );
+    }
+    sweepSpent();
+}
+
+// The loop was held up by something that was not a tick -- a save, a socket, a pause. It
+// costs the same rewind a long tick does, because it is the next tick's dt that gets
+// clamped either way, and it appears in the tick's own total nowhere at all.
+function offTick(gap) {
+    const named = naming();
+    metric.gaps++;
+    metric.gapSeconds += gap / 1000;
+    console.log(
+        `gap ${gap.toFixed(0)}ms between ticks` +
+            (named ? `  of which ${named}` : '  unattributed'),
+    );
+    sweepSpent();
+}
+
+// ---- /metrics ----
+//
+// Prometheus text format, which is worth following exactly rather than approximately: it
+// costs nothing here and it means anything that speaks it can read this, including a
+// person with curl.
+const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+function metricsText() {
+    const out = [];
+    const say = (name, type, help, rows) => {
+        out.push(`# HELP ${name} ${help}`, `# TYPE ${name} ${type}`);
+        for (const [labels, v] of rows) out.push(`${name}${labels} ${v}`);
+    };
+    const one = (name, type, help, v) => say(name, type, help, [['', v]]);
+    const lbl = (k, v) => `{${k}="${esc(v)}"}`;
+
+    // A histogram's buckets are cumulative and are named with the _bucket suffix, which is
+    // the format and not a decoration: a reader that sees the bare name reads the whole
+    // series as something else.
+    let run = 0;
+    out.push(
+        '# HELP ragtag_tick_seconds Wall time spent inside one simulation tick.',
+        '# TYPE ragtag_tick_seconds histogram',
+        ...TICK_BUCKETS.map(
+            (le, i) =>
+                `ragtag_tick_seconds_bucket${lbl('le', le)} ${(run += metric.bucket[i])}`,
+        ),
+        `ragtag_tick_seconds_bucket${lbl('le', '+Inf')} ${run + metric.bucket[TICK_BUCKETS.length]}`,
+        `ragtag_tick_seconds_sum ${metric.tickSeconds}`,
+        `ragtag_tick_seconds_count ${metric.ticks}`,
+    );
+    one(
+        'ragtag_tick_overruns_total',
+        'counter',
+        `Ticks that ran longer than ${OVERRUN}ms.`,
+        metric.overruns,
+    );
+    one(
+        'ragtag_tick_send_seconds_total',
+        'counter',
+        'Of the tick, time spent building and writing messages to sockets.',
+        metric.sendSeconds,
+    );
+    one(
+        'ragtag_gap_seconds_total',
+        'counter',
+        'Wall time the loop spent held up between ticks, by anything that is not a tick.',
+        metric.gapSeconds,
+    );
+    one(
+        'ragtag_gaps_total',
+        'counter',
+        'Times the loop was held up between ticks for longer than a tick plus the overrun budget.',
+        metric.gaps,
+    );
+    one(
+        'ragtag_sim_debt_seconds_total',
+        'counter',
+        'World time discarded by the dt clamp: what clients extrapolated through and were corrected back from.',
+        metric.debt,
+    );
+    say(
+        'ragtag_phase_seconds_total',
+        'counter',
+        'Wall time by phase. Phases nest -- generation loads chunks, a load merges walls -- so these do not sum to the tick.',
+        Object.entries(metric.phase).map(([k, v]) => [lbl('phase', k), v]),
+    );
+    say(
+        'ragtag_phase_ticks_total',
+        'counter',
+        'Ticks (or gaps) in which a phase was entered at all.',
+        Object.entries(metric.calls).map(([k, v]) => [lbl('phase', k), v]),
+    );
+
+    // What the tick has to get through. A phase costing more is usually a count growing.
+    const counts = {
+        players: players.size,
+        ships: ships.size,
+        rocks: rocks.length,
+        ore: ore.length,
+        bullets: bullets.length,
+        chunks: chunks.size,
+        walls: wallsByKey.size,
+        sites: sites.length,
+        cells_pending: pendingCells.length,
+        quests: quests.size,
+        tiles: tiles.size,
+    };
+    say(
+        'ragtag_world',
+        'gauge',
+        'How much of each kind of thing the world is currently holding.',
+        Object.entries(counts).map(([k, v]) => [lbl('of', k), v]),
+    );
+    one(
+        'ragtag_merge_cuts_total',
+        'counter',
+        'Differences the cut cache did not cover, where higher-ranked matter is taken out of lower.',
+        mergeCuts,
+    );
+    one(
+        'ragtag_merge_cutters_total',
+        'counter',
+        'Cutting walls handed to those differences, summed.',
+        mergeCutters,
+    );
+    one(
+        'ragtag_merge_unions_total',
+        'counter',
+        'Components the merge cache did not cover, each one a polygon-clipping union.',
+        mergeMisses,
+    );
+    say(
+        'ragtag_merge',
+        'gauge',
+        'What the last wall rebuild had to get through.',
+        [
+            [lbl('of', 'units'), mergeUnits],
+            [lbl('of', 'components'), mergeComps],
+        ],
+    );
+    one(
+        'ragtag_uptime_seconds',
+        'gauge',
+        'Seconds this process has been running.',
+        process.uptime(),
+    );
+    const mem = process.memoryUsage();
+    say(
+        'ragtag_memory_bytes',
+        'gauge',
+        'Process memory.',
+        Object.entries({ rss: mem.rss, heap: mem.heapUsed }).map(([k, v]) => [
+            lbl('of', k),
+            v,
+        ]),
+    );
+    return out.join('\n') + '\n';
+}
+
 // The world is an unbounded plane. What exists is decided by where the ships are:
 // rocks are kept stocked within ACTIVE_R of every ship and culled past KEEP_R, so
 // space is populated where anyone is and empty everywhere else.
@@ -576,6 +816,15 @@ const server = http.createServer((req, res) => {
     // Strip the query BEFORE deciding what the path means, or "/?x=1" is not "/" and
     // ends up trying to read the directory.
     const requested = req.url.split('?')[0];
+    // Always served, in every mode. What it costs is a string built on demand, and the
+    // alternative -- a flag to turn it on -- means the fault has to happen twice.
+    if (requested === '/metrics') {
+        res.writeHead(200, {
+            'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+        });
+        res.end(metricsText());
+        return;
+    }
     const file = requested === '/' ? '/index.html' : requested;
     const full = path.join(
         __dirname,
@@ -641,6 +890,12 @@ const CELL_MAX = CELL_R * 1.35;
 // handful of numbers terrain generation asks it for.
 const BIOMES = {
     open: { density: 0.22, base: 50, spread: 90 },
+    // Wide lanes rather than a sieve: at 0.95/90/220 half the cells had no route across at
+    // all that a 28-wide hull could take, and the ones that did threaded 30-unit gaps a ship
+    // steering by local avoidance cannot find. Smaller blobs at nearly the same density keep
+    // it reading as a rock field -- 46% of the ground is still rock -- while opening it up.
+    // Measured over 60 cells at the median 3,672 width: a 200-wide lane crosses 92% of them,
+    // against 0% before.
     dense: { density: 0.95, base: 90, spread: 220 },
     // A biome may bring its own generator instead of a density: scattering blobs is one way
     // to fill a cell, not the only one, and the warren is not a field of anything. It may
@@ -1687,9 +1942,13 @@ function cityMarks() {
     ];
 }
 
-// A set piece may change what is inside its claim, but never the claim itself. Bump this
-// when its contents change and the cell lays itself out again in place, on a world that
-// already exists: the hexagon it took is permanent, everything within it is not.
+// What a cell of each kind currently lays out. Bump one and every cell of that kind lays
+// itself out again in place, on worlds that already exist: a set piece's claim is permanent
+// but its contents are not, and a biome's numbers are the same bargain -- ground already
+// explored is rescattered rather than left at whatever the old figures made of it. A kind
+// not named here is version 1; add it the day you want to move it. What this takes back is
+// everything the cell deposited, which will need an `edited` flag before walls can be blown
+// open -- the same debt chunk regeneration already owes.
 const SET_VERSION = { town: 9, city: 33 };
 
 // ---- baked set pieces ----
@@ -2665,6 +2924,18 @@ let wallsDirty = true;
 let wallsByKey = new Map(); // stable key -> { key, rings, js, x0, y0, x1, y1 }
 let wallBins = new Map(); // chunk key -> the walls whose box touches that chunk
 let mergedCache = new Map(); // which units were merged -> what they merged into
+// ...and which merged shape was cut by which, for the truncation pass. A second cache
+// rather than a wider key on the first: a cutter is a relationship between two components
+// of different material, which is exactly what the union-find refuses to join, and folding
+// it into a component's own identity would make a clump of rock depend on the block beside it.
+let cutCache = new Map();
+// What the last merge had to get through, and how much of it the cache did not cover.
+// A rebuild that misses is paying polygon-clipping again, which is the dear half.
+let mergeUnits = 0,
+    mergeComps = 0,
+    mergeMisses = 0,
+    mergeCuts = 0, // differences actually run in the truncation pass
+    mergeCutters = 0; // ...and how many cutting walls they were handed
 let artByKey = new Map(); // set-piece scenery, keyed the way walls are
 let artBins = new Map(); // chunk key -> the art whose box touches that chunk
 let marks = new Map(); // key -> an interaction offered somewhere in the world
@@ -2719,30 +2990,39 @@ function rebuildWalls() {
     artByKey = new Map();
     artBins = new Map();
     marks = new Map();
-    for (const c of chunks.values())
-        for (const m of c.marks || []) marks.set(m.key, m);
-    for (const c of chunks.values())
-        for (const piece of c.art || []) {
-            let x0 = Infinity,
-                y0 = Infinity,
-                x1 = -Infinity,
-                y1 = -Infinity;
-            for (const l of piece.lines)
-                for (const [x, y] of l) {
-                    if (x < x0) x0 = x;
-                    if (x > x1) x1 = x;
-                    if (y < y0) y0 = y;
-                    if (y > y1) y1 = y;
-                }
-            const a = { key: piece.key, lines: piece.lines, x0, y0, x1, y1 };
-            artByKey.set(a.key, a);
-            for (let ax = chunkOf(x0); ax <= chunkOf(x1); ax++)
-                for (let ay = chunkOf(y0); ay <= chunkOf(y1); ay++) {
-                    const k = chunkKey(ax, ay);
-                    if (!artBins.has(k)) artBins.set(k, []);
-                    artBins.get(k).push(a);
-                }
-        }
+    timed('merge:art', () => {
+        for (const c of chunks.values())
+            for (const m of c.marks || []) marks.set(m.key, m);
+        for (const c of chunks.values())
+            for (const piece of c.art || []) {
+                let x0 = Infinity,
+                    y0 = Infinity,
+                    x1 = -Infinity,
+                    y1 = -Infinity;
+                for (const l of piece.lines)
+                    for (const [x, y] of l) {
+                        if (x < x0) x0 = x;
+                        if (x > x1) x1 = x;
+                        if (y < y0) y0 = y;
+                        if (y > y1) y1 = y;
+                    }
+                const a = {
+                    key: piece.key,
+                    lines: piece.lines,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                };
+                artByKey.set(a.key, a);
+                for (let ax = chunkOf(x0); ax <= chunkOf(x1); ax++)
+                    for (let ay = chunkOf(y0); ay <= chunkOf(y1); ay++) {
+                        const k = chunkKey(ax, ay);
+                        if (!artBins.has(k)) artBins.set(k, []);
+                        artBins.get(k).push(a);
+                    }
+            }
+    });
     const ent = [];
     const byChunk = new Map();
     for (const c of chunks.values()) {
@@ -2762,23 +3042,28 @@ function rebuildWalls() {
         }
         return i;
     };
-    for (const c of chunks.values())
-        for (const e of byChunk.get(c.key)) {
-            const a = unitBox(e.u);
-            for (let dx = -1; dx <= 1; dx++)
-                for (let dy = -1; dy <= 1; dy++)
-                    for (const f of byChunk.get(
-                        chunkKey(c.cx + dx, c.cy + dy),
-                    ) || []) {
-                        if (f.i <= e.i) continue;
-                        // Matter of different kinds never merges into one shape: a vein is not the rock
-                        // around it, however tightly it sits in it.
-                        if (f.u.mat !== e.u.mat) continue;
-                        const b = unitBox(f.u);
-                        if (Math.hypot(a.cx - b.cx, a.cy - b.cy) <= a.r + b.r)
-                            parent[find(e.i)] = find(f.i);
-                    }
-        }
+    timed('merge:comp', () => {
+        for (const c of chunks.values())
+            for (const e of byChunk.get(c.key)) {
+                const a = unitBox(e.u);
+                for (let dx = -1; dx <= 1; dx++)
+                    for (let dy = -1; dy <= 1; dy++)
+                        for (const f of byChunk.get(
+                            chunkKey(c.cx + dx, c.cy + dy),
+                        ) || []) {
+                            if (f.i <= e.i) continue;
+                            // Matter of different kinds never merges into one shape: a vein is not the rock
+                            // around it, however tightly it sits in it.
+                            if (f.u.mat !== e.u.mat) continue;
+                            const b = unitBox(f.u);
+                            if (
+                                Math.hypot(a.cx - b.cx, a.cy - b.cy) <=
+                                a.r + b.r
+                            )
+                                parent[find(e.i)] = find(f.i);
+                        }
+            }
+    });
     const groups = new Map();
     for (const e of ent) {
         const k = find(e.i);
@@ -2786,10 +3071,12 @@ function rebuildWalls() {
         groups.get(k).push(e);
     }
     const prev = wallsByKey,
-        prevMerged = mergedCache;
+        prevMerged = mergedCache,
+        prevCut = cutCache;
     wallsByKey = new Map();
     wallBins = new Map();
     mergedCache = new Map();
+    cutCache = new Map();
     const built = [];
     for (const comp of groups.values()) {
         // Working out the components again is linear and cheap; the booleans are not. A
@@ -2797,17 +3084,24 @@ function rebuildWalls() {
         // time, and most of them have not: a chunk loading at the rim of the area of interest
         // says nothing about rock three screens the other way. Without this the whole area
         // was re-merged on every chunk load -- 85ms, against a 33ms tick.
-        const sig = comp
-            .map((e) => e.key)
-            .sort()
-            .join('|');
+        const sig = timed('merge:sig', () =>
+            comp
+                .map((e) => e.key)
+                .sort()
+                .join('|'),
+        );
         let merged = prevMerged.get(sig);
         if (!merged) {
-            try {
-                merged = polygonClipping.union(...comp.map((e) => [e.u.ring]));
-            } catch {
-                merged = comp.map((e) => [e.u.ring]);
-            } // degenerate input: leave it unmerged
+            mergeMisses++;
+            merged = timed('merge:union', () => {
+                try {
+                    return polygonClipping.union(
+                        ...comp.map((e) => [e.u.ring]),
+                    );
+                } catch {
+                    return comp.map((e) => [e.u.ring]);
+                } // degenerate input: leave it unmerged
+            });
         }
         mergedCache.set(sig, merged);
         let base = comp[0].key;
@@ -2823,64 +3117,105 @@ function rebuildWalls() {
                 if (y < y0) y0 = y;
                 if (y > y1) y1 = y;
             }
-        built.push({ base, mat: comp[0].u.mat, merged, x0, y0, x1, y1 });
+        built.push({ base, sig, mat: comp[0].u.mat, merged, x0, y0, x1, y1 });
     }
 
     // Take the higher-ranked matter out of the lower wherever the two overlap. Only pairs
-    // whose boxes meet are considered, which in practice is a handful around the town rather
-    // than every wall in the area of interest.
-    for (const b of built) {
-        const cutters = built.filter(
-            (h) =>
-                MAT_RANK[h.mat] > MAT_RANK[b.mat] &&
-                h.x0 <= b.x1 &&
-                b.x0 <= h.x1 &&
-                h.y0 <= b.y1 &&
-                b.y0 <= h.y1,
+    // whose boxes meet are considered.
+    //
+    // Cached exactly as the union is, and for the same reason: the shapes going in decide
+    // the shape coming out, and a rebuild triggered by a chunk loading three screens away
+    // changes neither. Uncached it was the whole of the cost of merging -- measured on a
+    // live server, 38 differences a rebuild with one cutter each, every one of them working
+    // out an answer it already had, 4.9s of the 5.4s spent merging and a tick past the dt
+    // clamp every 4.4 seconds. What that looks like on a phone is ships rewinding.
+    timed('merge:cut', () => {
+        // Only matter that outranks something else can cut, and there is very little of it:
+        // two settlements' worth of `block` against a whole area of interest of `rock`.
+        // Gathering it once makes the pass every wall against a handful rather than every
+        // wall against every wall -- which, measured at 1,153 walls, was 17ms a rebuild
+        // spent finding nothing, and grows with the square of how far anyone has flown.
+        // Reduced rather than spread: `built` is one entry a component, which is unbounded.
+        const lowest = built.reduce(
+            (m, b) => Math.min(m, MAT_RANK[b.mat]),
+            Infinity,
         );
-        if (!cutters.length) continue;
-        try {
-            b.merged = polygonClipping.difference(
-                b.merged,
-                ...cutters.map((c) => c.merged),
+        const sharp = built.filter((b) => MAT_RANK[b.mat] > lowest);
+        for (const b of built) {
+            const cutters = sharp.filter(
+                (h) =>
+                    MAT_RANK[h.mat] > MAT_RANK[b.mat] &&
+                    h.x0 <= b.x1 &&
+                    b.x0 <= h.x1 &&
+                    h.y0 <= b.y1 &&
+                    b.y0 <= h.y1,
             );
-        } catch {
-            /* degenerate input: leave the overlap rather than lose the wall */
-        }
-    }
-
-    for (const b of built) {
-        const { merged, base } = b;
-        merged.forEach((poly, n) => {
-            const rings = poly.map((r) =>
-                r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]),
-            );
-            const key = merged.length > 1 ? `${base}/${n}` : base;
-            const js = JSON.stringify(rings);
-            const old = prev.get(key);
-            let w = old && old.js === js ? old : null;
-            if (!w) {
-                let x0 = Infinity,
-                    y0 = Infinity,
-                    x1 = -Infinity,
-                    y1 = -Infinity;
-                for (const [x, y] of rings[0]) {
-                    if (x < x0) x0 = x;
-                    if (x > x1) x1 = x;
-                    if (y < y0) y0 = y;
-                    if (y > y1) y1 = y;
+            if (!cutters.length) continue;
+            // Which shape, cut by which -- the cutters sorted, since the box filter says
+            // nothing about the order they come back in.
+            const key = `${b.sig}>${cutters
+                .map((c) => c.sig)
+                .sort()
+                .join('|')}`;
+            let cut = prevCut.get(key);
+            if (!cut) {
+                mergeCuts++;
+                mergeCutters += cutters.length;
+                try {
+                    cut = polygonClipping.difference(
+                        b.merged,
+                        ...cutters.map((c) => c.merged),
+                    );
+                } catch {
+                    // Degenerate input: leave the overlap rather than lose the wall. Cached
+                    // like any other answer, so a pair that throws does not throw every
+                    // rebuild for as long as both shapes stand.
+                    cut = b.merged;
                 }
-                w = { key, rings, js, mat: b.mat, x0, y0, x1, y1 };
             }
-            wallsByKey.set(key, w);
-            for (let cx = chunkOf(w.x0); cx <= chunkOf(w.x1); cx++)
-                for (let cy = chunkOf(w.y0); cy <= chunkOf(w.y1); cy++) {
-                    const k = chunkKey(cx, cy);
-                    if (!wallBins.has(k)) wallBins.set(k, []);
-                    wallBins.get(k).push(w);
+            cutCache.set(key, cut);
+            // The union cache keeps the uncut shape under its own signature, which is what
+            // it is: what these units merge to, before anything is taken out of them.
+            b.merged = cut;
+        }
+    });
+
+    timed('merge:bin', () => {
+        for (const b of built) {
+            const { merged, base } = b;
+            merged.forEach((poly, n) => {
+                const rings = poly.map((r) =>
+                    r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]),
+                );
+                const key = merged.length > 1 ? `${base}/${n}` : base;
+                const js = JSON.stringify(rings);
+                const old = prev.get(key);
+                let w = old && old.js === js ? old : null;
+                if (!w) {
+                    let x0 = Infinity,
+                        y0 = Infinity,
+                        x1 = -Infinity,
+                        y1 = -Infinity;
+                    for (const [x, y] of rings[0]) {
+                        if (x < x0) x0 = x;
+                        if (x > x1) x1 = x;
+                        if (y < y0) y0 = y;
+                        if (y > y1) y1 = y;
+                    }
+                    w = { key, rings, js, mat: b.mat, x0, y0, x1, y1 };
                 }
-        });
-    }
+                wallsByKey.set(key, w);
+                for (let cx = chunkOf(w.x0); cx <= chunkOf(w.x1); cx++)
+                    for (let cy = chunkOf(w.y0); cy <= chunkOf(w.y1); cy++) {
+                        const k = chunkKey(cx, cy);
+                        if (!wallBins.has(k)) wallBins.set(k, []);
+                        wallBins.get(k).push(w);
+                    }
+            });
+        }
+    });
+    mergeUnits = ent.length;
+    mergeComps = groups.size;
 }
 
 const pendingPlaces = [];
@@ -6593,13 +6928,55 @@ wss.on('connection', (ws) => {
     // they were, scores stand, and only restarting the process clears any of it.
 });
 
+// Every phase that has ever cost a tick, timed where it is defined rather than where it is
+// called: generation pulls chunks in and a chunk load merges walls, so the same work is
+// reached from several places and there is no one call site to wrap. They nest, so the
+// shares do not sum to the tick -- this names a culprit, it is not a balanced budget.
+const phased =
+    (name, fn) =>
+    (...a) =>
+        timed(name, () => fn(...a));
+depositCell = phased('cells', depositCell);
+loadChunk = phased('load', loadChunk);
+rebuildWalls = phased('merge', rebuildWalls);
+tryPlace = phased('place', tryPlace);
+mapSweep = phased('map', mapSweep);
+armedArrivals = phased('arrive', armedArrivals);
+manageEncounters = phased('enc', manageEncounters);
+syncWalls = phased('walls', syncWalls);
+syncShips = phased('standing', syncShips);
+// Writes to disk. These run on their own intervals rather than in the tick, which is why
+// the tick loop measures the gap between ticks as well as the ticks: a save that blocks
+// the loop for 200ms costs the same rewind as a tick that overran by 200ms, and shows up
+// nowhere in the tick's own total.
+saveSites = phased('save:sites', saveSites);
+savePlayers = phased('save:players', savePlayers);
+saveQuests = phased('save:quests', saveQuests);
+saveTiles = phased('save:tiles', saveTiles);
+saveChunk = phased('save:chunk', saveChunk);
+sweepAbsent = phased('sweep', sweepAbsent);
+
 let last = Date.now(),
-    frame = 0;
+    frame = 0,
+    ended = performance.now(); // when the last tick finished, to measure the gap after it
 setInterval(() => {
+    const t0 = performance.now();
+    // Anything in `spent` now ran between ticks -- a save, a socket, a GC-adjacent pause --
+    // and is charged to the gap, not to the tick that happens to follow it.
+    const gap = t0 - ended;
+    if (gap > TICK + OVERRUN) offTick(gap);
+    else for (const k in spent) delete spent[k];
+
     const now = Date.now();
-    const dt = Math.min((now - last) / 1000, 0.1);
+    const real = (now - last) / 1000;
+    const dt = Math.min(real, DT_MAX);
+    // What the clamp threw away: world time that never happened, which the clients have
+    // already extrapolated through and will be pulled back from.
+    const lost = real - dt;
+    metric.debt += lost;
     last = now;
     step(dt);
+    const sim = performance.now() - t0;
     const streamChunks = ++frame % 10 === 0;
     for (const p of players.values()) {
         if (!p.ws || p.ws.readyState !== 1) continue;
@@ -6614,6 +6991,8 @@ setInterval(() => {
     }
     kills.length = 0; // said once, to whoever was near enough to see it
     tracers.length = 0;
+    ended = performance.now();
+    endTick(ended - t0, sim, lost);
 }, TICK);
 
 // Dev mode. `node --watch` restarts this process when server.js changes, which drops
