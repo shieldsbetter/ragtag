@@ -5036,8 +5036,34 @@ function manageCells() {
     if (s) depositCell(s);
 }
 
+// Which chunks the anchors are standing in. What residency should be is a function of
+// exactly this: a ship moves about three units a tick and a chunk is nine hundred across,
+// so the answer holds for hundreds of ticks and was being worked out again for every one
+// of them -- a seventeen-by-seventeen sweep an anchor, a Set built from scratch, and every
+// resident chunk tested for eviction. Measured at 7.5% of everything the server did.
+function anchorMark() {
+    let mark = '';
+    for (const a of shipAnchors()) mark += `${chunkOf(a.x)},${chunkOf(a.y)};`;
+    mark += '|';
+    for (const a of watchAnchors()) mark += `${chunkOf(a.x)},${chunkOf(a.y)};`;
+    return mark;
+}
+let heldFor = null, // the mark residency was last worked out for
+    heldCount = -1; // ...and how many chunks were resident when it was
+
 function manageChunks() {
     manageCells();
+    // Nobody has gone anywhere, and nothing has arrived by another route. Residency is
+    // whatever it was. The count is the second half of that and not a belt-and-braces
+    // check: depositCell and a spawn's `ensure` both load chunks of their own, which can
+    // land outside the keep radius, and without noticing the map grew those would stand
+    // resident until somebody happened to cross a chunk line.
+    const mark = anchorMark();
+    if (mark === heldFor && chunks.size === heldCount) {
+        if (wallsDirty) rebuildWalls();
+        return;
+    }
+
     for (const a of shipAnchors())
         for (
             let cx = chunkOf(a.x - AOI_LOAD);
@@ -5064,6 +5090,10 @@ function manageChunks() {
             chunks.delete(key);
             wallsDirty = true;
         }
+    // Read after the pass, not before: loading and evicting both moved it, and the mark is
+    // the state this answer was reached at rather than the state it started from.
+    heldFor = mark;
+    heldCount = chunks.size;
     if (wallsDirty) rebuildWalls();
 }
 
