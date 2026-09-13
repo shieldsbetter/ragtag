@@ -308,6 +308,25 @@ function metricsText() {
         'With SHADOW=1: rock-ticks found overlapping blocking matter with no impact booked. Zero is the only good answer.',
         shadowMiss,
     );
+    say(
+        'ragtag_walls_rebuilt_total',
+        'counter',
+        'Walls the rebuild reused against walls it had to build again.',
+        [
+            [lbl('of', 'kept'), wallsKept],
+            [lbl('of', 'fresh'), wallsFresh],
+            [lbl('of', 'map_touches'), mapTouches],
+        ],
+    );
+    say(
+        'ragtag_map_chunks_total',
+        'counter',
+        "Chunks asked for on somebody's map, and chunks whose ground was actually read to answer.",
+        [
+            [lbl('of', 'asked'), mapAsks],
+            [lbl('of', 'sampled'), mapSamples],
+        ],
+    );
     one(
         'ragtag_rock_impacts_total',
         'counter',
@@ -2833,8 +2852,10 @@ function clearCell(s) {
                 (a) => !ours(a, a.lines[0][0][0], a.lines[0][0][1]),
             );
             c.marks = c.marks.filter((m) => !ours(m, m.x, m.y));
-            if (c.units.length + c.art.length + c.marks.length !== had)
+            if (c.units.length + c.art.length + c.marks.length !== had) {
                 saveChunk(c);
+                groundEdited(cx, cy);
+            }
         }
     wallsDirty = true;
 }
@@ -2872,7 +2893,10 @@ function depositCell(s) {
             c.units.push({ ...u, src });
             touched.add(c);
         }
-    for (const c of touched) saveChunk(c);
+    for (const c of touched) {
+        saveChunk(c);
+        groundEdited(c.cx, c.cy);
+    }
     // What the set piece declares its place starts out knowing. Only keys it does not
     // already have are filled in: laying a cell out again for a new version replaces what
     // is standing there, but it must not unlearn what has happened there since. Held to the
@@ -2930,6 +2954,9 @@ function loadChunk(cx, cy) {
     }
     const c = { cx, cy, key, units, art, marks };
     chunks.set(key, c);
+    // Units arriving in residency are not the ground changing, but they are a change in
+    // what a neighbouring chunk's sample can see -- a unit filed here may hang over into it.
+    if (units.length) touchGround(cx, cy);
     wallsDirty = true;
     // Deferred: placing a ship needs blockedAt, which loads neighbouring chunks, which would
     // land back in here. The queue is drained once loading has settled.
@@ -2956,6 +2983,11 @@ let cutCache = new Map();
 // it is not noticing when it stops happening: a collision that silently never fires looks
 // exactly like a collision that got cheap.
 let shadowMiss = 0;
+let mapSamples = 0, // chunks actually read, as against asked for
+    mapAsks = 0,
+    wallsFresh = 0, // walls the rebuild could not reuse
+    wallsKept = 0,
+    mapTouches = 0;
 let rockImpacts = 0,
     rockScans = 0, // rocks asked what they are going to do
     rockNear = 0; // ...and how many of those had any blocking matter on the way at all
@@ -3233,6 +3265,8 @@ function rebuildWalls() {
                     }
                     w = { key, rings, js, mat: b.mat, x0, y0, x1, y1 };
                 }
+                if (w === old) wallsKept++;
+                else wallsFresh++;
                 wallsByKey.set(key, w);
                 for (let cx = chunkOf(w.x0); cx <= chunkOf(w.x1); cx++)
                     for (let cy = chunkOf(w.y0); cy <= chunkOf(w.y1); cy++) {
@@ -4002,7 +4036,56 @@ function loadTiles() {
 }
 const MAP_REACH = 2; // chunks either side of the one a hull is in, so about what it saw
 const MAP_PER_TICK = 2; // chunks sampled a tick, to keep a long jump off the tick budget
-const mapWork = []; // [player, cx, cy], drained a couple at a time
+// Sampling is triggered by a hull entering a new chunk, which is the frontier -- exactly
+// where walls are still arriving and changing shape. Sampling there is sampling something
+// mid-change, and then sampling it again when it changes again. So a chunk whose walls
+// have just moved waits for them to settle.
+const MAP_SETTLE = 1.5; // seconds of quiet a chunk waits for before it is sampled
+// ...but a chunk that never settles must still be sampled, or it is a permanent hole in
+// the map. The wait is pushed back, never past this.
+const MAP_WAIT_MAX = 6;
+// Pending samples, one entry a chunk rather than one a player: what a sample reads is the
+// world, and who wants it only decides where the answer is filed. So a fleet of eight
+// crossing a boundary together queues the chunk once and everybody is served by it.
+const mapWork = new Map(); // chunk key -> { cx, cy, who: Set<player>, at, by }
+
+// The ground in this chunk has changed. Whatever was sampled over it is stale, and anything
+// queued should wait to see whether more is coming -- a beam cutting rock edits units for
+// as long as it is held down, and sampling each edit is sampling a hole half dug.
+//
+// The neighbours go with it: a unit is filed by its centre and may hang over the seam, so
+// editing one chunk changes what stands in the three-by-three around it.
+function touchGround(cx, cy) {
+    for (let dx = -1; dx <= 1; dx++)
+        for (let dy = -1; dy <= 1; dy++) {
+            mapTouches++;
+            const key = chunkKey(cx + dx, cy + dy);
+            const c = chunks.get(key);
+            if (c) c.mapStamp++;
+            const job = mapWork.get(key);
+            if (job) job.at = Math.min(job.by, worldClock + MAP_SETTLE);
+        }
+}
+
+// The ground changed where somebody can see it. Marking the old sample stale is not enough
+// on its own: sampling is started by a hull entering a new chunk, so a hole cut while
+// standing still would not reach the map until you had wandered off and come back. The map
+// is meant to be live while you are in the place, so the edit asks for the sample itself.
+function groundEdited(cx, cy) {
+    touchGround(cx, cy);
+    for (const s of ships) {
+        if (!crewed(s)) continue;
+        const p = players.get(s.owner);
+        if (!p) continue;
+        if (
+            Math.abs(chunkOf(s.x) - cx) > MAP_REACH ||
+            Math.abs(chunkOf(s.y) - cy) > MAP_REACH
+        )
+            continue;
+        for (let dx = -1; dx <= 1; dx++)
+            for (let dy = -1; dy <= 1; dy++) wantMap(p, cx + dx, cy + dy);
+    }
+}
 
 // Where a hull has just arrived, and the ground around it. Queued on entering a chunk
 // rather than watched continuously: a ship sitting still has nothing new to show anybody,
@@ -4019,7 +4102,7 @@ function mapSweep() {
             cy = chunkOf(s.y);
         for (let dx = -MAP_REACH; dx <= MAP_REACH; dx++)
             for (let dy = -MAP_REACH; dy <= MAP_REACH; dy++)
-                mapWork.push([p, cx + dx, cy + dy]);
+                wantMap(p, cx + dx, cy + dy);
         // Somewhere with a name, near enough to have been read off the hull. Only set
         // pieces have one, so this is a handful of sites rather than the whole mesh.
         for (const q of sites) {
@@ -4036,17 +4119,55 @@ function mapSweep() {
             playersDirty = true;
         }
     }
-    for (let i = 0; i < MAP_PER_TICK && mapWork.length; i++) {
-        const [p, cx, cy] = mapWork.shift();
-        sampleChunk(p, cx, cy);
+    // Whatever has settled, oldest first -- a Map hands its entries back in the order they
+    // were put in, and a job that is not ready yet is simply passed over rather than
+    // holding up the ones behind it.
+    let did = 0;
+    for (const [key, job] of mapWork) {
+        if (did >= MAP_PER_TICK) break;
+        if (worldClock < job.at) continue;
+        mapWork.delete(key);
+        did++;
+        const name = sampleChunk(job.cx, job.cy);
+        for (const p of job.who) fileTile(p, key, name);
     }
     flushMapNews();
+}
+
+// Somebody wants this chunk on their map. One job a chunk, however many hulls ask for it,
+// and asking again does not restart the wait: what the wait is for is the walls settling,
+// not for people to stop asking.
+function wantMap(p, cx, cy) {
+    const key = chunkKey(cx, cy);
+    let job = mapWork.get(key);
+    if (!job) {
+        job = {
+            cx,
+            cy,
+            who: new Set(),
+            at: worldClock,
+            by: worldClock + MAP_WAIT_MAX,
+        };
+        mapWork.set(key, job);
+    }
+    job.who.add(p);
+    mapAsks++;
 }
 
 // One chunk, as a grid of "is there matter here". `ensure` false throughout: the map may
 // only ever record ground that already exists, or looking at it would call the world into
 // being ahead of anybody going there.
-function sampleChunk(p, cx, cy) {
+// What matter stands where, over one chunk: an 8x8 grid, one byte a cell, hashed and
+// stored once for everybody under the hash of what it says.
+//
+// Memoised against the chunk's wall stamp. A chunk whose walls have not changed since it
+// was last read produces the same sixty-four bytes and the same name, and the only way to
+// learn that today was to work them out again. It is not a cache with a lifetime: it is a
+// fact about the chunk, and it is thrown away when the chunk is.
+function sampleChunk(cx, cy) {
+    const key = chunkKey(cx, cy);
+    const c = chunks.get(key);
+    if (c?.tile && c.tile.stamp === c.mapStamp) return c.tile.name;
     const bytes = Buffer.alloc(MAP_GRID * MAP_GRID);
     const step = CHUNK / MAP_GRID;
     for (let gy = 0; gy < MAP_GRID; gy++)
@@ -4056,10 +4177,15 @@ function sampleChunk(p, cx, cy) {
             const mat = matterAt(x, y);
             bytes[gy * MAP_GRID + gx] = mat ? MAP_MATS.indexOf(mat) + 1 : 0;
         }
-    const key = chunkKey(cx, cy);
-    const was = p.map[key];
+    mapSamples++;
     const name = keepTile(bytes);
-    if (was === name) return; // the ground has not changed since last time
+    if (c) c.tile = { stamp: c.mapStamp, name };
+    return name;
+}
+
+// Filing it is per player, and is all that is per player.
+function fileTile(p, key, name) {
+    if (p.map[key] === name) return; // the ground has not changed since last time
     p.map[key] = name;
     playersDirty = true;
     // Somebody with the map open is watching this happen. Sent as it is sampled rather
@@ -4966,23 +5092,59 @@ function nearbyWalls(x, y, ensure = false) {
 // What kind of matter is standing at a point, or null. Ranked, so where two kinds abut the
 // harder one is what the map records -- the town's own wall should not read as rock because
 // a boulder is leaning on it.
+// What matter stands at a point, asked of the UNITS rather than of the walls merged out of
+// them. A point is inside the union exactly when it is inside one of its members, and the
+// highest rank wins either way, so the answer is identical -- but what it depends on is
+// not. A wall is remade whenever its component's membership changes, which happens every
+// time a chunk at the rim of the area of interest loads or unloads, on ground nobody has
+// touched: measured, a chunk's walls changed 4.7 times in 70 seconds of patrol while the
+// ground under it changed not at all. Units change when the world changes and at no other
+// time, which is what makes an answer worth keeping.
+//
+// It is cheaper, too, and for the reason a box test on the walls was not: a unit is one
+// blob of a dozen vertices with a box worked out once, where a merged wall near a
+// settlement is a single ring of hundreds that a box can rarely rule out.
+//
+// What matter stands at a point, asked of the UNITS rather than of the walls merged out of
+// them. A point is inside the union exactly when it is inside one of its members, and the
+// highest rank wins either way, so the answer is identical -- but what it depends on is
+// not. A wall is remade whenever its component's membership changes, which happens every
+// time a chunk at the rim of the area of interest loads or unloads, on ground nobody has
+// touched: measured, a chunk's walls changed 4.7 times in 70 seconds of patrol while the
+// ground under it changed not at all. Units change when the world changes and at no other
+// time, which is what makes an answer worth keeping.
+//
+// It is cheaper, too, and for the reason a box test on the walls was not: a unit is one
+// blob of a dozen vertices with a box worked out once, where a merged wall near a
+// settlement is a single ring of hundreds that a box can rarely rule out.
+//
+// Units are filed by the chunk their centre falls in and are free to hang over the seam, so
+// the neighbours have to be read as well.
 function matterAt(x, y) {
     let best = null;
-    if (wallsDirty) rebuildWalls();
     const cx0 = chunkOf(x),
         cy0 = chunkOf(y);
     for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
-        for (let cy = cy0 - 1; cy <= cy0 + 1; cy++)
-            for (const w of wallBins.get(chunkKey(cx, cy)) || []) {
-                if (best && MAT_RANK[w.mat] <= MAT_RANK[best]) continue;
-                if (pointInWall(w.rings, x, y)) best = w.mat;
+        for (let cy = cy0 - 1; cy <= cy0 + 1; cy++) {
+            const c = chunks.get(chunkKey(cx, cy));
+            if (!c) continue;
+            for (const u of c.units) {
+                if (best && MAT_RANK[u.mat] <= MAT_RANK[best]) continue;
+                const b = unitBox(u);
+                if (x < b.minx || x > b.maxx || y < b.miny || y > b.maxy)
+                    continue;
+                if (pointInWall([u.ring], x, y)) best = u.mat;
             }
+        }
     return best;
 }
 
 // Blocking matter near a point: the walls asteroids cannot pass. Everything collides with
 // walls the same way, so this asks the material rather than the shape.
-function nearbyBlocking(x, y) {
+// Blocking walls that could reach a disc of radius `rad` at this point. The box is grown by
+// the radius rather than the point tested against it, since what is being asked is whether
+// the rock can touch the wall, not whether its centre is in it.
+function nearbyBlocking(x, y, rad = 0) {
     if (wallsDirty) rebuildWalls();
     const out = [],
         seen = new Set();
@@ -4990,11 +5152,18 @@ function nearbyBlocking(x, y) {
         cy0 = chunkOf(y);
     for (let cx = cx0 - 1; cx <= cx0 + 1; cx++)
         for (let cy = cy0 - 1; cy <= cy0 + 1; cy++)
-            for (const w of wallBins.get(chunkKey(cx, cy)) || [])
-                if (w.mat === 'block' && !seen.has(w.key)) {
-                    seen.add(w.key);
-                    out.push(w.rings);
-                }
+            for (const w of wallBins.get(chunkKey(cx, cy)) || []) {
+                if (w.mat !== 'block' || seen.has(w.key)) continue;
+                if (
+                    x < w.x0 - rad ||
+                    x > w.x1 + rad ||
+                    y < w.y0 - rad ||
+                    y > w.y1 + rad
+                )
+                    continue;
+                seen.add(w.key);
+                out.push(w.rings);
+            }
     return out;
 }
 
@@ -5002,7 +5171,7 @@ function nearbyBlocking(x, y) {
 // point on the surface plus the normal there. A rock already inside is pushed toward the
 // nearest surface rather than away from it, which is the only direction that gets it out.
 function blockingHit(x, y, rad) {
-    for (const rings of nearbyBlocking(x, y)) {
+    for (const rings of nearbyBlocking(x, y, rad)) {
         const inside = pointInWall(rings, x, y);
         const c = closestOnWall(rings, x, y);
         if (!inside && c.d >= rad) continue;

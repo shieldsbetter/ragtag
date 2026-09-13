@@ -90,6 +90,7 @@ try {
             `--url=ws://127.0.0.1:${PORT}`,
             `--seconds=${SECONDS}`,
             `--session=bench-${LABEL}`,
+            `--route=${arg('route', 'spiral')}`,
         ],
         { stdio: ['ignore', 'pipe', 'inherit'] },
     );
@@ -121,6 +122,8 @@ try {
         rebuilds,
         unions: d('ragtag_merge_unions_total'),
         differences: d('ragtag_merge_cuts_total'),
+        mapAsked: d('ragtag_map_chunks_total{of="asked"}'),
+        mapSampled: d('ragtag_map_chunks_total{of="sampled"}'),
         rockImpacts: d('ragtag_rock_impacts_total'),
         shadowMisses: d('ragtag_shadow_miss_total'), // only counted under SHADOW=1
 

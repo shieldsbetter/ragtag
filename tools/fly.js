@@ -103,10 +103,28 @@ ws.on('message', (raw) => {
     }
 });
 
-// The route. A fixed spiral rather than anything random, so two runs fly the same ground
-// and their numbers mean the same thing.
+// The route. Fixed rather than random, so two runs fly the same ground and their numbers
+// mean the same thing. Two of them, because they are different workloads and a change can
+// help one and not the other:
+//
+//   spiral -- always new ground. Everything is generated, merged and mapped for the first
+//             time, and nothing is ever seen twice.
+//   patrol -- a circuit flown over and over. Ground is made once and then revisited, which
+//             is what most play actually looks like.
+//
+// Real play is a mixture, and a change measured on only one of these has been measured on
+// half the game.
+const ROUTE = arg('route', 'spiral');
 let leg = 0;
 const waypoint = () => {
+    if (ROUTE === 'patrol') {
+        // Four corners, a couple of screens apart, walked round and round.
+        const at = leg % 4;
+        return {
+            x: at === 0 || at === 3 ? -LEG : LEG,
+            y: at < 2 ? -LEG : LEG,
+        };
+    }
     const a = leg * 2.4; // radians; an irrational-ish turn, so legs do not retrace
     const r = LEG * (1 + leg * 0.35);
     return { x: Math.round(Math.cos(a) * r), y: Math.round(Math.sin(a) * r) };
@@ -130,6 +148,7 @@ setTimeout(() => {
     console.log(
         JSON.stringify(
             {
+                route: ROUTE,
                 seconds: SECONDS,
                 ships: mine.size,
                 orders: seen.orders,
