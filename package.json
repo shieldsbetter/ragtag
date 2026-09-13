@@ -35,7 +35,9 @@
         "prettier": "prettier . --write",
         "prettier:check": "prettier . --check",
         "start": "node server.js",
-        "bake": "node server.js --bake"
+        "bake": "node server.js --bake",
+        "bench": "node tools/bench.js",
+        "heat": "node tools/heat.js"
     },
     "dependencies": {
         "@shieldsbetter/pixel-portraits": "^0.1.0",

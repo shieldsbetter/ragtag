@@ -6932,6 +6932,11 @@ wss.on('connection', (ws) => {
 // called: generation pulls chunks in and a chunk load merges walls, so the same work is
 // reached from several places and there is no one call site to wrap. They nest, so the
 // shares do not sum to the tick -- this names a culprit, it is not a balanced budget.
+// Rebinding a function declaration is what this rule is normally right to flag. Here it is
+// the point: every call site is timed wherever it is reached from, without a wrapper name
+// leaking into the code being measured, and the instrumentation stays in one block instead
+// of scattered through fifteen functions.
+/* eslint-disable no-func-assign */
 const phased =
     (name, fn) =>
     (...a) =>
@@ -6955,6 +6960,7 @@ saveQuests = phased('save:quests', saveQuests);
 saveTiles = phased('save:tiles', saveTiles);
 saveChunk = phased('save:chunk', saveChunk);
 sweepAbsent = phased('sweep', sweepAbsent);
+/* eslint-enable no-func-assign */
 
 let last = Date.now(),
     frame = 0,
@@ -7171,6 +7177,25 @@ const cannotListen = (e) => {
 };
 server.on('error', cannotListen);
 wss.on('error', cannotListen);
+
+// Stopping is a thing the process does, not a thing that happens to it. Two reasons it
+// has to be: state reaches disk on five-second timers, so a kill loses up to five seconds
+// of world; and `node --cpu-prof` writes its profile from an exit hook, which a signal
+// never reaches -- so without this, every way of stopping the server throws the profile
+// away, which is most of what makes a profiled run possible at all.
+let leaving = false;
+for (const sig of ['SIGINT', 'SIGTERM'])
+    process.on(sig, () => {
+        if (leaving) process.exit(1); // asked twice: they mean it
+        leaving = true;
+        for (const save of [saveSites, savePlayers, saveQuests, saveTiles])
+            try {
+                save();
+            } catch {
+                // One store being unwritable must not stop the others being written.
+            }
+        process.exit(0);
+    });
 
 server.listen(PORT, async () => {
     // Nothing but the loopback: say so rather than print nothing at all, which reads as
