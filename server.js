@@ -3245,13 +3245,31 @@ function rebuildWalls() {
         for (const b of built) {
             const { merged, base } = b;
             merged.forEach((poly, n) => {
-                const rings = poly.map((r) =>
-                    r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]),
-                );
                 const key = merged.length > 1 ? `${base}/${n}` : base;
-                const js = JSON.stringify(rings);
                 const old = prev.get(key);
-                let w = old && old.js === js ? old : null;
+                // The cheap question first, and it answers for nearly every wall: is this
+                // the very same polygon? An unchanged component comes back out of the union
+                // and cut caches as the identical array, so sameness is an identity test and
+                // costs nothing. What it replaces was a rounded copy of every vertex and a
+                // JSON string of the result, built for every wall on every rebuild purely to
+                // be compared with the last one -- 4.6ms of a 10.9ms rebuild.
+                let w = old && old.poly === poly ? old : null;
+                let rings, js;
+                if (!w) {
+                    // It is a different array. That is not the same as being a different
+                    // shape -- a component whose cache entry was missed merges to what it
+                    // merged to before -- so the old question is still asked, just no longer
+                    // asked of everything.
+                    rings = poly.map((r) =>
+                        r.map(([x, y]) => [+x.toFixed(1), +y.toFixed(1)]),
+                    );
+                    js = JSON.stringify(rings);
+                    if (old && old.js === js) {
+                        w = old;
+                        // So that next time the identity test is the one that answers.
+                        w.poly = poly;
+                    }
+                }
                 if (!w) {
                     let x0 = Infinity,
                         y0 = Infinity,
@@ -3263,7 +3281,7 @@ function rebuildWalls() {
                         if (y < y0) y0 = y;
                         if (y > y1) y1 = y;
                     }
-                    w = { key, rings, js, mat: b.mat, x0, y0, x1, y1 };
+                    w = { key, rings, js, poly, mat: b.mat, x0, y0, x1, y1 };
                 }
                 if (w === old) wallsKept++;
                 else wallsFresh++;
