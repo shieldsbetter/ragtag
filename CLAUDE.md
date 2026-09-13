@@ -143,6 +143,15 @@ about it collides, merges or is matter.
 checked against the reach of something offering to do it, not against being somewhere in
 the cavern, so the rule the order is validated by is the same one that opened the sheet.
 
+**A set piece is a fixed thing; a biome is a rule.** That is the whole of the difference, and
+everything else about them follows from it. A biome is handed a cell and decides what to put
+in it, so its output depends on the cell and differs everywhere it runs. A set piece is a
+_place_ — one authored hexagon with one authored thing inside it — so nothing about what it
+contains may depend on where it landed or on which world it is. Where it landed is an offset
+applied to finished vertices, and nothing else. Writing a set piece's layout as a function of
+its site's coordinates, the way a biome legitimately is, gives every world a different Still
+Basin, has to be worked out inside a tick, and cannot be cut ahead of time.
+
 **A second set piece costs a `kind` and a version, and nothing else.** Low Berth is a
 cavern with one way in; Still Basin is the other kind of settlement, a slab of rock with a
 warren dug through it. Each mouth keeps a moat for the reason the town's door has one: a
@@ -211,13 +220,70 @@ in the second city's warren. What the city has to work out is where that wall is
 is cut into rock that is already tunnelled, so its wall is not the circle it was drawn as:
 tunnels open into it and the void runs on past them, and standing the art at a fixed bearing
 put it in mid-air in the middle of a merged cavern. So the wall is found rather than assumed
-— march out along each bearing until rock starts, and take the stretch, as wide as the
-station itself, where the furthest of those is nearest. The art lies on the deepest point of
-that stretch, so none of the station is buried and the rest of the wall stands a little proud
-of it, which is what "built against the rock" looks like when the rock is not a drawn circle.
-The layout is worked out three times in the life of a cell — by matter, by art and by marks,
-all three inside the one `depositCell` that lays the cell down — and nothing carries a
-half-spent random stream out of it, which is what makes that safe.
+— and the station is put on it by putting two points on it. That is the whole of the
+problem, and it took five versions to say it that plainly.
+
+A station's baseline is the line its own drawing stands on, read off the art (`footOf`): the
+lowest points of it, outermost one side to outermost the other. Those two points are a fixed
+distance apart, and `cityStand` puts both of them on the wall. It takes the wall, that length,
+and a point to look from, and does four things:
+
+1. Casts ten rays from the point and takes where each _first_ meets the wall — first, so the
+   hit is a piece of wall the clearing can see, and nothing afterwards has to ask whether it
+   can.
+2. Throws away the outliers, since a ray that went out through a tunnel comes back much
+   further than the rest, and takes one of what is left. That is the first point.
+3. Casts a segment of the baseline's length off it and bisects on the angle until the far end
+   lands on the wall too. That is the second point.
+4. Sweeps ten more rays between those two points. Two points on the wall say nothing about
+   what is between them: a baseline can land with its ends either side of a tunnel mouth, and
+   the station then stands across the mouth with the passage running away underneath it. Each
+   of those rays should meet the wall at about the baseline, and one that carries on more than
+   half the art's own height past it has gone down a tunnel — so the whole landing is thrown
+   away and done again from the top, ten times before the last is allowed through regardless.
+   A ray that finds no wall **at all** is the same verdict and not a shrug — it has gone
+   straight out of the neighbourhood, which is what a tunnel is. Measured over 600 landings:
+   worst overshoot runs a median of 134 against a 75th percentile of 251, and the test throws
+   out 43% of them at the yard and 35% at the market.
+
+Rolled again if what comes back is unusable — the baseline or any part of the drawing standing
+in rock — which is a property of the answer, not something to search for. Nothing is scored and
+nothing is minimised.
+
+Then it is seated: `CITY_SEAT` nudges the whole drawing straight into the wall along its own
+baseline's normal. That happens after every check, so what it buries is deliberate — a station
+drawn to rest on a flat and standing on a curve otherwise meets that curve at one point and
+reads as balanced on it rather than built against it. At 20 the two ends bite about twelve
+units in and everything between them stays in the open, which is the one number to move if it
+reads wrong. Measured: 0.2s to place both stations.
+
+The four versions before it searched instead for somewhere the whole baseline could lie flat,
+which no straight line can do on a curve, and so each spent its effort deciding which part of
+the drawing to leave hanging — a quartile of a projected chord, a fraction of the face allowed
+to bury itself, a mean clearance minimised over 180 bearings. A fifth cut a flat into the
+clearing so the curve would go away, which is a set piece rewriting the terrain to suit its own
+art. A sixth walked the wall a unit at a time, 6,204 candidates where the wall near a clearing
+is a hundred-odd straight edges, and ranked what it found. Only the two ends have to be on the
+wall. What the wall does between them is the wall's business, and no version of ranking that
+gap was ever asked for.
+
+One thing from all of that is worth keeping, because it was most of the running time and none
+of it was the search: `inRock` asked all thirty carved rings whether they held a point when at
+most one is near it. 85 million point-in-ring tests, 97 seconds. A box round each ring, skipped
+unless the point is inside it, is what a query against carved matter needs. Triangulating the
+void was considered and is not worth it — it wants a dependency and a point-location structure
+to replace a four-line box test.
+
+**A set piece is cut once, into the repo, and stamped where the cell landed.** Still Basin is
+one place, so its layout is not a function of anything: it is cut at the origin from one
+fixed stream (`CITY_SEED`) into `setpieces/city.json`, checked in, and shipped, and a world
+that founds one translates the vertices. Where the cell landed is an offset and nothing else
+— what a site still decides is the key each piece is filed under and what the place is
+called, which is why neither is baked. The server cuts anything stale on its way up, before
+it serves: a set piece whose `SET_VERSION` has moved is cut again and rewritten, which is the
+development path, and `npm run bake` is the same work done deliberately. Shipped, everything
+is already at version and starting up reads a 60KB file. Measured: 0.3s to cut, 0.3s to start
+when it is current, 2ms to stamp a cell.
 
 **A conversation names no mark.** `{ open: true }` hands the session to the mark the
 conversation is standing at, whichever instance that is, so one foreman module serves every
@@ -342,8 +408,8 @@ standing inside the wall and break again at once, and the wall visibly eats the 
 instead of turning it away. Measured: 10 impacts in 12 leave two pieces travelling away.
 
 **The cell generates; the chunk only files.** A generator is handed a cell and returns
-polygons of material of any size, anywhere in it — a set piece draws its walls, a biome
-scatters its rock — and never sees a chunk or a unit. Anything too big is cut on a fixed
+polygons of material of any size, anywhere in it — a biome scatters its rock, a set piece
+stamps the walls it was cut with — and never sees a chunk or a unit. Anything too big is cut on a fixed
 grid, and each piece goes to the chunk holding its centre. Cells generate one per tick
 off a queue, driven by a sweep of the area of interest once a second, so ground is made
 long before anyone reaches it.
@@ -547,6 +613,16 @@ keys work off them will never deduplicate it. Queueing it for generation filled 
 queue with jobs that could never be done, and real cells starved behind it at one a tick:
 fly far enough from the town and terrain simply stopped arriving. Anything walking the
 mesh should iterate `sites`, not collect what `siteFor` returns.
+
+**A query that found nothing has not found nothing wrong.** Ten rays are swept under a
+station's baseline to check there is no tunnel mouth beneath it, and a ray that runs well past
+the baseline before meeting rock fails the placement. Three of the yard's rays met no rock at
+all -- they went straight out down the tunnel and left the neighbourhood -- and the code read
+the empty answer as nothing to report and passed the station, which then stood across the
+mouth exactly as before. The rays either side, at 115 and 138, were comfortably inside
+tolerance and said so. The empty result is the strongest result there, not the absence of one,
+and any bounded search has this shape: `blockedAt` past its radius, a ray past its edge set, a
+lookup outside a loaded chunk. Decide what an empty answer _means_ before writing the branch.
 
 **Raiders are not anchors.** Terrain stays resident and asteroid fields stay stocked
 around _crewed_ ships only. A ship left in every chunk you have ever visited would

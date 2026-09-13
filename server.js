@@ -45,6 +45,12 @@ const cli = command('ragtag', {
             summary:
                 'Where the world is kept. Defaults to ./ragtag, or $RAGTAG_DATADIR.',
         },
+        // Set pieces are cut at build time and shipped. The server cuts anything stale on
+        // its way up anyway, so this is the same work done deliberately.
+        bake: {
+            type: 'boolean',
+            summary: 'Cut any out-of-date set pieces and exit without serving.',
+        },
     },
 });
 let cmdline;
@@ -797,7 +803,10 @@ const WARREN_STEP = 170; // how far a tunnel runs before it bends
 const WARREN_BEND = 0.5; // ...and how far it may bend there, in radians
 const CITY_SPURS = 40; // side passages driven off whatever is already dug
 const CITY_ROOM = 300; // a clearing, at its widest
-const CITY_HALL = 440; // ...and a clearing with a station in it, which has to hold one
+// ...and a clearing with a station in it, which has to hold one: a station's floor is 600
+// units across, and the chord of one laid inside a 440 circle stands its middle 102 off the
+// rock, which is arithmetic and not a placement to be improved on.
+const CITY_HALL = 440;
 const CITY_ROOMS = 10; // how many of them, the market and the yard among them
 const WARREN_PILLAR = 150; // thinnest rib of rock allowed to stand between two tunnels
 const WARREN_SEAM = 2; // ...and how many steps one may run inside that before it stops
@@ -898,72 +907,289 @@ function dig(x, y, a, steps, rnd, aim, seam) {
     return pts;
 }
 
-// Has this been dug out? Everything the warren cuts, asked as a shape rather than looked up
-// in the matter, because the matter is not built yet when this is wanted.
-function cityDug(plan, x, y) {
-    if (Math.hypot(x - plan.at[0], y - plan.at[1]) < CITY_HUB) return true;
-    for (const r of plan.rooms)
-        if (Math.hypot(x - r.x, y - r.y) < r.r) return true;
-    for (const g of plan.segs) {
-        const dx = g.bx - g.ax,
-            dy = g.by - g.ay;
-        const d2 = dx * dx + dy * dy || 1;
-        const t = Math.max(
-            0,
-            Math.min(1, ((x - g.ax) * dx + (y - g.ay) * dy) / d2),
+// A station's baseline is the line its own drawing stands on: the lowest points of the art,
+// from the outermost on one side to the outermost on the other. Read off the drawing rather
+// than written down beside it, so a hand moving the market's dish moves what the market
+// stands on and cannot leave the two disagreeing.
+const FOOT_FRAME = { line: (...pts) => pts, at: (u, v) => [u, v] };
+function footOf(lines) {
+    const pts = lines.flat();
+    const sole = Math.min(...pts.map((q) => q[1]));
+    const on = pts.filter((q) => q[1] <= sole + 1).map((q) => q[0]);
+    return [Math.min(...on), Math.max(...on)];
+}
+
+// A property of the two drawings and of nothing else, so they are read once: what each
+// stands on, and every point it occupies.
+const CITY_SOLE = {
+    market: () => footOf(marketLines(FOOT_FRAME)),
+    yard: () => footOf(yardLines(FOOT_FRAME)),
+};
+const CITY_SHAPE = {
+    market: () => marketLines(FOOT_FRAME).flat(),
+    yard: () => yardLines(FOOT_FRAME).flat(),
+};
+
+// Put two points on the wall. The inputs are the wall, the length of the station's baseline,
+// and a point to look from -- nothing else, and no shape query standing in for the rock, so a
+// stretch of a clearing's ring that a tunnel has opened is not wall here and nothing has to be
+// told so.
+//
+//   1. Cast ten rays from the query point and take where each first meets the wall.
+//   2. Throw away the outliers -- a ray that went out through a tunnel comes back much
+//      further than the rest -- and take one of what is left. That is the first point.
+//   3. Cast a segment of the baseline's length off it and bisect on the angle until the far
+//      end lands on the wall too. That is the second point.
+//   4. Sweep ten more rays between those two points. One that runs well past the baseline
+//      before it meets the wall means a tunnel mouth under the station, so the whole landing
+//      is thrown away and done again from the top.
+//
+// Rolled again if the placement it gives is unusable: the station has to stand in the open,
+// which is a property of the answer and not something to search for.
+const CITY_CAST = 10; // rays cast to find somewhere to stand
+const CITY_WIDE = 1.4; // ...and how far past the median of them is a tunnel, not a wall
+const CITY_ARC = Math.PI / 180; // the swing is bracketed this finely before it is bisected
+const CITY_BISECT = 32; // halvings, which puts the far end on the wall to a millionth
+const CITY_TRIES = 200; // rolls before giving up
+const CITY_SPAN = 10; // rays swept between the two points, looking for a tunnel under them
+const CITY_OVER = 0.5; // ...and how much of the art's own height one may overshoot by
+const CITY_LANDS = 10; // landings tried before the last one is allowed through regardless
+const CITY_SET = 3; // how far clear of the wall the drawing is laid, so that whether a
+// baseline vertex counts as inside the rock is not left to rounding
+const CITY_SEAT = 20; // ...and how far it is then pushed back into the wall, once the
+// placement is settled on, so that it sits in the rock rather than touching it
+
+function cityStand(rock, room, foot, shape, rnd) {
+    const [uL, uR] = foot;
+    const span = uR - uL;
+    const near = (x, y) => Math.hypot(x - room.x, y - room.y) < room.r * 1.6;
+
+    // Only the rock hereabouts, each with a box round it. A city carves into thirty rings and
+    // asking every one of them whether it holds a point -- millions of times -- was once the
+    // whole cost of this: 85 million point-in-ring tests for an answer that is one ring's
+    // business.
+    const local = rock
+        .map((ring) => {
+            const xs = ring.map((q) => q[0]),
+                ys = ring.map((q) => q[1]);
+            return {
+                ring,
+                x0: Math.min(...xs),
+                x1: Math.max(...xs),
+                y0: Math.min(...ys),
+                y1: Math.max(...ys),
+            };
+        })
+        .filter(
+            (b) =>
+                b.x1 > room.x - room.r * 2 &&
+                b.x0 < room.x + room.r * 2 &&
+                b.y1 > room.y - room.r * 2 &&
+                b.y0 < room.y + room.r * 2,
         );
-        if (Math.hypot(g.ax + dx * t - x, g.ay + dy * t - y) < g.half)
-            return true;
+
+    const inRock = (x, y) =>
+        local.some(
+            (b) =>
+                x >= b.x0 &&
+                x <= b.x1 &&
+                y >= b.y0 &&
+                y <= b.y1 &&
+                pointInWall([b.ring], x, y),
+        );
+
+    const edges = [];
+    for (const { ring } of local)
+        for (let i = 0; i < ring.length; i++) {
+            const P = ring[i],
+                Q = ring[(i + 1) % ring.length];
+            if (near(P[0], P[1]) || near(Q[0], Q[1])) edges.push([P, Q]);
+        }
+
+    // 1. Where a ray from the query point first meets the wall. First, and not merely
+    // somewhere: that is what makes the hit a piece of wall the clearing can see.
+    const ray = (dx, dy) => {
+        let best = Infinity,
+            hit = null;
+        for (const [[ax, ay], [bx, by]] of edges) {
+            const sx = bx - ax,
+                sy = by - ay;
+            const den = dx * sy - dy * sx;
+            if (den === 0) continue;
+            const t = ((ax - room.x) * sy - (ay - room.y) * sx) / den;
+            const u = ((ax - room.x) * dy - (ay - room.y) * dx) / den;
+            if (t > 0 && u >= 0 && u <= 1 && t < best) {
+                best = t;
+                hit = [room.x + dx * t, room.y + dy * t];
+            }
+        }
+        return hit && { at: hit, d: best };
+    };
+
+    // 2. Ten of them, the far ones dropped, one of the rest taken.
+    const first = () => {
+        const hits = [];
+        for (let i = 0; i < CITY_CAST; i++) {
+            const a = rnd() * Math.PI * 2;
+            const h = ray(Math.cos(a), Math.sin(a));
+            if (h) hits.push(h);
+        }
+        if (!hits.length) return null;
+        const mid = hits.map((h) => h.d).sort((p, q) => p - q)[
+            hits.length >> 1
+        ];
+        const kept = hits.filter((h) => h.d <= mid * CITY_WIDE);
+        return kept[Math.floor(rnd() * kept.length)].at;
+    };
+
+    // 3. Swing the far end of the segment about it and bisect where it crosses the wall. A
+    // crossing is where the far end goes from standing in rock to standing in the open, so
+    // bracketing on that and halving lands it on the wall as exactly as asked. The sweep
+    // starts wherever the roll says, so it is not always the same crossing that is found.
+    const second = ([cx, cy]) => {
+        const far = (t) => [cx + Math.cos(t) * span, cy + Math.sin(t) * span];
+        const solid = (t) => {
+            const [x, y] = far(t);
+            return inRock(x, y);
+        };
+        const n = Math.ceil((Math.PI * 2) / CITY_ARC);
+        const from = rnd() * Math.PI * 2;
+        let was = solid(from);
+        for (let k = 1; k <= n; k++) {
+            const t = from + (k / n) * Math.PI * 2;
+            if (solid(t) !== was) {
+                let lo = from + ((k - 1) / n) * Math.PI * 2,
+                    hi = t;
+                for (let i = 0; i < CITY_BISECT; i++) {
+                    const m = (lo + hi) / 2;
+                    if (solid(m) === was) lo = m;
+                    else hi = m;
+                }
+                return far((lo + hi) / 2);
+            }
+        }
+        return null; // the segment never reaches the wall from here
+    };
+
+    // Which way the station faces is settled at the two ends, not at the middle: the ends are
+    // on the wall, so a step off one of them is rock one way and open the other, while the
+    // middle of a chord is nowhere near the wall it is a chord of.
+    const place = (A, C) => {
+        let px = (C[0] - A[0]) / span,
+            py = (C[1] - A[1]) / span;
+        let nx = py,
+            ny = -px;
+        const backing = (sx, sy) =>
+            [A, C].filter((P) =>
+                inRock(P[0] + sx * CITY_SET, P[1] + sy * CITY_SET),
+            ).length;
+        const front = backing(nx, ny),
+            behind = backing(-nx, -ny);
+        if (Math.max(front, behind) < 2) return null; // not both ends against rock
+        if (behind > front) {
+            [A, C] = [C, A];
+            ((px = -px), (py = -py), (nx = -nx), (ny = -ny));
+        }
+
+        // The station stands in the open or it does not stand: the baseline along its length,
+        // and every point of the drawing. The flattest wall in a warren is as likely to be the
+        // side of a tunnel as the side of a clearing, and a market laid on one ran its dome
+        // into the far wall a hundred units behind it.
+        for (let k = 0; k <= 24; k++) {
+            const x = A[0] + (C[0] - A[0]) * (k / 24) - nx * CITY_SET,
+                y = A[1] + (C[1] - A[1]) * (k / 24) - ny * CITY_SET;
+            if (inRock(x, y)) return null;
+        }
+        // The frame's own origin is the baseline's zero, which is not its middle: the market's
+        // plinth reaches 250 one way and its dish 326 the other.
+        const ox = A[0] + px * -uL - nx * CITY_SET,
+            oy = A[1] + py * -uL - ny * CITY_SET;
+        for (const [u, v] of shape)
+            if (inRock(ox + px * u - nx * v, oy + py * u - ny * v)) return null;
+
+        // Seated: once the placement is settled on, the whole thing is nudged straight into
+        // the wall, perpendicular to its own baseline. Everything above is checked against
+        // where it truly lands and this is applied after, so what it buries is deliberate --
+        // a station drawn to rest on a flat and standing on a curve otherwise meets it at one
+        // point and reads as balanced on it.
+        return {
+            ox: ox + nx * CITY_SEAT,
+            oy: oy + ny * CITY_SEAT,
+            a: Math.atan2(ny, nx),
+        };
+    };
+
+    // Two points on the wall say nothing about what is between them. A baseline can land with
+    // its ends on either side of a tunnel mouth, and the station then stands across the mouth
+    // with the passage running away underneath it. So sweep ten rays from the query point
+    // between the two landing points: each should meet the wall at about the baseline, and one
+    // that carries on well past it has gone down a tunnel.
+    const height = Math.max(...shape.map((q) => q[1]));
+    const spans = (A, C) => {
+        const from = Math.atan2(A[1] - room.y, A[0] - room.x);
+        const sweep = angleDiff(Math.atan2(C[1] - room.y, C[0] - room.x), from);
+        const sx = C[0] - A[0],
+            sy = C[1] - A[1];
+        for (let i = 0; i <= CITY_SPAN; i++) {
+            const a = from + (sweep * i) / CITY_SPAN;
+            const dx = Math.cos(a),
+                dy = Math.sin(a);
+            // A ray that finds no wall at all has gone straight out of the neighbourhood,
+            // which is a tunnel and not a near miss: reading it as "nothing to report" is what
+            // let a yard through standing across a mouth with its three middle rays blind.
+            const hit = ray(dx, dy);
+            if (!hit) return true;
+            // How far along this ray the baseline itself is.
+            const den = dx * sy - dy * sx;
+            if (den === 0) continue;
+            const t = ((A[0] - room.x) * sy - (A[1] - room.y) * sx) / den;
+            const u = ((A[0] - room.x) * dy - (A[1] - room.y) * dx) / den;
+            if (t <= 0 || u < 0 || u > 1) continue;
+            if (hit.d - t > height * CITY_OVER) return true;
+        }
+        return false;
+    };
+
+    const land = () => {
+        for (let t = 0; t < CITY_TRIES; t++) {
+            const A = first();
+            const C = A && second(A);
+            const got = C && place(A, C);
+            if (got) return { stand: got, A, C };
+        }
+        return null;
+    };
+
+    // Landed again from the top, with a fresh set of rays, if it came down over a tunnel.
+    let last = null;
+    for (let t = 0; t < CITY_LANDS; t++) {
+        const got = land();
+        if (!got) continue;
+        last = got.stand;
+        if (!spans(got.A, got.C)) return got.stand;
     }
-    return false;
+    return last || { ox: room.x, oy: room.y, a: 0 };
 }
 
-// Where a station stands on its hall's wall. The hall is cut into rock that is already
-// tunnelled, so its wall is not the circle it was drawn as: tunnels open into it and the
-// void runs on past them, and standing the art at a fixed bearing put it in mid-air in the
-// middle of a merged cavern. So the wall is found rather than assumed -- march out along
-// each bearing until rock starts, then take the stretch, as wide as the station itself,
-// where the furthest of those is nearest. That is the piece of the hall's own wall no
-// tunnel has opened. The art is laid on the deepest point of it, so none of the station is
-// buried and the rest of the wall stands a little proud of it, which is what "built against
-// the rock" looks like when the rock is not a drawn circle.
-const CITY_SPAN = 0.62; // half the angle a station takes up on its own wall
-
-function cityWall(plan, room) {
-    const N = 32;
-    const out = [];
-    for (let k = 0; k < N; k++) {
-        const a = (k / N) * Math.PI * 2;
-        let d = room.r * 0.7;
-        for (; d < room.r * 2.4; d += 30)
-            if (
-                !cityDug(
-                    plan,
-                    room.x + Math.cos(a) * d,
-                    room.y + Math.sin(a) * d,
-                )
-            )
-                break;
-        out.push(d);
-    }
-    const span = Math.round((CITY_SPAN / (Math.PI * 2)) * N);
-    let best = 0,
-        worst = Infinity;
-    for (let k = 0; k < N; k++) {
-        let far = 0;
-        for (let j = -span; j <= span; j++)
-            far = Math.max(far, out[(k + j + N) % N]);
-        if (far < worst) ((worst = far), (best = k));
-    }
-    return { a: (best / N) * Math.PI * 2, d: worst };
+// The whole layout, cut at the origin from one fixed stream. A set piece is one place, not a
+// family of them: the same warren stands wherever the cell landed, and where it landed is an
+// offset applied to the finished vertices. That is what lets it be cut at build time.
+const CITY_SEED = 0x5b3d21; // the stream Still Basin is dug from, and the whole of what
+// makes it the place it is. Change it and it is a different city.
+//
+// Held on to, because it now carves: matter, art and marks each ask for the layout and there
+// is only ever one of it, so carving it three times is three times the only slow thing here.
+let cityHeld = null;
+function cityPlan() {
+    return (cityHeld ??= cityCut());
 }
-
-// The whole layout, worked out from the cell's own stream, so matter, art and marks each ask
-// for it and get the same warren without anything being stored. It is worked out three times
-// in the life of a cell -- all three inside the one `depositCell` that lays the cell down --
-// and what it produces is persisted, so remembering it would save that twice, once, ever.
-function cityPlan(s) {
-    const rnd = siteRng(s);
+function cityCut() {
+    const s = { x: 0, y: 0 };
+    let v = CITY_SEED;
+    const rnd = () => {
+        v = (Math.imul(v, 1664525) + 1013904223) >>> 0;
+        return v / 4294967296;
+    };
 
     // The slab. It laps over its own cell except in a wedge at each mouth, where it stands
     // back far enough that nothing a neighbour grows can reach across the opening.
@@ -1089,17 +1315,29 @@ function cityPlan(s) {
         return d > CITY_HUB * 1.6 && d < full * 0.62;
     });
     while (rooms.length < CITY_ROOMS && far.length) {
-        let best = 0,
+        // The first two are halls, and a hall is wide enough to break the outside of the
+        // slab from a point an ordinary clearing sits at quite safely -- which would open a
+        // hole in the city's own surface, somewhere nobody dug.
+        const room = rooms.length < 2 ? CITY_HALL : CITY_ROOM;
+        let best = -1,
             score = -1;
         for (const [i, p] of far.entries()) {
+            const dx = p.x - s.x,
+                dy = p.y - s.y;
+            if (
+                Math.hypot(dx, dy) + room >
+                cityReach(Math.atan2(dy, dx)) * CITY_STAND
+            )
+                continue;
             const d =
                 rooms.length ?
                     Math.min(
                         ...rooms.map((q) => Math.hypot(p.x - q.x, p.y - q.y)),
                     )
-                :   Math.hypot(p.x - s.x, p.y - s.y);
+                :   Math.hypot(dx, dy);
             if (d > score) ((score = d), (best = i));
         }
+        if (best < 0) break; // nowhere left this one fits
         const p = far.splice(best, 1)[0];
         // The first two are the market and the yard -- furthest apart, so arriving at one
         // does not mean arriving at both. A hall has to hold a station drawn for the town's
@@ -1130,8 +1368,27 @@ function cityPlan(s) {
         market: rooms[0],
         yard: rooms[1],
     };
-    for (const r of [plan.market, plan.yard])
-        if (r) r.stand = cityWall(plan, r);
+    // Carve here, so that what a station is stood against is the rock as it will actually
+    // be: a clearing with a tunnel opening into it has no wall there, and nothing has to be
+    // told so.
+    plan.rock = carveWarren(
+        plan.ring,
+        [plan.hub, ...plan.rooms.map((r) => r.ring)],
+        plan.paths,
+    );
+    for (const [r, nm] of [
+        [plan.market, 'market'],
+        [plan.yard, 'yard'],
+    ])
+        if (r)
+            r.stand = cityStand(
+                plan.rock,
+                r,
+                CITY_SOLE[nm](),
+                CITY_SHAPE[nm](),
+                rnd,
+            );
+
     return plan;
 }
 
@@ -1208,13 +1465,8 @@ function carveWarren(outer, holes, paths) {
     return solid.map((poly) => poly[0]);
 }
 
-function cityMatter(s) {
-    const plan = cityPlan(s);
-    return carveWarren(
-        plan.ring,
-        [plan.hub, ...plan.rooms.map((r) => r.ring)],
-        plan.paths,
-    ).map((ring) => ({ ring, mat: 'block' }));
+function cityMatter() {
+    return cityPlan().rock.map((ring) => ({ ring, mat: 'block' }));
 }
 
 // ---- the warren biome ----
@@ -1385,24 +1637,13 @@ function warrenFrom(poly, s) {
 // have no idea which settlement they are being built in.
 // The station's frame sits a little inside the wall that was found for it, the way the
 // town's sits a little inside its cavern wall.
-const cityFace = (r) =>
-    faceFrame(
-        r.x + Math.cos(r.stand.a) * (r.stand.d - 20),
-        r.y + Math.sin(r.stand.a) * (r.stand.d - 20),
-        r.stand.a,
-    );
+const cityFace = (r) => faceFrame(r.stand.ox, r.stand.oy, r.stand.a);
 
-function cityArt(s) {
-    const plan = cityPlan(s);
+function cityArt() {
+    const plan = cityPlan();
     return [
-        {
-            key: `${siteKey(s)}:art:yard`,
-            lines: yardLines(cityFace(plan.yard)),
-        },
-        {
-            key: `${siteKey(s)}:art:market`,
-            lines: marketLines(cityFace(plan.market)),
-        },
+        { key: 'art:yard', lines: yardLines(cityFace(plan.yard)) },
+        { key: 'art:market', lines: marketLines(cityFace(plan.market)) },
     ];
 }
 
@@ -1410,13 +1651,13 @@ function cityArt(s) {
 // a conversation names no mark, so one foreman module serves every yard there will ever be.
 // Each stands off its own face by what it does in the town, so the marker is where the
 // station is rather than where the clearing happens to be centred.
-function cityMarks(s) {
-    const plan = cityPlan(s);
+function cityMarks() {
+    const plan = cityPlan();
     const yard = cityFace(plan.yard).inward(0, 280);
     const market = cityFace(plan.market).inward(0, 300);
     return [
         {
-            key: `${siteKey(s)}:market`,
+            key: 'market',
             kind: 'market',
             who: 'trader',
             talk: ['market', {}],
@@ -1431,7 +1672,7 @@ function cityMarks(s) {
             ],
         },
         {
-            key: `${siteKey(s)}:yard`,
+            key: 'yard',
             kind: 'refit',
             who: 'foreman',
             talk: ['yard', {}],
@@ -1449,7 +1690,99 @@ function cityMarks(s) {
 // A set piece may change what is inside its claim, but never the claim itself. Bump this
 // when its contents change and the cell lays itself out again in place, on a world that
 // already exists: the hexagon it took is permanent, everything within it is not.
-const SET_VERSION = { town: 9, city: 6 };
+const SET_VERSION = { town: 9, city: 33 };
+
+// ---- baked set pieces ----
+//
+// Cutting Still Basin takes six seconds: 180 bearings of pushing a station's floor against
+// the rock to find somewhere it sits, twice, and a warren's worth of polygon booleans under
+// that. None of it depends on anything a running world knows, so none of it belongs in a
+// tick. It is cut once into `setpieces/`, checked in, and shipped -- somebody hosting a
+// server stamps the vertices and never pays for the search.
+//
+// Beside the code and not beside the world: it is part of the program, the same as the
+// drawing it was cut from, and every world made by this build wants the same one.
+const BAKE_DIR = path.join(__dirname, 'setpieces');
+const BAKED = {
+    city: {
+        file: 'city.json',
+        version: () => SET_VERSION.city,
+        cut: () => ({
+            matter: cityMatter(),
+            art: cityArt(),
+            marks: cityMarks(),
+        }),
+    },
+};
+
+// Cut what is stale and leave the rest. A set piece whose version has not moved is read
+// back as it stands, which is the whole point of having cut it.
+function bakeSetPieces({ say = () => {} } = {}) {
+    fs.mkdirSync(BAKE_DIR, { recursive: true });
+    const out = {};
+    for (const [kind, set] of Object.entries(BAKED)) {
+        const at = path.join(BAKE_DIR, set.file);
+        const want = set.version();
+        let have = null;
+        try {
+            have = JSON.parse(fs.readFileSync(at, 'utf8'));
+        } catch {
+            have = null; // missing, or written by something that fell over mid-write
+        }
+        if (have && have.version === want) {
+            out[kind] = have;
+            continue;
+        }
+        say(
+            have ?
+                `${kind}: baked at version ${have.version}, this build wants ${want} -- cutting it again`
+            :   `${kind}: nothing baked -- cutting it`,
+        );
+        const t = Date.now();
+        const cut = { version: want, ...set.cut() };
+        fs.writeFileSync(at, JSON.stringify(cut));
+        say(`${kind}: cut in ${((Date.now() - t) / 1000).toFixed(1)}s`);
+        out[kind] = cut;
+    }
+    return out;
+}
+
+// Where the cell landed is an offset and nothing else, which is what makes one cut warren
+// serve every world. Keys are made here rather than baked, because a key names the instance
+// and the baked piece does not know which one it is about to become.
+function stampSetPiece(kind, s) {
+    const cut = SET_PIECES[kind];
+    const at = siteKey(s);
+    return {
+        matter: cut.matter.map((m) => ({
+            ...m,
+            ring: m.ring.map(([x, y]) => [
+                +(x + s.x).toFixed(1),
+                +(y + s.y).toFixed(1),
+            ]),
+        })),
+        art: cut.art.map((a) => ({
+            key: `${at}:${a.key}`,
+            lines: a.lines.map((l) =>
+                l.map(([x, y]) => [
+                    +(x + s.x).toFixed(1),
+                    +(y + s.y).toFixed(1),
+                ]),
+            ),
+        })),
+        marks: cut.marks.map((m) => ({
+            ...m,
+            key: `${at}:${m.key}`,
+            x: +(m.x + s.x).toFixed(1),
+            y: +(m.y + s.y).toFixed(1),
+        })),
+    };
+}
+
+// Cut before serving. In development the drawing changes under you and a stale set piece is
+// worse than a slow start; shipped, everything is already at version and this reads a file.
+const SET_PIECES = bakeSetPieces({ say: (m) => console.log(`bake: ${m}`) });
+if (cmdline.flags.bake) process.exit(0);
 
 const YARD_A = (-Math.PI * 3) / 4; // the yard, up and to the left
 const MARKET_A = -Math.PI / 2; // the market, on the north wall
@@ -2118,9 +2451,9 @@ function toUnits(ring, mat) {
 function generateCell(s) {
     if (s.kind === 'city')
         return {
-            matter: cityMatter(s),
-            art: cityArt(s),
-            marks: cityMarks(s),
+            ...stampSetPiece('city', s),
+            // Not baked: the warren is the same place everywhere, but what it is called is
+            // this world's to decide, the same as the town's is.
             place: { name: placeName(siteRng(s)) },
         };
     if (s.kind === 'town')

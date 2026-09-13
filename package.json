@@ -18,7 +18,8 @@
     "files": [
         "server.js",
         "public",
-        "conversations"
+        "conversations",
+        "setpieces"
     ],
     "engines": {
         "node": ">=20"
@@ -30,10 +31,11 @@
     "scripts": {
         "dev": "DEV=1 node --watch server.js",
         "lint": "eslint --max-warnings=0",
-        "prepublishOnly": "npm run lint && npm run prettier:check",
+        "prepublishOnly": "npm run bake && npm run lint && npm run prettier:check",
         "prettier": "prettier . --write",
         "prettier:check": "prettier . --check",
-        "start": "node server.js"
+        "start": "node server.js",
+        "bake": "node server.js --bake"
     },
     "dependencies": {
         "@shieldsbetter/pixel-portraits": "^0.1.0",
