@@ -303,6 +303,27 @@ function metricsText() {
         Object.entries(counts).map(([k, v]) => [lbl('of', k), v]),
     );
     one(
+        'ragtag_shadow_miss_total',
+        'counter',
+        'With SHADOW=1: rock-ticks found overlapping blocking matter with no impact booked. Zero is the only good answer.',
+        shadowMiss,
+    );
+    one(
+        'ragtag_rock_impacts_total',
+        'counter',
+        'Rocks broken up by reaching blocking matter.',
+        rockImpacts,
+    );
+    say(
+        'ragtag_rock_scans_total',
+        'counter',
+        'Rocks asked what they will do for the next second, and how many had any blocking matter on the way.',
+        [
+            [lbl('of', 'all'), rockScans],
+            [lbl('of', 'near_block'), rockNear],
+        ],
+    );
+    one(
         'ragtag_merge_cuts_total',
         'counter',
         'Differences the cut cache did not cover, where higher-ranked matter is taken out of lower.',
@@ -2931,6 +2952,14 @@ let mergedCache = new Map(); // which units were merged -> what they merged into
 let cutCache = new Map();
 // What the last merge had to get through, and how much of it the cache did not cover.
 // A rebuild that misses is paying polygon-clipping again, which is the dear half.
+// How often the world has turned a rock away. Counted because the alternative to counting
+// it is not noticing when it stops happening: a collision that silently never fires looks
+// exactly like a collision that got cheap.
+let shadowMiss = 0;
+let rockImpacts = 0,
+    rockScans = 0, // rocks asked what they are going to do
+    rockNear = 0; // ...and how many of those had any blocking matter on the way at all
+
 let mergeUnits = 0,
     mergeComps = 0,
     mergeMisses = 0,
@@ -3214,6 +3243,9 @@ function rebuildWalls() {
             });
         }
     });
+    // What a rock has to be tested against, and nothing else. A handful of boxes: `block`
+    // exists only where a set piece put it.
+    blockBoxes = [...wallsByKey.values()].filter((w) => w.mat === 'block');
     mergeUnits = ent.length;
     mergeComps = groups.size;
 }
@@ -4982,6 +5014,111 @@ function blockingHit(x, y, rad) {
     return null;
 }
 
+// ---- a rock is a line, so it can be asked about once instead of thirty times a second ----
+//
+// Nothing ever bends a rock off its course. Its velocity is set when it is born and no
+// beam, hit or order changes it afterwards -- a break makes new rocks rather than steering
+// the old one -- which is the same fact the wire protocol leans on when it describes a
+// rock once and never mentions it again.
+//
+// So "does this rock reach blocking matter" has the same answer for a whole second as it
+// has for one tick, and asking it every tick was the dearest thing the server did:
+// measured at 35.7% of all busy CPU, nearly all of it inside pointInWall and closestOnWall
+// walking rings the rock was nowhere near.
+//
+// Each rock is now asked once a second, and answers with a time: either nothing within the
+// next second, or you meet something at t. Only the wall can make that answer wrong, and
+// only for as long as the answer stands -- a second of staleness, which a game can carry
+// and a critical simulation could not.
+const ROCK_SCAN = 1; // seconds a rock's decision is good for
+
+// Blocking matter is rare and stands where settlements are, so most rocks are dismissed
+// against a handful of boxes without a ring being walked at all. Rebuilt with the walls,
+// since that is the only time it can change.
+let blockBoxes = [];
+
+// When the rock first touches the edge `p -> q` on its way along `a -> a + d`, or null. A
+// rock is a disc, not a point, and the difference is the whole of what this has to get
+// right: testing where its CENTRE crosses an edge misses every rock that slides past
+// within its own radius without ever crossing, and those break today. Measured with the
+// old test running alongside: 279 rock-ticks overlapping matter with no impact booked.
+//
+// So it is a ray against the edge grown by the radius -- a capsule: the flat side, where
+// the perpendicular distance reaches the radius with the foot still on the edge, and the
+// round ends, where the distance to a corner does. Already-touching is not handled here;
+// the scan settles that before it asks.
+function touchAt(ax, ay, dx, dy, rad, p, q) {
+    const ex = q[0] - p[0],
+        ey = q[1] - p[1];
+    const len2 = ex * ex + ey * ey;
+    let best = Infinity;
+    if (len2 > 0) {
+        const n = Math.sqrt(len2);
+        const nx = -ey / n,
+            ny = ex / n;
+        const c0 = (ax - p[0]) * nx + (ay - p[1]) * ny; // signed distance now
+        const cv = dx * nx + dy * ny; // ...and how fast it is closing
+        if (cv)
+            for (const face of [rad, -rad]) {
+                const t = (face - c0) / cv;
+                if (t < 0 || t > 1 || t >= best) continue;
+                const u =
+                    ((ax + dx * t - p[0]) * ex + (ay + dy * t - p[1]) * ey) /
+                    len2;
+                if (u >= 0 && u <= 1) best = t;
+            }
+    }
+    const aa = dx * dx + dy * dy;
+    if (aa)
+        for (const c of [p, q]) {
+            const fx = ax - c[0],
+                fy = ay - c[1];
+            const bb = 2 * (fx * dx + fy * dy);
+            const cc = fx * fx + fy * fy - rad * rad;
+            const disc = bb * bb - 4 * aa * cc;
+            if (disc < 0) continue;
+            const root = Math.sqrt(disc);
+            for (const t of [(-bb - root) / (2 * aa), (-bb + root) / (2 * aa)])
+                if (t >= 0 && t <= 1 && t < best) best = t;
+        }
+    return best === Infinity ? null : best;
+}
+
+// Decide what this rock does for the next second, and write the answer on it.
+function scanRock(r, now) {
+    rockScans++;
+    r.scanAt = now + ROCK_SCAN;
+    r.hitAt = null;
+    const dx = r.vx * ROCK_SCAN,
+        dy = r.vy * ROCK_SCAN;
+    const lox = Math.min(r.x, r.x + dx) - r.r,
+        hix = Math.max(r.x, r.x + dx) + r.r,
+        loy = Math.min(r.y, r.y + dy) - r.r,
+        hiy = Math.max(r.y, r.y + dy) + r.r;
+    let near = null;
+    for (const w of blockBoxes)
+        if (w.x0 <= hix && lox <= w.x1 && w.y0 <= hiy && loy <= w.y1)
+            (near ||= []).push(w);
+    if (!near) return; // the whole point: almost every rock, almost always
+    rockNear++;
+
+    // Already touching -- a piece thrown from a break, or a wall laid around it. Asked of
+    // the wall itself rather than worked out again, and cheap here because this is the few
+    // per cent of rocks that have any matter on the way at all.
+    if (blockingHit(r.x, r.y, r.r)) {
+        r.hitAt = now;
+        return;
+    }
+    let first = Infinity;
+    for (const w of near)
+        for (const ring of w.rings)
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const t = touchAt(r.x, r.y, dx, dy, r.r, ring[j], ring[i]);
+                if (t !== null && t < first) first = t;
+            }
+    if (first < Infinity) r.hitAt = now + first * ROCK_SCAN;
+}
+
 // A wall is a list of rings: the first is its outline, any others are holes punched
 // through it. Crossing-count over every ring at once gives the even-odd answer, which
 // puts a point inside a hole correctly outside the wall.
@@ -6181,7 +6318,14 @@ function tractor(s) {
     drop(s.beams);
 }
 
+// The clock a scheduled impact is booked against. Advanced by the simulation's own dt and
+// not by the wall clock, because a tick that ran long advanced the world by less than the
+// time it took -- an event booked against real time would fire early by exactly the amount
+// the clamp threw away.
+let worldClock = 0;
+
 function step(dt) {
+    worldClock += dt;
     manageChunks();
     // Take a snapshot: a spawn can load more chunks and queue more rolls, which wait for
     // the next tick rather than extending this one.
@@ -6242,14 +6386,36 @@ function step(dt) {
         if (r.grace > 0) r.grace -= dt;
     }
     // Rocks against blocking matter. A rock that reaches it comes apart exactly as if it had
-    // been shot, and its pieces are thrown back off the surface.
+    // been shot, and its pieces are thrown back off the surface. What has changed is when
+    // the question is asked: the scan decides once a second whether there is an impact
+    // coming and when, and the wall itself is only consulted at the moment it says.
+    if (wallsDirty) rebuildWalls(); // scanning against a stale box list is scanning a lie
     for (let k = rocks.length - 1; k >= 0; k--) {
         const r = rocks[k];
+        if (r.scanAt === undefined || worldClock >= r.scanAt)
+            scanRock(r, worldClock);
+        if (r.hitAt === null || worldClock < r.hitAt) continue;
+        // Where it is and which way the face points is asked of the wall, exactly as it
+        // always was -- once per impact now rather than once per rock per tick. A null here
+        // is a graze the segment test called a crossing, or a wall that has moved since:
+        // either way it stands until the next scan says otherwise.
         const off = blockingHit(r.x, r.y, r.r);
-        if (!off) continue;
+        if (!off) {
+            r.hitAt = null;
+            continue;
+        }
         rocks.splice(k, 1);
+        rockImpacts++;
         shatter(r, off);
     }
+    // SHADOW=1 asks the old question of every rock left standing: is anything overlapping
+    // blocking matter with no impact booked? It costs exactly what the scan was built to
+    // avoid, so it is off, and it is kept because a cached prediction needs a way to be
+    // checked against the thing it predicts -- it is what caught the first version testing
+    // where a rock's centre crossed an edge rather than where its surface did, and it is
+    // what to run the day walls become destructible.
+    if (process.env.SHADOW)
+        for (const r of rocks) if (blockingHit(r.x, r.y, r.r)) shadowMiss++;
     for (let i = ore.length - 1; i >= 0; i--) {
         const o = ore[i];
         o.x += o.vx * dt;

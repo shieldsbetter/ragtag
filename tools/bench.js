@@ -121,6 +121,11 @@ try {
         rebuilds,
         unions: d('ragtag_merge_unions_total'),
         differences: d('ragtag_merge_cuts_total'),
+        rockImpacts: d('ragtag_rock_impacts_total'),
+        shadowMisses: d('ragtag_shadow_miss_total'), // only counted under SHADOW=1
+
+        rockScans: d('ragtag_rock_scans_total{of="all"}'),
+        rockScansNearBlock: d('ragtag_rock_scans_total{of="near_block"}'),
         walls: after['ragtag_world{of="walls"}'],
         chunks: after['ragtag_world{of="chunks"}'],
     };
