@@ -896,7 +896,7 @@ const BIOMES = {
     // it reading as a rock field -- 46% of the ground is still rock -- while opening it up.
     // Measured over 60 cells at the median 3,672 width: a 200-wide lane crosses 92% of them,
     // against 0% before.
-    dense: { density: 0.95, base: 90, spread: 220 },
+    dense: { density: 0.8, base: 60, spread: 120 },
     // A biome may bring its own generator instead of a density: scattering blobs is one way
     // to fill a cell, not the only one, and the warren is not a field of anything. It may
     // also decline a cell outright -- see `rollBiome`.
@@ -1949,7 +1949,7 @@ function cityMarks() {
 // not named here is version 1; add it the day you want to move it. What this takes back is
 // everything the cell deposited, which will need an `edited` flag before walls can be blown
 // open -- the same debt chunk regeneration already owes.
-const SET_VERSION = { town: 9, city: 33 };
+const SET_VERSION = { town: 9, city: 33, dense: 2 };
 
 // ---- baked set pieces ----
 //
